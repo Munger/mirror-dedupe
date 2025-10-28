@@ -1,5 +1,8 @@
 config/mirror-dedupe.conf etc/mirror-dedupe/
-config/repos.d/*.example etc/mirror-dedupe/repos.d/
+config/repos-available/*.conf etc/mirror-dedupe/repos-available/
+config/repos-available/README.md etc/mirror-dedupe/repos-available/
+config/repos-enabled/.gitkeep etc/mirror-dedupe/repos-enabled/
 systemd/mirror-dedupe.service lib/systemd/system/
 systemd/mirror-dedupe.timer lib/systemd/system/
 debian/mirror-dedupe.1 usr/share/man/man1/
+debian/mirror-dedupe-scan.1 usr/share/man/man1/

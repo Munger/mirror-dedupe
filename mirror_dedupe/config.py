@@ -19,7 +19,7 @@ from pathlib import Path
 def load_config(config_dir: str) -> dict:
     """Load mirror configuration from config directory
     
-    Loads main config and all repo definitions from repos.d/
+    Loads main config and all repo definitions from repos-enabled/
     """
     try:
         # Load main config
@@ -27,8 +27,8 @@ def load_config(config_dir: str) -> dict:
         with open(main_config_path, 'r') as f:
             config = yaml.safe_load(f) or {}
         
-        # Load repo definitions from repos.d/
-        repos_dir = Path(config_dir) / 'repos.d'
+        # Load repo definitions from repos-enabled/
+        repos_dir = Path(config_dir) / 'repos-enabled'
         mirrors = []
         
         if repos_dir.exists() and repos_dir.is_dir():

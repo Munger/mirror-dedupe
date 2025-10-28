@@ -24,8 +24,8 @@ Ubuntu/Debian mirror synchronisation with intelligent deduplication using hardli
 Download the latest `.deb` package from [GitHub Releases](https://github.com/munger/mirror-dedupe/releases):
 
 ```bash
-wget https://github.com/munger/mirror-dedupe/releases/download/v0.1.0/mirror-dedupe_0.1.0-1_all.deb
-sudo dpkg -i mirror-dedupe_0.1.0-1_all.deb
+wget https://github.com/munger/mirror-dedupe/releases/download/v0.2.0/mirror-dedupe_0.2.0-1_all.deb
+sudo dpkg -i mirror-dedupe_0.2.0-1_all.deb
 ```
 
 This includes systemd integration, man pages, and proper package management.
@@ -55,9 +55,33 @@ sudo ./install.sh
 Configuration files are located in `/etc/mirror-dedupe/`:
 
 - `mirror-dedupe.conf` - Global settings
-- `repos.d/*.conf` - Individual repository definitions
+- `repos-available/` - Available repository configurations
+- `repos-enabled/` - Enabled repositories (symlinks to repos-available)
 
-See the `config/` directory for examples.
+### Adding a Repository
+
+Use the scanner to auto-generate configuration:
+
+```bash
+mirror-dedupe-scan --name grafana --dest grafana https://apt.grafana.com
+```
+
+Then enable it:
+
+```bash
+cd /etc/mirror-dedupe/repos-enabled
+ln -s ../repos-available/grafana.conf .
+```
+
+### Pre-configured Repositories
+
+The package includes pre-configured repositories:
+- ubuntu - Ubuntu main archive
+- ubuntu-ports - Ubuntu ARM/RISC-V ports
+- grafana - Grafana packages
+- influxdb - InfluxDB packages
+- docker - Docker packages
+- kubernetes - Kubernetes packages
 
 ## Usage
 

@@ -1,0 +1,104 @@
+.TH MIRROR-DEDUPE-SCAN 1 "October 2025" "mirror-dedupe 0.2.0" "User Commands"
+.SH NAME
+mirror-dedupe-scan \- scan and generate repository configuration for mirror-dedupe
+.SH SYNOPSIS
+.B mirror-dedupe-scan
+.RB [ \-\-name
+.IR NAME ]
+.RB [ \-\-dest
+.IR DEST ]
+.RB [ \-\-config-dir
+.IR DIR ]
+.IR UPSTREAM-URL
+.SH DESCRIPTION
+.B mirror-dedupe-scan
+automatically scans a Debian/Ubuntu repository and generates a configuration file for use with mirror-dedupe.
+It detects the sync method (rsync or HTTPS), available architectures, components, distributions, and GPG key locations.
+.PP
+The generated configuration is saved to
+.I /etc/mirror-dedupe/repos-available/
+and can be enabled by creating a symlink in
+.IR /etc/mirror-dedupe/repos-enabled/ .
+.SH OPTIONS
+.TP
+.BR \-\-name " " \fINAME\fR
+Repository name (required). Used for the configuration filename.
+.TP
+.BR \-\-dest " " \fIDEST\fR
+Destination path relative to repo_root (required).
+.TP
+.BR \-\-config-dir " " \fIDIR\fR
+Configuration directory (default: /etc/mirror-dedupe).
+.TP
+.IR UPSTREAM-URL
+URL of the upstream repository to scan.
+.SH EXAMPLES
+Scan the Ubuntu archive:
+.PP
+.nf
+.RS
+mirror-dedupe-scan --name ubuntu --dest ubuntu/main \\
+    http://archive.ubuntu.com/ubuntu
+.RE
+.fi
+.PP
+Scan the Grafana repository:
+.PP
+.nf
+.RS
+mirror-dedupe-scan --name grafana --dest grafana \\
+    https://apt.grafana.com
+.RE
+.fi
+.PP
+Scan Docker repository:
+.PP
+.nf
+.RS
+mirror-dedupe-scan --name docker --dest docker \\
+    https://download.docker.com/linux/ubuntu
+.RE
+.fi
+.SH AUTO-DETECTION
+The scanner automatically detects:
+.TP
+.B Sync method
+Tests if rsync is available, otherwise uses HTTPS
+.TP
+.B Architectures
+Parsed from the Release file
+.TP
+.B Components
+Parsed from the Release file
+.TP
+.B Distributions
+Discovered by listing the dists/ directory
+.TP
+.B GPG keys
+Checks common GPG key locations
+.SH ENABLING A REPOSITORY
+After scanning, enable the repository:
+.PP
+.nf
+.RS
+cd /etc/mirror-dedupe/repos-enabled
+ln -s ../repos-available/NAME.conf .
+.RE
+.fi
+.SH FILES
+.TP
+.I /etc/mirror-dedupe/repos-available/
+Directory containing available repository configurations
+.TP
+.I /etc/mirror-dedupe/repos-enabled/
+Directory containing enabled repository configurations (symlinks)
+.SH SEE ALSO
+.BR mirror-dedupe (1)
+.SH AUTHOR
+Copyright (c) 2025 Tim Hosking
+.br
+Email: tim@mungerware.com
+.br
+Website: https://github.com/munger
+.br
+Licence: MIT

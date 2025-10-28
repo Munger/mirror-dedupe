@@ -7,22 +7,29 @@ Website: https://github.com/munger
 Licence: MIT
 -->
 
-Place your repository configuration files here. Each file should be named `<name>.conf`.
+## Available Repository Configurations
 
-## Example
+This directory contains pre-configured repository definitions.
 
-Copy `ubuntu.conf.example` to `ubuntu.conf` and customise:
+### Enabling a Repository
+
+Create a symlink in `/etc/mirror-dedupe/repos-enabled/`:
 
 ```bash
-cp ubuntu.conf.example ubuntu.conf
+ln -s /etc/mirror-dedupe/repos-available/ubuntu.conf /etc/mirror-dedupe/repos-enabled/
 ```
 
-Then edit `ubuntu.conf` to match your requirements:
-- Change `upstream` URL if needed
-- Adjust `dest` path (relative to `repo_root`)
-- Select architectures to mirror
-- Choose components
-- Specify distributions
+### Disabling a Repository
+
+Remove the symlink:
+
+```bash
+rm /etc/mirror-dedupe/repos-enabled/ubuntu.conf
+```
+
+### Customizing
+
+You can edit the configurations in this directory or create your own `.conf` files.
 
 ## Configuration Format
 
