@@ -387,17 +387,17 @@ def process_files(hash_to_files, unique_files, config, dry_run):
                         success = True
                         break
                     else:
-                        print(f"  ✗ Hash mismatch after download (attempt {attempt+1}/{max_retries}): {first_path}", flush=True)
+                        print(f"  [FAIL] Hash mismatch after download (attempt {attempt+1}/{max_retries}): {first_path}", flush=True)
                         try:
                             os.remove(dest_path)
                         except:
                             pass
                 else:
                     if attempt < max_retries - 1:
-                        print(f"  ⚠ Download failed (attempt {attempt+1}/{max_retries}), retrying: {first_path}", flush=True)
+                        print(f"  [WARN] Download failed (attempt {attempt+1}/{max_retries}), retrying: {first_path}", flush=True)
             
             if not success:
-                print(f"  ✗ Download failed after {max_retries} attempts: {first_path}", flush=True)
+                print(f"  [FAIL] Download failed after {max_retries} attempts: {first_path}", flush=True)
                 with processed_lock:
                     processed_count += 1
                 return

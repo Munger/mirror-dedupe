@@ -36,7 +36,7 @@ def download_with_curl(url: str, dest_path: str, timeout: int = 300, progress_in
     with utils.download_lock:
         utils.active_downloads += 1
         current_active = utils.active_downloads
-    print(f"  ⬇ Downloading: {filename} ({current_active} active){progress_info}", flush=True)
+    print(f"  -> Downloading: {filename} ({current_active} active){progress_info}", flush=True)
     
     try:
         # -C - enables automatic resume of partial downloads
