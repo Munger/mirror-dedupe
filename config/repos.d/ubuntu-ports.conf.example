@@ -1,0 +1,23 @@
+# Ubuntu ARM/RISC-V ports mirror example
+# Copy this file to ubuntu-ports.conf and customise
+
+name: ubuntu-ports
+upstream: http://ports.ubuntu.com/ubuntu-ports
+dest: ubuntu/ubuntu-ports
+sync_method: rsync
+gpg_key_url: http://ports.ubuntu.com/ubuntu-ports/project/ubuntu-archive-keyring.gpg
+gpg_key_path: project/ubuntu-archive-keyring.gpg
+architectures:
+  - arm64
+  - armhf
+  - ppc64el
+  - riscv64
+  - s390x
+components:
+  - main
+  - restricted
+  - universe
+  - multiverse
+distributions:
+  - noble
+# Each distribution auto-expands to include -updates, -security, -backports, -proposed

@@ -1,0 +1,9 @@
+mirror-dedupe (0.1.0-1) noble; urgency=medium
+
+  * Initial release
+  * Mirror synchronisation with intelligent deduplication
+  * Support for multiple mirrors with global deduplication
+  * Configurable via YAML files
+  * Systemd timer support
+
+ -- Tim Hosking <tim@mungerware.com>  Mon, 28 Oct 2025 19:33:00 +0000

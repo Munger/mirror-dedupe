@@ -1,0 +1,17 @@
+[Unit]
+Description=Run Ubuntu Mirror Deduplication Sync
+Requires=mirror-dedupe.service
+
+[Timer]
+# Run daily at 3 AM
+OnCalendar=daily
+OnCalendar=*-*-* 03:00:00
+
+# If system was off, run 15 minutes after boot
+Persistent=true
+
+# Add randomized delay of 0-30 minutes to avoid peak load times
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target
