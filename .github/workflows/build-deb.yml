@@ -30,7 +30,7 @@ jobs:
       run: dpkg-buildpackage -us -uc -b
     
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: debian-package
         path: ../mirror-dedupe_*.deb
