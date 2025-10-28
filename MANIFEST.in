@@ -1,7 +1,5 @@
 include README.md
-include LICENSE
-include REFACTORING.md
-recursive-include config *.conf *.example
+recursive-include config *.conf *.md
 recursive-include systemd *.service *.timer
-recursive-include debian mirror-dedupe.1
+recursive-include debian *.1
 recursive-include nginx *.conf *.html *.css
