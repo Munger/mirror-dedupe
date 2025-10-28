@@ -1,0 +1,66 @@
+/*  =====================================================================
+    mirror-style.css : Ubuntu mirror synchronisation with global deduplication
+    
+    Copyright (c) 2025 Tim Hosking
+    Email: tim@mungerware.com
+    Website: https://github.com/munger
+    Licence: MIT
+    ===================================================================== */
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background-color: #f0f2f5;
+    color: #333;
+    margin: 2em;
+}
+
+h1 {
+    color: #005a9c;
+    border-bottom: 2px solid #ddd;
+    padding-bottom: 0.5em;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    background-color: #fff;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+th, td {
+    padding: 12px 15px;
+    text-align: left;
+    border-bottom: 1px solid #ddd;
+}
+
+th {
+    background-color: #e9ecef;
+    font-weight: bold;
+}
+
+tr:hover {
+    background-color: #f9f9f9;
+}
+
+a {
+    color: #007bff;
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+.parent {
+    font-weight: bold;
+    color: #666;
+}
+
+#footer {
+    margin-top: 2em;
+    font-size: 0.8em;
+    color: #999;
+    text-align: center;
+}

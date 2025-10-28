@@ -1,0 +1,14 @@
+[Unit]
+Description=Mirror Deduplication Sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/bin/mirror-dedupe /etc/mirror-dedupe
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

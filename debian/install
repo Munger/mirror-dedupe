@@ -1,0 +1,5 @@
+config/mirror-dedupe.conf etc/mirror-dedupe/
+config/repos.d/*.example etc/mirror-dedupe/repos.d/
+systemd/mirror-dedupe.service lib/systemd/system/
+systemd/mirror-dedupe.timer lib/systemd/system/
+debian/mirror-dedupe.1 usr/share/man/man1/

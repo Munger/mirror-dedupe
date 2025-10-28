@@ -1,0 +1,44 @@
+#
+# build-deb.yml : Ubuntu mirror synchronisation with global deduplication
+#
+# Copyright (c) 2025 Tim Hosking
+# Email: tim@mungerware.com
+# Website: https://github.com/munger
+# Licence: MIT
+#
+
+name: Build Debian Package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-deb:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y debhelper dh-python python3-all python3-setuptools python3-yaml
+    
+    - name: Build Debian package
+      run: dpkg-buildpackage -us -uc -b
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: debian-package
+        path: ../mirror-dedupe_*.deb
+    
+    - name: Upload to release
+      if: github.event_name == 'release'
+      uses: softprops/action-gh-release@v1
+      with:
+        files: ../mirror-dedupe_*.deb
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

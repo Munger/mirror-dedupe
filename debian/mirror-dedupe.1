@@ -1,0 +1,171 @@
+.TH MIRROR-DEDUPE 1 "October 2025" "mirror-dedupe 0.1.0" "User Commands"
+.SH NAME
+mirror-dedupe \- Ubuntu mirror synchronisation with global deduplication
+.SH SYNOPSIS
+.B mirror-dedupe
+[\fB\-h\fR]
+[\fB\-\-dry\-run\fR]
+[\fB\-\-mirror\fR \fIMIRROR\fR]
+[\fB\-\-dedupe\-only\fR]
+[\fIconfig_dir\fR]
+.SH DESCRIPTION
+.B mirror-dedupe
+synchronises Ubuntu package repositories and performs global deduplication
+across multiple mirrors using hardlinks. This significantly reduces disk space
+usage when hosting multiple Ubuntu mirrors or architectures.
+.PP
+The tool operates in three modes:
+.IP "1." 4
+.B Orchestrator mode
+(default): Spawns subprocesses for each configured mirror, then performs
+global deduplication across all mirrors.
+.IP "2." 4
+.B Single mirror mode
+(\fB\-\-mirror\fR): Processes only the specified mirror.
+.IP "3." 4
+.B Dedupe-only mode
+(\fB\-\-dedupe\-only\fR): Skips mirror synchronisation and only performs
+deduplication.
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Show help message and exit.
+.TP
+.BR \-\-dry\-run
+Show what would be done without actually making any changes.
+.TP
+.BR \-\-mirror " " \fIMIRROR\fR
+Process only the specified mirror by name. Used internally by the orchestrator
+to spawn subprocesses for each mirror.
+.TP
+.BR \-\-dedupe\-only
+Only run the deduplication phase, skipping mirror synchronisation.
+.TP
+.I config_dir
+Path to configuration directory. Default: \fI/etc/mirror-dedupe\fR
+.SH CONFIGURATION
+Configuration files are located in \fI/etc/mirror-dedupe/\fR:
+.TP
+.I mirror-dedupe.conf
+Main configuration file containing global settings such as buffer size,
+parallel downloads, and curl timeout.
+.TP
+.I repos.d/*.conf
+Individual mirror configuration files. Each file defines a repository mirror
+with settings including:
+.RS
+.TP
+.B name
+Mirror identifier
+.TP
+.B upstream
+Source repository URL
+.TP
+.B dest
+Local destination path (relative to repo_root)
+.TP
+.B sync_method
+Synchronisation method (rsync or https)
+.TP
+.B architectures
+List of architectures to mirror (e.g., amd64, arm64)
+.TP
+.B components
+Repository components (e.g., main, universe, multiverse)
+.TP
+.B distributions
+Ubuntu releases to mirror (e.g., noble, jammy)
+.TP
+.B gpg_key_url
+URL to repository GPG key (optional)
+.RE
+.SH EXAMPLES
+.TP
+Run full synchronisation and deduplication:
+.B mirror-dedupe
+.TP
+Dry run to see what would be changed:
+.B mirror-dedupe \-\-dry\-run
+.TP
+Process only the 'ubuntu' mirror:
+.B mirror-dedupe \-\-mirror ubuntu
+.TP
+Only perform deduplication (skip sync):
+.B mirror-dedupe \-\-dedupe\-only
+.TP
+Use custom configuration directory:
+.B mirror-dedupe /path/to/config
+.SH SYSTEMD INTEGRATION
+The package includes systemd timer and service units:
+.TP
+.B mirror-dedupe.timer
+Scheduled timer that runs the sync daily at a randomised time between
+00:00-06:00 UTC.
+.TP
+.B mirror-dedupe.service
+Service unit that executes the mirror synchronisation and deduplication.
+.PP
+To check timer status:
+.RS
+.B systemctl status mirror-dedupe.timer
+.RE
+.PP
+To manually trigger a sync:
+.RS
+.B systemctl start mirror-dedupe.service
+.RE
+.PP
+To view logs:
+.RS
+.B journalctl -u mirror-dedupe.service
+.RE
+.SH FILES
+.TP
+.I /etc/mirror-dedupe/mirror-dedupe.conf
+Main configuration file
+.TP
+.I /etc/mirror-dedupe/repos.d/
+Directory containing individual mirror configurations
+.TP
+.I /srv/mirror/repos/
+Default base directory for mirrored repositories
+.TP
+.I /var/run/mirror_dedupe.*.pid
+Lock files to prevent concurrent processing of the same mirror
+.TP
+.I /usr/lib/systemd/system/mirror-dedupe.service
+Systemd service unit
+.TP
+.I /usr/lib/systemd/system/mirror-dedupe.timer
+Systemd timer unit
+.SH DEDUPLICATION
+The tool performs global deduplication by:
+.IP 1. 3
+Collecting all package files across all configured mirrors
+.IP 2. 3
+Grouping files by SHA256 hash
+.IP 3. 3
+Downloading the first occurrence of each unique file
+.IP 4. 3
+Creating hardlinks for duplicate files (same hash, different paths)
+.PP
+This approach significantly reduces disk usage when hosting multiple mirrors
+or architectures, as identical packages are stored only once.
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+Error occurred during synchronisation or deduplication
+.SH AUTHOR
+Written by Tim Hosking.
+.SH COPYRIGHT
+Copyright 2025 Tim Hosking.
+.br
+Licence: MIT
+.SH SEE ALSO
+.BR curl (1),
+.BR rsync (1),
+.BR systemctl (1),
+.BR journalctl (1)

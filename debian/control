@@ -1,0 +1,28 @@
+Source: mirror-dedupe
+Section: admin
+Priority: optional
+Maintainer: Tim Hosking <tim@mungerware.com>
+Build-Depends: debhelper-compat (= 13),
+               dh-python,
+               python3-all,
+               python3-setuptools,
+               python3-yaml
+Standards-Version: 4.6.0
+Homepage: https://github.com/munger/mirror-dedupe
+
+Package: mirror-dedupe
+Architecture: all
+Depends: ${python3:Depends},
+         ${misc:Depends},
+         python3-yaml,
+         curl,
+         rsync
+Description: Mirror synchronisation with intelligent deduplication
+ Downloads from upstream and hardlinks duplicate files (same SHA256 hash)
+ to save bandwidth and disk space. Supports multiple mirrors with global
+ deduplication across all mirrors.
+ .
+ Features:
+  - Uses curl for duplicate files, rsync for unique files and metadata
+  - Configurable via YAML files
+  - Systemd timer support for automated synchronisation
