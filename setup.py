@@ -19,7 +19,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="mirror-dedupe",
-    version="0.2.0",
+    version="0.2.1",
     description="Ubuntu mirror synchronisation with global deduplication",
     long_description=long_description,
     long_description_content_type="text/markdown",
