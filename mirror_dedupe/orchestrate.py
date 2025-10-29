@@ -343,9 +343,11 @@ def process_files(hash_to_files, unique_files, config, dry_run):
         
         # Check if already exists with correct size (trust upstream hash)
         file_downloaded = False
+        file_exists = False
         try:
             stat = os.stat(dest_path)
             if stat.st_size == expected_size:
+                file_exists = True
                 with counter_lock:
                     skipped += 1
             else:
@@ -370,9 +372,7 @@ def process_files(hash_to_files, unique_files, config, dry_run):
                 
                 if not success:
                     print(f"  [ERROR] Download failed after {max_retries} attempts: {first_path}", flush=True)
-                    with processed_lock:
-                        processed_count += 1
-                    return
+                    # Don't return - still try to hardlink if file exists elsewhere
         except:
             # File doesn't exist, download it
             url = f"{first_info['upstream']}/{first_path}"
