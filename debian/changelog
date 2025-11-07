@@ -1,3 +1,10 @@
+mirror-dedupe (0.2.3-1) noble; urgency=medium
+
+  * Fix: Add debhelper override to prevent service auto-start during installation
+  * Use --no-start flag in dh_installsystemd to prevent dpkg hangs
+
+ -- Tim Hosking <tim@mungerware.com>  Fri, 08 Nov 2025 21:16:00 +0000
+
 mirror-dedupe (0.2.2-1) noble; urgency=medium
 
   * Fix: Remove [Install] section from service to prevent auto-start during package installation
