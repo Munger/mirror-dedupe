@@ -12,14 +12,24 @@ Licence: MIT
 
 from setuptools import setup, find_packages
 import os
+import re
 
 # Read long description from README
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
+# Extract version from debian/changelog
+def get_version():
+    with open("debian/changelog", "r") as f:
+        first_line = f.readline()
+        match = re.match(r'^mirror-dedupe \(([^-]+)-\d+\)', first_line)
+        if match:
+            return match.group(1)
+    return "0.0.0"
+
 setup(
     name="mirror-dedupe",
-    version="0.2.1",
+    version=get_version(),
     description="Ubuntu mirror synchronisation with global deduplication",
     long_description=long_description,
     long_description_content_type="text/markdown",
