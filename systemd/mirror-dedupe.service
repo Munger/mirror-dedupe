@@ -9,6 +9,3 @@ User=root
 ExecStart=/usr/bin/mirror-dedupe /etc/mirror-dedupe
 StandardOutput=journal
 StandardError=journal
-
-[Install]
-WantedBy=multi-user.target
