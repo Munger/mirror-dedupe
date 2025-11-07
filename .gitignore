@@ -50,3 +50,4 @@ debian/.debhelper/
 *.deb
 *.buildinfo
 *.changes
+debs/
