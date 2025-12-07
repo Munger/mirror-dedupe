@@ -27,7 +27,7 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential debhelper dh-python python3-all python3-setuptools python3-yaml
+        sudo apt-get install -y build-essential debhelper dh-python python3-all python3-setuptools python3-yaml python3-build
     
     - name: Build Debian package
       run: dpkg-buildpackage -us -uc -b
