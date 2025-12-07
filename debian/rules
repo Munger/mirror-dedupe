@@ -3,12 +3,6 @@
 %:
 	dh $@ --with python3 --buildsystem=pybuild
 
-override_dh_auto_build:
-	pybuild --build -i python3 -s custom --build-args "python3 -m build -n"
-
-override_dh_auto_install:
-	pybuild --install -i python3 -s custom --install-args "python3 -m pip install . --root=$(CURDIR)/debian/mirror-dedupe --prefix=/usr"
-
 override_dh_installsystemd:
 	dh_installsystemd --no-start mirror-dedupe.service
 	dh_installsystemd --name=mirror-dedupe mirror-dedupe.timer
