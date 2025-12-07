@@ -1,3 +1,11 @@
+mirror-dedupe (0.2.4-1) noble; urgency=medium
+
+  * Add ubuntu-cloud UCA mirror (epoxy, flamingo).
+  * Update nginx mirror.conf with /ubuntu-cloud and symlinks.
+  * Fix systemd unit to use /usr/bin/mirror-dedupe entrypoint.
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 07 Dec 2025 15:40:00 +0000
+
 mirror-dedupe (0.2.3-1) noble; urgency=medium
 
   * Fix: Add debhelper override to prevent service auto-start during installation
