@@ -39,6 +39,7 @@ Homepage = "https://github.com/munger/mirror-dedupe"
 
 [project.scripts]
 mirror-dedupe = "mirror_dedupe.cli:main"
+mirror-dedupe-scan = "mirror_dedupe.scan:main"
 
 [tool.setuptools]
 packages = ["mirror_dedupe"]
