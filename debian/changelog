@@ -1,3 +1,9 @@
+mirror-dedupe (0.2.5-1) noble; urgency=medium
+
+  * Fix Debian packaging so mirror-dedupe-scan console script is installed.
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 07 Dec 2025 16:15:00 +0000
+
 mirror-dedupe (0.2.4-1) noble; urgency=medium
 
   * Add ubuntu-cloud UCA mirror (epoxy, flamingo).
