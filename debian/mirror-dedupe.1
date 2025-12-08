@@ -3,11 +3,23 @@
 mirror-dedupe \- Ubuntu mirror synchronisation with global deduplication
 .SH SYNOPSIS
 .B mirror-dedupe
-[\fB\-h\fR]
-[\fB\-\-dry\-run\fR]
-[\fB\-\-mirror\fR \fIMIRROR\fR]
-[\fB\-\-dedupe\-only\fR]
-[\fIconfig_dir\fR]
+.RB [ \-\-config
+.IR DIR ]
+.RB [ \-h ]
+.RB [ \-\-dry\-run ]
+.RB [ \-\-mirror
+.IR MIRROR ]
+.RB [ \-\-dedupe\-only ]
+.RB [ \-\-list ]
+.RB [ \-\-activate
+.IR MIRROR ]
+.RB [ \-\-deactivate
+.IR MIRROR ]
+.RB [ \-\-test
+.IR MIRROR ]
+.RB [ \-\-delete
+.IR MIRROR ]
+\fR]
 .SH DESCRIPTION
 .B mirror-dedupe
 synchronises Ubuntu package repositories and performs global deduplication
@@ -41,17 +53,41 @@ to spawn subprocesses for each mirror.
 .BR \-\-dedupe\-only
 Only run the deduplication phase, skipping mirror synchronisation.
 .TP
-.I config_dir
-Path to configuration directory. Default: \fI/etc/mirror-dedupe\fR
+.BR \-\-config " " \fIDIR\fR
+Path to configuration directory. Default: \fI/etc/mirror-dedupe\fR.
+.TP
+.BR \-\-list
+List available mirrors, showing which are active (enabled) and which are inactive.
+.TP
+.BR \-\-activate " " \fIMIRROR\fR
+Activate a mirror by creating a symlink in \fIrepos-enabled/\fR.
+.TP
+.BR \-\-deactivate " " \fIMIRROR\fR
+Deactivate a mirror by removing its symlink from \fIrepos-enabled/\fR.
+.TP
+.BR \-\-test " " \fIMIRROR\fR
+Test a mirror configuration. This performs basic connectivity checks against the
+upstream URL (and configured GPG key URL, if present) and prints a summary of
+what the mirror is configured to fetch, without making any changes.
+.TP
+.BR \-\-delete " " \fIMIRROR\fR
+Deactivate a mirror and delete its data directory. This is a destructive
+operation and requires an interactive PIN confirmation before proceeding.
 .SH CONFIGURATION
 Configuration files are located in \fI/etc/mirror-dedupe/\fR:
 .TP
 .I mirror-dedupe.conf
 Main configuration file containing global settings such as buffer size,
-parallel downloads, and curl timeout.
+parallel downloads, and curl timeout. It also supports a global
+.B architectures
+mask to restrict which architectures are mirrored, and a boolean
+.B no_hardlinks
+option which, when set to true, disables deduplication and causes
+.B mirror-dedupe
+to behave as a plain mirror.
 .TP
-.I repos.d/*.conf
-Individual mirror configuration files. Each file defines a repository mirror
+.I repos-available/*.conf
+Available mirror configuration files. Each file defines a repository mirror
 with settings including:
 .RS
 .TP
@@ -79,6 +115,10 @@ Ubuntu releases to mirror (e.g., noble, jammy)
 .B gpg_key_url
 URL to repository GPG key (optional)
 .RE
+.TP
+.I repos-enabled/*.conf
+Symlinks to configuration files in \fIrepos-available/\fR for mirrors that are
+currently enabled.
 .SH EXAMPLES
 .TP
 Run full synchronisation and deduplication:
@@ -94,7 +134,7 @@ Only perform deduplication (skip sync):
 .B mirror-dedupe \-\-dedupe\-only
 .TP
 Use custom configuration directory:
-.B mirror-dedupe /path/to/config
+.B mirror-dedupe \-\-config /path/to/config
 .SH SYSTEMD INTEGRATION
 The package includes systemd timer and service units:
 .TP
@@ -124,8 +164,11 @@ To view logs:
 .I /etc/mirror-dedupe/mirror-dedupe.conf
 Main configuration file
 .TP
-.I /etc/mirror-dedupe/repos.d/
-Directory containing individual mirror configurations
+.I /etc/mirror-dedupe/repos-available/
+Directory containing available mirror configurations
+.TP
+.I /etc/mirror-dedupe/repos-enabled/
+Directory containing symlinks to enabled mirror configurations
 .TP
 .I /srv/mirror/repos/
 Default base directory for mirrored repositories

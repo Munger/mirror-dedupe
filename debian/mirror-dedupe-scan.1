@@ -1,4 +1,4 @@
-.TH MIRROR-DEDUPE-SCAN 1 "October 2025" "mirror-dedupe 0.2.0" "User Commands"
+.TH MIRROR-DEDUPE-SCAN 1 "October 2025" "mirror-dedupe 0.2.7" "User Commands"
 .SH NAME
 mirror-dedupe-scan \- scan and generate repository configuration for mirror-dedupe
 .SH SYNOPSIS
@@ -9,6 +9,24 @@ mirror-dedupe-scan \- scan and generate repository configuration for mirror-dedu
 .IR DEST ]
 .RB [ \-\-config-dir
 .IR DIR ]
+.RB [ \-r
+.IR DIST ]
+.RB [ \-R
+.IR DISTS ]
+.RB [ \-a
+.IR ARCH ]
+.RB [ \-A
+.IR ARCHES ]
+.RB [ \-c
+.IR COMPONENT ]
+.RB [ \-C
+.IR COMPONENTS ]
+.RB [ \-G
+.IR URL ]
+.RB [ \-g
+.IR PATH ]
+.RB [ \-\-method
+.IR METHOD ]
 .IR UPSTREAM-URL
 .SH DESCRIPTION
 .B mirror-dedupe-scan
@@ -22,13 +40,55 @@ and can be enabled by creating a symlink in
 .SH OPTIONS
 .TP
 .BR \-\-name " " \fINAME\fR
-Repository name (required). Used for the configuration filename.
+Repository name (required). Used for the configuration filename and as the default
+destination path when \fB\-\-dest\fR is omitted.
 .TP
 .BR \-\-dest " " \fIDEST\fR
-Destination path relative to repo_root (required).
+Destination path relative to repo_root. Defaults to the value of \fB\-\-name\fR if
+not specified.
 .TP
 .BR \-\-config-dir " " \fIDIR\fR
 Configuration directory (default: /etc/mirror-dedupe).
+.TP
+.BR \-r ", " \-\-dist ", " \-\-release " " " \fIDIST\fR
+Add a distribution/suite. May be specified multiple times. When any
+\fB\-r\fR/\fB\-\-dist\fR/\fB\-\-release\fR/\fB\-R\fR/\fB\-\-releases\fR
+option is supplied, the scanner uses exactly the suites given (with special
+handling for the value \(lqall\(rq; see below).
+.TP
+.BR \-R ", " \-\-releases " " " \fIDISTS\fR
+Comma-separated list of distributions/suites. This is equivalent to specifying
+multiple \fB\-r\fR options. If any item is the literal \(lqall\(rq, the
+scanner writes every discovered suite into the generated configuration and
+disables automatic distribution expansion.
+.TP
+.BR \-a ", " \-\-arch " " \fIARCH\fR
+Architecture to include. May be specified multiple times.
+.TP
+.BR \-A ", " \-\-architectures " " \fIARCHES\fR
+Comma-separated list of architectures to include. When present, these values
+override any architectures parsed from Release files.
+.TP
+.BR \-c ", " \-\-component " " \fICOMPONENT\fR
+Component to include (for example, \fBmain\fR or \fBuniverse\fR).
+May be specified multiple times.
+.TP
+.BR \-C ", " \-\-components " " \fICOMPONENTS\fR
+Comma-separated list of components to include. When present, these values
+override any components parsed from Release files.
+.TP
+.BR \-G ", " \-\-gpg-key-url " " \fIURL\fR
+Explicit GPG key URL for this repository. Must be used together with
+\fB\-g\fR/\fB\-\-gpg-key-path\fR. If given, the scanner validates that the URL
+is reachable before writing the configuration.
+.TP
+.BR \-g ", " \-\-gpg-key-path " " \fIPATH\fR
+Relative GPG key path under repo_root (for example, \fBkeys/vendor.asc\fR).
+Must be used together with \fB\-G\fR/\fB\-\-gpg-key-url\fR.
+.TP
+.BR \-\-method " " \fIMETHOD\fR
+Force the sync method to use either \fBrsync\fR or \fBhttps\fR. When omitted,
+the sync method is auto-detected.
 .TP
 .IR UPSTREAM-URL
 URL of the upstream repository to scan.
@@ -63,7 +123,8 @@ mirror-dedupe-scan --name docker --dest docker \\
 The scanner automatically detects:
 .TP
 .B Sync method
-Tests if rsync is available, otherwise uses HTTPS
+Tests if rsync is available and falls back to HTTPS when it is not. If
+\fB\-\-method\fR is supplied, its value is used instead of auto-detection.
 .TP
 .B Architectures
 Parsed from the Release file
@@ -72,10 +133,18 @@ Parsed from the Release file
 Parsed from the Release file
 .TP
 .B Distributions
-Discovered by listing the dists/ directory
+Discovered by listing the dists/ directory. When explicit distributions are
+provided via \fB\-r\fR/\fB\-R\fR, those values are used directly (with the
+special value \(lqall\(rq causing all discovered suites to be written to the
+configuration with distribution expansion disabled). When no distribution
+options are supplied at all, the scanner behaves as if \fB\-R all\fR had been
+specified: every discovered suite is written to \fBdistributions:\fR and
+distribution expansion is disabled.
 .TP
 .B GPG keys
-Checks common GPG key locations
+Checks common GPG key locations and per-suite Release.gpg locations. Explicit
+GPG key overrides provided via \fB\-G\fR/\fB\-g\fR are honoured directly after a
+reachability check.
 .SH ENABLING A REPOSITORY
 After scanning, enable the repository:
 .PP

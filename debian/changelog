@@ -1,3 +1,28 @@
+mirror-dedupe (0.2.7-1) noble; urgency=medium
+
+  * Change mirror-dedupe-scan default distribution behaviour:
+    - Stop auto-selecting a "primary" series via Release Version.
+    - Use explicit --dist/--releases values exactly (with special "all").
+    - When no suites are specified, behave as if --releases all was given.
+  * Improve architecture discovery and logging:
+    - Prefer curl -4 for fetching /dists/ and Release files.
+    - Discover architectures/components across all selected suites.
+    - Clean up per-suite logging during [3/4] discovery.
+  * Add automatic GPG key verification using gpg with a temporary keyring
+    against InRelease or Release/Release.gpg.
+  * Make gpg a runtime dependency in debian/control.
+  * Add a global architectures mask to mirror-dedupe.conf so all mirrors can
+    be constrained to a specific arch set.
+  * Refresh shipped repos-available/*.conf for Ubuntu, Debian and major
+    third-party repos, and add nodesource-node22.
+  * Expand and cross-link documentation:
+    - Add full mirror-dedupe-scan reference and examples to
+      config/repos-available/README.md.
+    - Point the top-level README.md at the scanner docs.
+    - Update mirror-dedupe-scan(1) man page for new distribution semantics.
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 07 Dec 2025 17:10:00 +0000
+
 mirror-dedupe (0.2.6-1) noble; urgency=medium
 
   * Add mirror-dedupe-scan console script to pyproject so debs install scanner.

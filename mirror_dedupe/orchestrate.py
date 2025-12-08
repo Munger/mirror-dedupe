@@ -60,7 +60,7 @@ def run_orchestrator_mode(mirrors, config_dir, dry_run):
                 pass
         
         # Mirror is available, spawn subprocess
-        cmd = [sys.executable, script_path, str(config_dir), '--mirror', mirror_name]
+        cmd = [sys.executable, script_path, '--config', str(config_dir), '--mirror', mirror_name]
         if dry_run:
             cmd.append('--dry-run')
         
@@ -108,7 +108,7 @@ def run_orchestrator_mode(mirrors, config_dir, dry_run):
     print("All mirrors completed. Running deduplication...")
     print(f"{'='*60}")
     
-    cmd = [sys.executable, script_path, str(config_dir), '--dedupe-only']
+    cmd = [sys.executable, script_path, '--config', str(config_dir), '--dedupe-only']
     if dry_run:
         cmd.append('--dry-run')
     

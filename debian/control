@@ -16,7 +16,8 @@ Depends: ${python3:Depends},
          ${misc:Depends},
          python3-yaml,
          curl,
-         rsync
+         rsync,
+         gpg
 Description: Mirror synchronisation with intelligent deduplication
  Downloads from upstream and hardlinks duplicate files (same SHA256 hash)
  to save bandwidth and disk space. Supports multiple mirrors with global
