@@ -1,3 +1,12 @@
+mirror-dedupe (0.2.8-1) noble; urgency=medium
+
+  * Fix systemd service ExecStart to pass --config /etc/mirror-dedupe
+    instead of a bare positional argument, so the service starts cleanly.
+  * Stop installing config/repos-enabled/.gitkeep into /etc so the package
+    no longer ships that placeholder file.
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 07 Dec 2025 17:55:00 +0000
+
 mirror-dedupe (0.2.7-1) noble; urgency=medium
 
   * Change mirror-dedupe-scan default distribution behaviour:
