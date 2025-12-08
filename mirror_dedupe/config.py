@@ -46,6 +46,39 @@ def load_config(config_dir: str) -> dict:
                 except Exception as e:
                     print(f"Warning: Failed to load {repo_file}: {e}")
         
+        # Apply global architecture mask, if configured
+        arch_mask = config.get('architectures', '*')
+
+        def _normalize_arch_mask(value):
+            """Normalise global architectures mask.
+
+            Returns None for no restriction, or a list of architectures.
+            """
+            if isinstance(value, str):
+                v = value.strip()
+                if v.lower() in ('*', 'all') or not v:
+                    return None
+                return [v]
+            if isinstance(value, list):
+                return value
+            return None
+
+        mask_arches = _normalize_arch_mask(arch_mask)
+
+        if mask_arches is not None:
+            for mirror in mirrors:
+                repo_arches = mirror.get('architectures')
+                if not repo_arches:
+                    continue
+                effective = [a for a in repo_arches if a in mask_arches]
+                if effective:
+                    mirror['architectures'] = effective
+                else:
+                    print(
+                        f"Warning: Mirror '{mirror.get('name', '<unknown>')}' has no architectures left "
+                        f"after applying global mask {mask_arches}; keeping original list {repo_arches}",
+                    )
+
         # Add mirrors to config
         config['mirrors'] = mirrors
         

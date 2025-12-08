@@ -60,28 +60,55 @@ Configuration files are located in `/etc/mirror-dedupe/`:
 
 ### Adding a Repository
 
-Use the scanner to auto-generate configuration:
+Use the scanner to auto-generate configuration for a repository, for example:
 
 ```bash
 mirror-dedupe-scan --name grafana --dest grafana https://apt.grafana.com
 ```
 
-Then enable it:
+See `config/repos-available/README.md` for the full `mirror-dedupe-scan`
+reference and ready-made commands for all of the packaged example
+repositories.
+
+Then test and enable it using the CLI:
+
+```bash
+# Test that the upstream and GPG key URL (if configured) are reachable
+mirror-dedupe --test grafana
+
+# If the test looks good, activate the repository
+mirror-dedupe --activate grafana
+```
+
+If you prefer, you can still enable it manually with a symlink:
 
 ```bash
 cd /etc/mirror-dedupe/repos-enabled
 ln -s ../repos-available/grafana.conf .
 ```
 
+### Advanced: Alternative config directories
+
+By default, both tools use `/etc/mirror-dedupe`. You can override this with `--config`, e.g. for testing or multiple instances:
+
+```bash
+mirror-dedupe --config /tmp/mirror-test --test grafana
+```
+
 ### Pre-configured Repositories
 
 The package includes pre-configured repositories:
-- ubuntu - Ubuntu main archive
-- ubuntu-ports - Ubuntu ARM/RISC-V ports
-- grafana - Grafana packages
-- influxdb - InfluxDB packages
-- docker - Docker packages
-- kubernetes - Kubernetes packages
+- ubuntu - Ubuntu main archive (noble)
+- ubuntu-ports - Ubuntu ports archive (noble)
+- ubuntu-cloud - Ubuntu Cloud Archive (selected OpenStack tracks on noble)
+- debian - Debian stable archive (bookworm)
+- docker - Docker packages for Ubuntu noble
+- grafana - Grafana APT repository
+- influxdb - InfluxData repository for Debian/Ubuntu
+- kubernetes - Kubernetes packages from apt.kubernetes.io
+- nginx - Official NGINX packages for Ubuntu
+- nodesource-node22 - Node.js 22.x LTS from NodeSource
+- postgresql - PostgreSQL APT repository (noble-pgdg)
 
 ## Usage
 

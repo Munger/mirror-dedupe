@@ -36,7 +36,7 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
-tests/test-config/
+tests/
 
 # Debian packaging
 debian/files
@@ -50,4 +50,3 @@ debian/.debhelper/
 *.deb
 *.buildinfo
 *.changes
-debs/
