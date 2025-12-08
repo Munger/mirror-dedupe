@@ -1,4 +1,4 @@
-.TH MIRROR-DEDUPE 1 "October 2025" "mirror-dedupe 0.1.0" "User Commands"
+.TH MIRROR-DEDUPE 1 "December 2025" "mirror-dedupe 0.2.9" "User Commands"
 .SH NAME
 mirror-dedupe \- Ubuntu mirror synchronisation with global deduplication
 .SH SYNOPSIS
@@ -114,6 +114,33 @@ Ubuntu releases to mirror (e.g., noble, jammy)
 .TP
 .B gpg_key_url
 URL to repository GPG key (optional)
+.TP
+.B storage_filters
+Optional per-mirror storage filters that control which files are
+downloaded and kept on disk without modifying upstream indices.
+This is a mapping that may contain:
+.RS
+.TP
+.B exclude_packages
+List of shell-style patterns matched against the package name (the
+\fBPackage:\fR field in \fBPackages\fR/\fBSources\fR). Any entry
+whose package name matches one of these patterns is skipped during
+planning: it will not be downloaded and will be removed by the
+cleanup phase if it already exists in the pool.
+.TP
+.B exclude_paths
+List of shell-style patterns matched against the relative pool path
+(for example, \fIp\%ool/main/g/grafana/grafana-enterprise-nightly_*\fR).
+Entries whose paths match one of these patterns are also skipped.
+.PP
+These filters only affect what is stored locally. The upstream
+\fBRelease\fR/\fBInRelease\fR and index files are always mirrored
+unchanged and retain their original signatures. Mirrors that use
+\fBstorage_filters\fR are therefore not fully faithful replicas of
+upstream and may advertise packages that are not present on disk;
+such mirrors should not be used as transparent DNS overrides for
+critical archives.
+.RE
 .RE
 .TP
 .I repos-enabled/*.conf
