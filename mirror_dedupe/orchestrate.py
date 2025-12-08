@@ -15,6 +15,7 @@ import sys
 import subprocess
 import time
 import threading
+import fnmatch
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -187,6 +188,13 @@ def collect_files(mirrors):
         print(f"  Comp: {', '.join(components)}")
         print(f"  Dist: {', '.join(distributions)}")
         
+        # Optional per-mirror storage filters (do not affect indices).
+        # These control which files are downloaded/kept, but indices
+        # remain an exact copy of upstream.
+        storage_filters = mirror.get('storage_filters', {})
+        exclude_packages = storage_filters.get('exclude_packages', [])
+        exclude_paths = storage_filters.get('exclude_paths', [])
+
         for dist in distributions:
             files = {}
             
@@ -209,8 +217,28 @@ def collect_files(mirrors):
                     sources = get_sources_index(dest, dist, component)
                     files.update(sources)
             
-            # Add to global collection
+            # Add to global collection, applying optional per-mirror
+            # storage filters so that some files are not planned or kept.
             for path, info in files.items():
+                pkg_name = info.get('package', '')
+
+                excluded = False
+                # Path-based filters first
+                for pattern in exclude_paths:
+                    if fnmatch.fnmatch(path, pattern):
+                        excluded = True
+                        break
+
+                # Package-name-based filters
+                if not excluded:
+                    for pattern in exclude_packages:
+                        if fnmatch.fnmatch(pkg_name, pattern):
+                            excluded = True
+                            break
+
+                if excluded:
+                    continue
+
                 key = (idx, path)
                 global_files[key] = {
                     **info,

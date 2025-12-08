@@ -1,3 +1,19 @@
+mirror-dedupe (0.2.9-1) noble; urgency=medium
+
+  * Add optional per-mirror storage_filters to repos-available/*.conf,
+    allowing specific packages or pool paths to be excluded from download
+    and storage without rewriting upstream indices. This is primarily
+    intended for non-critical third-party mirrors (e.g. pruning Grafana
+    nightly builds) and is not enabled by default.
+  * Document storage_filters, exclude_packages and exclude_paths in the
+    mirror-dedupe(1) manpage, including the implications for faithful
+    mirroring and DNS override usage.
+  * Update the example nginx mirror.conf to match the flattened Ubuntu
+    layout (/srv/mirror/repos/ubuntu, ubuntu-ports, ubuntu-cloud) used by
+    the default configuration.
+
+ -- Tim Hosking <tim@mungerware.com>  Mon, 08 Dec 2025 22:55:00 +0000
+
 mirror-dedupe (0.2.8-1) noble; urgency=medium
 
   * Fix systemd service ExecStart to pass --config /etc/mirror-dedupe
