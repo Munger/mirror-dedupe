@@ -1,3 +1,18 @@
+mirror-dedupe (0.2.10-1) noble; urgency=medium
+
+  * Teach mirror-dedupe-scan to discover a concrete rsync_upstream using
+    rsync daemon probes and only enable rsync when a working dists/ tree
+    is found; wire rsync_upstream into the runtime so that rsync-based
+    metadata syncs always use the discovered module path.
+  * Add a new rsync_upstream key to repos-available/*.conf, populated by
+    mirror-dedupe-scan when rsync discovery succeeds, and document this
+    behaviour in config/repos-available/README.md and
+    mirror-dedupe-scan(1).
+  * Refresh shipped repos-available/*.conf, the example nginx
+    mirror.conf and related documentation to match current configs.
+
+ -- Tim Hosking <tim@mungerware.com>  Tue, 09 Dec 2025 14:30:00 +0000
+
 mirror-dedupe (0.2.9-1) noble; urgency=medium
 
   * Add optional per-mirror storage_filters to repos-available/*.conf,
@@ -8,15 +23,8 @@ mirror-dedupe (0.2.9-1) noble; urgency=medium
   * Document storage_filters, exclude_packages and exclude_paths in the
     mirror-dedupe(1) manpage, including the implications for faithful
     mirroring.
-  * Teach mirror-dedupe-scan to discover a concrete rsync_upstream using
-    rsync daemon probes and only enable rsync when a working
-    dists/ tree is found; wire rsync_upstream into the runtime so that
-    rsync-based metadata syncs always use the discovered module path.
-  * Add a new rsync_upstream key to repos-available/*.conf, populated by
-    mirror-dedupe-scan when rsync discovery succeeds, and documented in
-    config/repos-available/README.md.
-  * Refresh the example nginx mirror.conf to match the current set of
-    shipped mirror configs.
+  * Refresh the example nginx mirror.conf to match the set of Ubuntu
+    mirror configs shipped with this release.
 
  -- Tim Hosking <tim@mungerware.com>  Mon, 08 Dec 2025 22:55:00 +0000
 
