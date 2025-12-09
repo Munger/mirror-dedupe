@@ -133,13 +133,10 @@ List of shell-style patterns matched against the relative pool path
 (for example, \fIp\%ool/main/g/grafana/grafana-enterprise-nightly_*\fR).
 Entries whose paths match one of these patterns are also skipped.
 .PP
-These filters only affect what is stored locally. The upstream
-\fBRelease\fR/\fBInRelease\fR and index files are always mirrored
-unchanged and retain their original signatures. Mirrors that use
-\fBstorage_filters\fR are therefore not fully faithful replicas of
-upstream and may advertise packages that are not present on disk;
-such mirrors should not be used as transparent DNS overrides for
-critical archives.
+   These filters only affect what is stored locally. The upstream
+   \fBRelease\fR/\fBInRelease\fR and index files are always mirrored
+   unchanged and retain their original signatures. Mirrors that use
+   \fBstorage_filters\fR may advertise packages that are not present on disk.
 .RE
 .RE
 .TP
