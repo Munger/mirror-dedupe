@@ -141,6 +141,7 @@ def sync_mirrors(mirrors, dry_run):
         architectures = mirror.get('architectures', [])
         components = mirror.get('components', COMPONENTS)
         sync_method = mirror.get('sync_method', 'rsync')
+        rsync_upstream = mirror.get('rsync_upstream', upstream)
         gpg_key_url = mirror.get('gpg_key_url')
         gpg_key_path = mirror.get('gpg_key_path')
         
@@ -157,7 +158,11 @@ def sync_mirrors(mirrors, dry_run):
                 print(f"  ERROR: HTTPS sync failed for {name}")
                 sys.exit(1)
         else:
-            if not run_rsync(distributions, dest, upstream, architectures, dry_run):
+            # For rsync-based metadata sync, prefer an explicit rsync_upstream
+            # discovered by mirror-dedupe-scan. This keeps HTTP upstream as the
+            # source of truth for curl while using a concrete rsync daemon
+            # path for dists/.
+            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run):
                 print(f"  ERROR: rsync failed for {name}")
                 sys.exit(1)
 
@@ -506,13 +511,15 @@ def cleanup_mirrors(mirrors, global_files, dry_run):
         distributions = expand_distributions(mirror['distributions']) if expand_dists else mirror['distributions']
         components = mirror.get('components', COMPONENTS)
         sync_method = mirror.get('sync_method', 'rsync')
+        rsync_upstream = mirror.get('rsync_upstream', upstream)
         
         print(f"\n[{name}] Syncing dists...")
         if sync_method == 'https':
             if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run):
                 print(f"  ERROR: HTTPS sync failed for {name}")
         else:
-            if not run_rsync(distributions, dest, upstream, architectures, dry_run):
+            # Use rsync_upstream for rsync metadata sync when available.
+            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run):
                 print(f"  ERROR: rsync failed for {name}")
         
         # Build expected files list for this mirror

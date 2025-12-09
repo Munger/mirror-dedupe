@@ -1,4 +1,4 @@
-.TH MIRROR-DEDUPE-SCAN 1 "October 2025" "mirror-dedupe 0.2.7" "User Commands"
+.TH MIRROR-DEDUPE-SCAN 1 "December 2025" "mirror-dedupe 0.2.9" "User Commands"
 .SH NAME
 mirror-dedupe-scan \- scan and generate repository configuration for mirror-dedupe
 .SH SYNOPSIS
@@ -93,11 +93,12 @@ the sync method is auto-detected.
 .IR UPSTREAM-URL
 URL of the upstream repository to scan.
 .SH EXAMPLES
-Scan the Ubuntu archive:
+Scan the Ubuntu archive (noble):
 .PP
 .nf
 .RS
-mirror-dedupe-scan --name ubuntu --dest ubuntu/main \\
+mirror-dedupe-scan --name ubuntu --dest ubuntu \\
+    --release noble \\
     http://archive.ubuntu.com/ubuntu
 .RE
 .fi
@@ -107,15 +108,20 @@ Scan the Grafana repository:
 .nf
 .RS
 mirror-dedupe-scan --name grafana --dest grafana \\
+    --gpg-key-url https://apt.grafana.com/gpg.key \\
+    --gpg-key-path gpg.key \\
     https://apt.grafana.com
 .RE
 .fi
 .PP
-Scan Docker repository:
+Scan the Docker repository (Ubuntu, noble):
 .PP
 .nf
 .RS
 mirror-dedupe-scan --name docker --dest docker \\
+    --release noble \\
+    --gpg-key-url https://download.docker.com/linux/ubuntu/gpg \\
+    --gpg-key-path gpg \\
     https://download.docker.com/linux/ubuntu
 .RE
 .fi
@@ -123,8 +129,11 @@ mirror-dedupe-scan --name docker --dest docker \\
 The scanner automatically detects:
 .TP
 .B Sync method
-Tests if rsync is available and falls back to HTTPS when it is not. If
-\fB\-\-method\fR is supplied, its value is used instead of auto-detection.
+Attempts to discover a suitable rsync daemon/module for the upstream host
+using IPv4-only probes, selecting rsync only when a working \fBdists/\fR
+tree is found; otherwise falls back to HTTPS. If
+.B \-\-method
+is supplied, its value is used instead of auto-detection.
 .TP
 .B Architectures
 Parsed from the Release file

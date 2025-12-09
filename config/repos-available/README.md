@@ -58,6 +58,7 @@ name: repository-name
 upstream: http://upstream.example.com/repo
 dest: relative/path/from/repo_root
 sync_method: rsync  # or https
+rsync_upstream: rsync://upstream.example.com/module  # optional, when rsync is used
 gpg_key_url: http://upstream.example.com/gpg.key
 gpg_key_path: relative/path/to/key
 architectures:
@@ -68,6 +69,14 @@ components:
   - restricted
 distributions:
   - noble
+expand_distributions: true  # optional; controls auto-expansion of variants
+
+# Optional per-mirror storage filters (do not affect indices)
+storage_filters:
+  exclude_packages:
+    - some-bad-package*
+  exclude_paths:
+    - "pool/*/debug/*"
 ```
 
 ## Sync Methods
@@ -234,14 +243,14 @@ config file directly to `CONFIG_DIR/repos-available/NAME.conf` (by default
 mirror-dedupe-scan \
   --name ubuntu \
   --dest ubuntu \
-  --dist noble \
+  --release noble \
   http://archive.ubuntu.com/ubuntu
 
 # Ubuntu ports (noble)
 mirror-dedupe-scan \
   --name ubuntu-ports \
   --dest ubuntu-ports \
-  --dist noble \
+  --release noble \
   http://ports.ubuntu.com/ubuntu-ports
 
 # Ubuntu Cloud Archive (UCA) – OpenStack tracks
@@ -257,7 +266,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name debian \
   --dest debian \
-  --dist bookworm \
+  --release bookworm \
   --gpg-key-url https://ftp-master.debian.org/keys/archive-key-12.asc \
   --gpg-key-path archive-key-12.asc \
   http://deb.debian.org/debian
@@ -282,7 +291,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name docker \
   --dest docker \
-  --dist noble \
+  --release noble \
   --gpg-key-url https://download.docker.com/linux/ubuntu/gpg \
   --gpg-key-path gpg \
   https://download.docker.com/linux/ubuntu
@@ -291,7 +300,8 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name postgresql \
   --dest postgresql \
-  --dist noble-pgdg \
+  --release noble-pgdg \
+  --components main \
   --gpg-key-url https://www.postgresql.org/media/keys/ACCC4CF8.asc \
   --gpg-key-path keys/ACCC4CF8.asc \
   http://apt.postgresql.org/pub/repos/apt
@@ -300,7 +310,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name mariadb \
   --dest mariadb \
-  --dist noble \
+  --release noble \
   --gpg-key-url https://mirror.mariadb.org/PublicKey \
   --gpg-key-path PublicKey \
   https://mirror.mariadb.org/repo/10.11/ubuntu
@@ -309,7 +319,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name mongodb \
   --dest mongodb \
-  --dist noble \
+  --release noble \
   --gpg-key-url https://pgp.mongodb.com/server-7.0.asc \
   --gpg-key-path keys/mongodb-server-7.0.asc \
   https://repo.mongodb.org/apt/ubuntu
@@ -366,6 +376,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name azure-cli \
   --dest azure-cli \
+  --release noble \
   --gpg-key-url https://packages.microsoft.com/keys/microsoft.asc \
   --gpg-key-path keys/microsoft.asc \
   https://packages.microsoft.com/repos/azure-cli/
@@ -414,7 +425,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name nginx \
   --dest nginx \
-  --dist noble \
+  --release noble \
   --gpg-key-url https://nginx.org/keys/nginx_signing.key \
   --gpg-key-path keys/nginx_signing.key \
   https://nginx.org/packages/ubuntu
@@ -439,7 +450,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name rspamd \
   --dest rspamd \
-  --dist noble \
+  --release noble \
   --gpg-key-url https://rspamd.com/apt-stable/gpg.key \
   --gpg-key-path gpg.key \
   https://rspamd.com/apt-stable/
@@ -448,6 +459,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name zabbix \
   --dest zabbix \
+  --release noble \
   --gpg-key-url https://repo.zabbix.com/zabbix-official-repo.key \
   --gpg-key-path zabbix-official-repo.key \
   https://repo.zabbix.com/zabbix/6.4/ubuntu/
@@ -456,7 +468,7 @@ mirror-dedupe-scan \
 mirror-dedupe-scan \
   --name virtualbox \
   --dest virtualbox \
-  --dist noble \
+  --release noble \
   --gpg-key-url https://www.virtualbox.org/download/oracle_vbox_2016.asc \
   --gpg-key-path oracle_vbox_2016.asc \
   https://download.virtualbox.org/virtualbox/debian

@@ -80,54 +80,193 @@ def _build_rsync_candidates(upstream: str) -> List[str]:
     return unique
 
 
-def check_rsync_available(upstream: str) -> bool:
-    """Check if rsync appears to be usable for the given upstream.
+def _tokenize(s: str) -> List[str]:
+    """Split a string into lowercase tokens on non-alphanumeric boundaries."""
 
-    This tries multiple plausible rsync URL forms derived from the HTTP/HTTPS
-    upstream and returns True on the first successful directory listing. If
-    rsync is not installed or all attempts fail or time out, we fall back to
-    HTTPS and emit a warning explaining why.
+    return [t for t in re.split(r"[^A-Za-z0-9]+", s.lower()) if t]
+
+
+def _discover_rsync_upstream(name: str, upstream: str) -> Optional[str]:
+    """Best-effort discovery of an rsync base URL for metadata.
+
+    This keeps HTTP/HTTPS *upstream* as the source of truth for curl, and only
+    enables rsync when we can positively identify an rsync daemon module and a
+    root under that module where a standard APT-style ``dists/`` directory
+    exists.
+
+    The algorithm is intentionally generic:
+
+      * Extract the host and path segments from the HTTP upstream.
+      * List rsync modules via ``rsync -4 host::``.
+      * Score modules by shared tokens with the repository name and HTTP
+        tail segment; if there is a unique highest-scoring module, treat it
+        as a candidate.
+      * For that module, derive a small set of candidate roots (module root,
+        and optionally ``module/http_tail``) and probe ``root/dists/`` with
+        ``rsync -4 --list-only``.
+      * If any probe succeeds, return a concrete ``rsync://host/root``
+        upstream; otherwise return None and the caller should fall back to
+        HTTPS.
     """
 
-    candidates = _build_rsync_candidates(upstream)
-    if not candidates:
-        return False
+    parsed = urlparse(upstream)
+    host = parsed.hostname
+    if not host:
+        return None
 
-    last_error: Optional[str] = None
+    # Build token set from repo name + last HTTP path segment.
+    path = (parsed.path or "").strip("/")
+    path_parts = [p for p in path.split("/") if p]
+    http_tail = path_parts[-1] if path_parts else ""
 
-    for rsync_url in candidates:
+    tokens_repo: set = set(_tokenize(name))
+    tokens_repo.update(_tokenize(http_tail))
+    if not tokens_repo:
+        return None
+
+    # List rsync daemon modules: rsync -4 host::
+    try:
+        result = subprocess.run(
+            ["rsync", "-4", f"{host}::"],
+            capture_output=True,
+            timeout=6,
+        )
+    except FileNotFoundError:
+        print(
+            "  NOTE: rsync binary not found on PATH; "
+            "falling back to https for this scan.",
+            file=sys.stderr,
+        )
+        return None
+    except subprocess.TimeoutExpired:
+        return None
+
+    if result.returncode != 0:
+        return None
+
+    lines = (result.stdout or b"").decode(errors="ignore").splitlines()
+    modules: List[tuple[str, str]] = []  # (name, description)
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("This is an Ubuntu mirror"):
+            continue
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        mod_name = parts[0]
+        desc = parts[1].strip() if len(parts) > 1 else ""
+        modules.append((mod_name, desc))
+
+    if not modules:
+        return None
+
+    # Score modules by token overlap with repo name + HTTP tail.
+    # We give extra weight to matches in the *module name* so that archives
+    # like "ubuntu-cloud-archive" win over more generic modules such as
+    # "cloud-images" that only match strongly in the description.
+    best_score = 0
+    best_modules: List[str] = []
+    for mod_name, desc in modules:
+        name_tokens = set(_tokenize(mod_name))
+        desc_tokens = set(_tokenize(desc))
+        if not (name_tokens or desc_tokens):
+            continue
+
+        name_overlap = len(name_tokens & tokens_repo)
+        desc_overlap = len(desc_tokens & tokens_repo)
+
+        # Weight name matches more heavily than description matches. This
+        # keeps behaviour for simple cases the same, while breaking ties in
+        # favour of modules whose *name* best matches the repo tokens.
+        score = name_overlap * 2 + desc_overlap
+
+        if score > best_score:
+            best_score = score
+            best_modules = [mod_name]
+        elif score == best_score and score > 0:
+            best_modules.append(mod_name)
+
+    if best_score <= 0 or len(best_modules) != 1:
+        # Either nothing in common or ambiguous; do not guess.
+        return None
+
+    module = best_modules[0]
+
+    # Optionally inspect the module root listing itself and use that to infer
+    # a more specific child directory (e.g. "ubuntu" under
+    # ubuntu-cloud-archive). This keeps the discovery strictly based on what
+    # the daemon exposes, rather than assuming layout from the HTTP path.
+    chosen_child: Optional[str] = None
+    try:
+        mod_list = subprocess.run(
+            ["rsync", "-4", f"{host}::{module}/"],
+            capture_output=True,
+            timeout=6,
+        )
+    except subprocess.TimeoutExpired:
+        mod_list = None
+
+    if mod_list is not None and mod_list.returncode == 0:
+        child_dirs: List[str] = []
+        for line in (mod_list.stdout or b"").decode(errors="ignore").splitlines():
+            line = line.rstrip()
+            if not line or line.startswith("This is an Ubuntu mirror"):
+                continue
+            # Expect rsync-style listings where directory entries start with
+            # a leading "d" (e.g. "drwxr-xr-x ... ubuntu").
+            if not line.startswith("d"):
+                continue
+            parts = line.split()
+            if not parts:
+                continue
+            name = parts[-1]
+            if name in {".", ".."}:
+                continue
+            child_dirs.append(name)
+
+        # If we found any child directories, score them by token overlap with
+        # the repo tokens (name + HTTP tail) and, if there is a unique best
+        # match with a positive score, treat it as a candidate root.
+        if child_dirs:
+            best_child_score = 0
+            best_children: List[str] = []
+            for d in child_dirs:
+                tokens_d = set(_tokenize(d))
+                if not tokens_d:
+                    continue
+                score = len(tokens_d & tokens_repo)
+                if score > best_child_score:
+                    best_child_score = score
+                    best_children = [d]
+                elif score == best_child_score and score > 0:
+                    best_children.append(d)
+
+            if best_child_score > 0 and len(best_children) == 1:
+                chosen_child = best_children[0]
+
+    # Derive a small set of candidate roots under the module where dists/ might live.
+    roots: List[str] = [module]
+    if chosen_child:
+        roots.append(f"{module}/{chosen_child}")
+
+    for root in roots:
+        # Probe for an APT-style dists/ directory using IPv4-only rsync.
         try:
-            result = subprocess.run(
-                ["rsync", "-4", "--list-only", rsync_url],
+            probe = subprocess.run(
+                ["rsync", "-4", "--list-only", f"{host}::{root}/dists/"],
                 capture_output=True,
                 timeout=6,
             )
-        except FileNotFoundError:
-            # rsync is not installed; do not keep retrying.
-            print(
-                "  NOTE: rsync binary not found on PATH; "
-                "falling back to https for this scan.",
-                file=sys.stderr,
-            )
-            return False
         except subprocess.TimeoutExpired:
-            # If the first candidate times out, further attempts are very
-            # likely to do the same and just slow the scan down. Record the
-            # timeout and stop probing for this upstream.
-            last_error = f"timeout talking to {rsync_url}"
-            break
+            continue
 
-        if result.returncode == 0:
-            return True
+        if probe.returncode == 0:
+            # We have positively identified a module/root combination with a
+            # working dists/ tree; construct a concrete rsync upstream.
+            return f"rsync://{host}/{root}"
 
-        # Record a brief error summary for possible reporting later.
-        stderr_snippet = (result.stderr or b"").decode(errors="ignore").strip().split("\n")
-        if stderr_snippet and stderr_snippet[0]:
-            last_error = f"rsync exited {result.returncode} for {rsync_url}: {stderr_snippet[0]}"
-        else:
-            last_error = f"rsync exited {result.returncode} for {rsync_url}"
-
-    return False
+    # No candidate roots exposed a dists/ directory; fall back to HTTPS.
+    return None
 
 
 def fetch_url(url: str) -> Optional[str]:
@@ -694,12 +833,16 @@ def generate_config(name: str, dest: str, upstream: str,
     
     print(f"Scanning {upstream}...", file=sys.stderr)
     
-    # Detect or honour forced sync method
+    # Detect or honour forced sync method. We always keep *upstream* as the
+    # HTTP/HTTPS base for curl and only enable rsync when we can discover a
+    # concrete rsync_upstream with a working dists/ tree.
     print("  [1/4] Detecting sync method...", file=sys.stderr)
+    rsync_upstream: Optional[str] = None
     if sync_method_override:
         sync_method = sync_method_override
     else:
-        sync_method = 'rsync' if check_rsync_available(upstream) else 'https'
+        rsync_upstream = _discover_rsync_upstream(name, upstream)
+        sync_method = 'rsync' if rsync_upstream else 'https'
     print(f"      Sync method: {sync_method}", file=sys.stderr)
     
     # Discover distributions (suites) under dists/
@@ -773,8 +916,35 @@ def generate_config(name: str, dest: str, upstream: str,
         comp_set.update(comps)
 
     # Fallbacks if nothing useful was found
-    architectures = sorted(arch_set) if arch_set else ['amd64']
-    components = sorted(comp_set) if comp_set else ['main']
+    detected_arches = sorted(arch_set) if arch_set else ['amd64']
+    detected_components = sorted(comp_set) if comp_set else ['main']
+
+    # Honour explicit architecture/component filters as hard restrictions.
+    # We still use the detected sets for basic sanity warnings, but the
+    # generated config reflects exactly what the user requested.
+    if arch_override:
+        architectures = [a for a in arch_override if a]
+        detected_set = set(detected_arches)
+        for a in architectures:
+            if a not in detected_set:
+                print(
+                    f"      Warning: architecture '{a}' was not found in Release metadata",
+                    file=sys.stderr,
+                )
+    else:
+        architectures = detected_arches
+
+    if component_override:
+        components = [c for c in component_override if c]
+        detected_set = set(detected_components)
+        for c in components:
+            if c not in detected_set:
+                print(
+                    f"      Warning: component '{c}' was not found in Release metadata",
+                    file=sys.stderr,
+                )
+    else:
+        components = detected_components
 
     print("", file=sys.stderr)  # newline after dots
     print(f"      Architectures: {', '.join(architectures)}", file=sys.stderr)
@@ -799,6 +969,9 @@ def generate_config(name: str, dest: str, upstream: str,
         f"dest: {dest}",
         f"sync_method: {sync_method}",
     ]
+
+    if rsync_upstream and sync_method == 'rsync':
+        config_lines.append(f"rsync_upstream: {rsync_upstream}")
     
     if gpg_key_url and gpg_key_path:
         # Explicit GPG key provided by user, use as-is
