@@ -84,6 +84,34 @@ def _build_rsync_candidates(upstream: str) -> List[str]:
     return unique
 
 
+def _safe_curl_fetch(url: str, force_ipv4: bool = False, timeout: int = 10, 
+                    extra_args: List[str] = None) -> Optional[subprocess.CompletedProcess]:
+    """Centralized, safe curl function with IPv6/IPv4 fallback"""
+    cmd = ["curl"]
+    cmd.extend(["-4"] if force_ipv4 else ["-6"])
+    cmd.extend(["-s", "-f"])
+    if extra_args:
+        cmd.extend(extra_args)
+    cmd.append(url)
+    
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _safe_rsync_list(host: str, path: str, force_ipv4: bool = False, timeout: int = 6) -> Optional[subprocess.CompletedProcess]:
+    """Centralized, safe rsync listing function - ALWAYS read-only"""
+    cmd = ["rsync"]
+    cmd.extend(["-4"] if force_ipv4 else ["-6"])
+    cmd.extend(["--list-only", f"{host}::{path}"])
+    
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
 def _tokenize(s: str) -> List[str]:
     """Split a string into lowercase tokens on non-alphanumeric boundaries."""
 
@@ -129,32 +157,14 @@ def _discover_rsync_upstream(name: str, upstream: str, force_ipv4: bool) -> Opti
         return None
 
     # List rsync daemon modules: rsync host:: (try IPv6 first, fallback to IPv4)
-    try:
-        cmd = ["rsync"]
-        if not force_ipv4:
-            cmd.append("-6")
-        cmd.extend(["--list-only", f"{host}::"])
-        result = subprocess.run(cmd, capture_output=True, timeout=6)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        if not force_ipv4:
-            # IPv6 failed, try IPv4 fallback
-            try:
-                cmd = ["rsync", "-4", "--list-only", f"{host}::"]
-                result = subprocess.run(cmd, capture_output=True, timeout=6)
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                print(
-                    "  NOTE: rsync binary not found on PATH; "
-                    "falling back to https for this scan.",
-                    file=sys.stderr,
-                )
-                return None
-        else:
-            print(
-                "  NOTE: rsync binary not found on PATH; "
-                "falling back to https for this scan.",
-                file=sys.stderr,
-            )
-            return None
+    result = _safe_rsync_list(host, "", force_ipv4=force_ipv4)
+    if result is None:
+        print(
+            "  NOTE: rsync binary not found on PATH; "
+            "falling back to https for this scan.",
+            file=sys.stderr,
+        )
+        return None
 
     if result.returncode != 0:
         return None
@@ -212,22 +222,7 @@ def _discover_rsync_upstream(name: str, upstream: str, force_ipv4: bool) -> Opti
     # ubuntu-cloud-archive). This keeps the discovery strictly based on what
     # the daemon exposes, rather than assuming layout from the HTTP path.
     chosen_child: Optional[str] = None
-    try:
-        cmd = ["rsync"]
-        if not force_ipv4:
-            cmd.append("-6")
-        cmd.append(f"{host}::{module}/")
-        mod_list = subprocess.run(cmd, capture_output=True, timeout=6)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        if not force_ipv4:
-            # IPv6 failed, try IPv4 fallback
-            try:
-                cmd = ["rsync", "-4", f"{host}::{module}/"]
-                mod_list = subprocess.run(cmd, capture_output=True, timeout=6)
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                mod_list = None
-        else:
-            mod_list = None
+    mod_list = _safe_rsync_list(host, module, force_ipv4=force_ipv4)
 
     if mod_list is not None and mod_list.returncode == 0:
         child_dirs: List[str] = []
@@ -281,24 +276,8 @@ def _discover_rsync_upstream(name: str, upstream: str, force_ipv4: bool) -> Opti
 
     for root in roots:
         # Probe for an APT-style dists/ directory using rsync (try IPv6 first, fallback to IPv4)
-        try:
-            cmd = ["rsync"]
-            if not force_ipv4:
-                cmd.append("-6")
-            cmd.extend(["--list-only", f"{host}::{root}/dists/"])
-            probe = subprocess.run(cmd, capture_output=True, timeout=6)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            if not force_ipv4:
-                # IPv6 failed, try IPv4 fallback
-                try:
-                    cmd = ["rsync", "-4", "--list-only", f"{host}::{root}/dists/"]
-                    probe = subprocess.run(cmd, capture_output=True, timeout=6)
-                except (FileNotFoundError, subprocess.TimeoutExpired):
-                    continue
-            else:
-                continue
-
-        if probe.returncode == 0:
+        result = _safe_rsync_list(host, f"{root}/dists/", force_ipv4=force_ipv4)
+        if result is not None and result.returncode == 0:
             # We have positively identified a module/root combination with a
             # working dists/ tree; construct a concrete rsync upstream.
             return f"rsync://{host}/{root}"
@@ -316,35 +295,13 @@ def fetch_url(url: str) -> Optional[str]:
     """
 
     # Try IPv6 first, then fallback to IPv4
-    for family in ["-6", "-4"]:
-        try:
-            result = subprocess.run(
-                [
-                    "curl",
-                    family,
-                    "-s",
-                    "-f",
-                    url,
-                ],
-                capture_output=True,
-                timeout=10,
-            )
-            if result.returncode == 0:
-                try:
-                    return result.stdout.decode("utf-8")
-                except UnicodeDecodeError:
-                    return None
-            # If IPv6 fails, continue to IPv4
-            if family == "-6":
-                continue
-        except FileNotFoundError:
-            # curl not installed; fall back to urllib below.
-            break
-        except subprocess.TimeoutExpired:
-            # If IPv6 times out, try IPv4
-            if family == "-6":
-                continue
-            return False
+    for force_ipv4 in [False, True]:
+        result = _safe_curl_fetch(url, force_ipv4=force_ipv4, timeout=10)
+        if result is not None and result.returncode == 0:
+            try:
+                return result.stdout.decode("utf-8")
+            except UnicodeDecodeError:
+                return None
 
     # Fallback: urllib
     try:
@@ -497,28 +454,12 @@ def parse_release_file(upstream: str, distribution: str, timeout: int = 10) -> D
     # Prefer curl -4 for fetching the small text Release file so we get
     # consistent IPv4 behaviour and tighter timeout control.
     content: Optional[str] = None
-    try:
-        result = subprocess.run(
-            [
-                "curl",
-                "-4",
-                "-s",
-                "-f",
-                release_url,
-            ],
-            capture_output=True,
-            timeout=timeout,
-        )
-        if result.returncode == 0:
-            try:
-                content = result.stdout.decode("utf-8")
-            except UnicodeDecodeError:
-                content = None
-    except FileNotFoundError:
-        # curl not installed; fall back to urllib below.
-        pass
-    except subprocess.TimeoutExpired:
-        content = None
+    result = _safe_curl_fetch(release_url, force_ipv4=True, timeout=timeout)
+    if result is not None and result.returncode == 0:
+        try:
+            content = result.stdout.decode("utf-8")
+        except UnicodeDecodeError:
+            content = None
 
     if content is None:
         try:
@@ -729,28 +670,10 @@ def _download_binary_to_path(url: str, dest_path: str, timeout: int = 10) -> boo
     """
 
     # Try curl first
-    try:
-        result = subprocess.run(
-            [
-                "curl",
-                "-4",
-                "-s",
-                "-f",
-                "-L",
-                "-o",
-                dest_path,
-                url,
-            ],
-            capture_output=True,
-            timeout=timeout,
-        )
-        if result.returncode == 0:
-            return True
-    except FileNotFoundError:
-        # curl not installed; fall back to urllib.
-        pass
-    except subprocess.TimeoutExpired:
-        return False
+    result = _safe_curl_fetch(url, force_ipv4=True, timeout=timeout, 
+                             extra_args=["-L", "-o", dest_path])
+    if result is not None and result.returncode == 0:
+        return True
 
     # Fallback: urllib
     try:
