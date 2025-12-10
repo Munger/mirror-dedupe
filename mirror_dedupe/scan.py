@@ -22,7 +22,11 @@ import socket
 import os
 import shutil
 import tempfile
+from pathlib import Path
+import yaml
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from .utils import analyze_url_connectivity, ipv6_available
 
 
 def _build_rsync_candidates(upstream: str) -> List[str]:
@@ -86,7 +90,7 @@ def _tokenize(s: str) -> List[str]:
     return [t for t in re.split(r"[^A-Za-z0-9]+", s.lower()) if t]
 
 
-def _discover_rsync_upstream(name: str, upstream: str) -> Optional[str]:
+def _discover_rsync_upstream(name: str, upstream: str, force_ipv4: bool) -> Optional[str]:
     """Best-effort discovery of an rsync base URL for metadata.
 
     This keeps HTTP/HTTPS *upstream* as the source of truth for curl, and only
@@ -124,22 +128,33 @@ def _discover_rsync_upstream(name: str, upstream: str) -> Optional[str]:
     if not tokens_repo:
         return None
 
-    # List rsync daemon modules: rsync -4 host::
+    # List rsync daemon modules: rsync host:: (try IPv6 first, fallback to IPv4)
     try:
-        result = subprocess.run(
-            ["rsync", "-4", f"{host}::"],
-            capture_output=True,
-            timeout=6,
-        )
-    except FileNotFoundError:
-        print(
-            "  NOTE: rsync binary not found on PATH; "
-            "falling back to https for this scan.",
-            file=sys.stderr,
-        )
-        return None
-    except subprocess.TimeoutExpired:
-        return None
+        cmd = ["rsync"]
+        if not force_ipv4:
+            cmd.append("-6")
+        cmd.extend(["--list-only", f"{host}::"])
+        result = subprocess.run(cmd, capture_output=True, timeout=6)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        if not force_ipv4:
+            # IPv6 failed, try IPv4 fallback
+            try:
+                cmd = ["rsync", "-4", "--list-only", f"{host}::"]
+                result = subprocess.run(cmd, capture_output=True, timeout=6)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                print(
+                    "  NOTE: rsync binary not found on PATH; "
+                    "falling back to https for this scan.",
+                    file=sys.stderr,
+                )
+                return None
+        else:
+            print(
+                "  NOTE: rsync binary not found on PATH; "
+                "falling back to https for this scan.",
+                file=sys.stderr,
+            )
+            return None
 
     if result.returncode != 0:
         return None
@@ -198,13 +213,21 @@ def _discover_rsync_upstream(name: str, upstream: str) -> Optional[str]:
     # the daemon exposes, rather than assuming layout from the HTTP path.
     chosen_child: Optional[str] = None
     try:
-        mod_list = subprocess.run(
-            ["rsync", "-4", f"{host}::{module}/"],
-            capture_output=True,
-            timeout=6,
-        )
-    except subprocess.TimeoutExpired:
-        mod_list = None
+        cmd = ["rsync"]
+        if not force_ipv4:
+            cmd.append("-6")
+        cmd.append(f"{host}::{module}/")
+        mod_list = subprocess.run(cmd, capture_output=True, timeout=6)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        if not force_ipv4:
+            # IPv6 failed, try IPv4 fallback
+            try:
+                cmd = ["rsync", "-4", f"{host}::{module}/"]
+                mod_list = subprocess.run(cmd, capture_output=True, timeout=6)
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                mod_list = None
+        else:
+            mod_list = None
 
     if mod_list is not None and mod_list.returncode == 0:
         child_dirs: List[str] = []
@@ -213,8 +236,8 @@ def _discover_rsync_upstream(name: str, upstream: str) -> Optional[str]:
             if not line or line.startswith("This is an Ubuntu mirror"):
                 continue
             # Expect rsync-style listings where directory entries start with
-            # a leading "d" (e.g. "drwxr-xr-x ... ubuntu").
-            if not line.startswith("d"):
+            # a leading "d" (e.g. "drwxr-xr-x ... ubuntu") or "l" for symlinks.
+            if not line.startswith(("d", "l")):
                 continue
             parts = line.split()
             if not parts:
@@ -235,6 +258,13 @@ def _discover_rsync_upstream(name: str, upstream: str) -> Optional[str]:
                 if not tokens_d:
                     continue
                 score = len(tokens_d & tokens_repo)
+                
+                # Tie-breaker: prefer debian-* when upstream contains 'debian'
+                if "debian" in upstream.lower() and d.startswith("debian-"):
+                    score += 0.5  # Small advantage for debian directories
+                elif "rpm" in upstream.lower() and d.startswith("rpm-"):
+                    score += 0.5  # Small advantage for rpm directories
+                
                 if score > best_child_score:
                     best_child_score = score
                     best_children = [d]
@@ -250,15 +280,23 @@ def _discover_rsync_upstream(name: str, upstream: str) -> Optional[str]:
         roots.append(f"{module}/{chosen_child}")
 
     for root in roots:
-        # Probe for an APT-style dists/ directory using IPv4-only rsync.
+        # Probe for an APT-style dists/ directory using rsync (try IPv6 first, fallback to IPv4)
         try:
-            probe = subprocess.run(
-                ["rsync", "-4", "--list-only", f"{host}::{root}/dists/"],
-                capture_output=True,
-                timeout=6,
-            )
-        except subprocess.TimeoutExpired:
-            continue
+            cmd = ["rsync"]
+            if not force_ipv4:
+                cmd.append("-6")
+            cmd.extend(["--list-only", f"{host}::{root}/dists/"])
+            probe = subprocess.run(cmd, capture_output=True, timeout=6)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            if not force_ipv4:
+                # IPv6 failed, try IPv4 fallback
+                try:
+                    cmd = ["rsync", "-4", "--list-only", f"{host}::{root}/dists/"]
+                    probe = subprocess.run(cmd, capture_output=True, timeout=6)
+                except (FileNotFoundError, subprocess.TimeoutExpired):
+                    continue
+            else:
+                continue
 
         if probe.returncode == 0:
             # We have positively identified a module/root combination with a
@@ -270,37 +308,43 @@ def _discover_rsync_upstream(name: str, upstream: str) -> Optional[str]:
 
 
 def fetch_url(url: str) -> Optional[str]:
-    """Fetch small text content from URL, preferring curl -4.
+    """Fetch small text content from URL, trying IPv6 first then IPv4 fallback.
 
     This is used for HTML index pages (e.g. /dists/) and similar metadata.
-    We try curl first for better IPv4 behaviour and timeout control, then
-    fall back to urllib if curl is unavailable. Binary or non-UTF8 content
-    returns None.
+    We try curl first for better timeout control, then fall back to urllib 
+    if curl is unavailable. Binary or non-UTF8 content returns None.
     """
 
-    # Prefer curl -4 for consistency with Release parsing.
-    try:
-        result = subprocess.run(
-            [
-                "curl",
-                "-4",
-                "-s",
-                "-f",
-                url,
-            ],
-            capture_output=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            try:
-                return result.stdout.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-    except FileNotFoundError:
-        # curl not installed; fall back to urllib.
-        pass
-    except subprocess.TimeoutExpired:
-        return None
+    # Try IPv6 first, then fallback to IPv4
+    for family in ["-6", "-4"]:
+        try:
+            result = subprocess.run(
+                [
+                    "curl",
+                    family,
+                    "-s",
+                    "-f",
+                    url,
+                ],
+                capture_output=True,
+                timeout=10,
+            )
+            if result.returncode == 0:
+                try:
+                    return result.stdout.decode("utf-8")
+                except UnicodeDecodeError:
+                    return None
+            # If IPv6 fails, continue to IPv4
+            if family == "-6":
+                continue
+        except FileNotFoundError:
+            # curl not installed; fall back to urllib below.
+            break
+        except subprocess.TimeoutExpired:
+            # If IPv6 times out, try IPv4
+            if family == "-6":
+                continue
+            return False
 
     # Fallback: urllib
     try:
@@ -317,33 +361,39 @@ def fetch_url(url: str) -> Optional[str]:
 def url_exists(url: str, timeout: int = 1) -> bool:
     """Lightweight check: does this URL respond successfully?
 
-    Prefer using the system ``curl`` with ``-4`` so we avoid flaky IPv6
-    behaviour and let curl handle HTTP/HTTPS details (including TLS). This
-    check is binary-safe; we only care about success/failure, not content.
+    Try IPv6 first then IPv4 fallback to avoid flaky IPv6 behaviour
+    while still preferring IPv6 when it works. This check is binary-safe;
+    we only care about success/failure, not content.
     """
 
-    # First try curl (IPv4-only, head request). ``-f`` makes curl exit
-    # non-zero on 4xx/5xx, which is what we want for an existence check.
-    try:
-        result = subprocess.run(
-            [
-                "curl",
-                "-4",
-                "-s",
-                "-f",
-                "-I",
-                url,
-            ],
-            capture_output=True,
-            timeout=timeout,
-        )
-        if result.returncode == 0:
-            return True
-    except FileNotFoundError:
-        # curl not installed; fall back to urllib below.
-        pass
-    except subprocess.TimeoutExpired:
-        return False
+    # Try IPv6 first, then fallback to IPv4
+    for family in ["-6", "-4"]:
+        try:
+            result = subprocess.run(
+                [
+                    "curl",
+                    family,
+                    "-s",
+                    "-f",
+                    "-I",
+                    url,
+                ],
+                capture_output=True,
+                timeout=timeout,
+            )
+            if result.returncode == 0:
+                return True
+            # If IPv6 fails, continue to IPv4
+            if family == "-6":
+                continue
+        except FileNotFoundError:
+            # curl not installed; fall back to urllib below.
+            break
+        except subprocess.TimeoutExpired:
+            # If IPv6 times out, try IPv4
+            if family == "-6":
+                continue
+            return False
 
     # Fallback: urllib with a short timeout. This may use IPv4 or IPv6
     # depending on system configuration.
@@ -828,25 +878,39 @@ def generate_config(name: str, dest: str, upstream: str,
                     dist_overrides: Optional[List[str]] = None,
                     arch_override: Optional[List[str]] = None,
                     component_override: Optional[List[str]] = None,
-                    sync_method_override: Optional[str] = None) -> str:
+                    sync_method_override: Optional[str] = None,
+                    force_ipv4: bool = False,
+                    host_v6_ok: bool = True,
+                    global_disable_ipv6: bool = True) -> str:
     """Generate repository configuration"""
     
     print(f"Scanning {upstream}...", file=sys.stderr)
+    total_steps = 4
+    step = 1
+
+    def next_step_label() -> str:
+        nonlocal step
+        label = f"[{step}/{total_steps}]"
+        step += 1
+        return label
     
     # Detect or honour forced sync method. We always keep *upstream* as the
     # HTTP/HTTPS base for curl and only enable rsync when we can discover a
     # concrete rsync_upstream with a working dists/ tree.
-    print("  [1/4] Detecting sync method...", file=sys.stderr)
+    if not global_disable_ipv6:
+        print(f"  {next_step_label()} Checking IPv6...", file=sys.stderr)
+    else:
+        print(f"  {next_step_label()} Detecting sync method...", file=sys.stderr)
     rsync_upstream: Optional[str] = None
     if sync_method_override:
         sync_method = sync_method_override
     else:
-        rsync_upstream = _discover_rsync_upstream(name, upstream)
+        rsync_upstream = _discover_rsync_upstream(name, upstream, force_ipv4=force_ipv4)
         sync_method = 'rsync' if rsync_upstream else 'https'
     print(f"      Sync method: {sync_method}", file=sys.stderr)
     
     # Discover distributions (suites) under dists/
-    print("  [2/4] Discovering distributions...", end="", file=sys.stderr, flush=True)
+    print(f"  {next_step_label()} Discovering distributions...", end="", file=sys.stderr, flush=True)
     discovered = discover_distributions(upstream)
     if not discovered:
         print("", file=sys.stderr)  # newline after dots
@@ -901,7 +965,7 @@ def generate_config(name: str, dest: str, upstream: str,
 
     # Parse Release files to discover architectures and components. This can
     # take a little time on large archives, so we make it an explicit step.
-    print("  [3/4] Discovering architectures/components...", file=sys.stderr)
+    print(f"  {next_step_label()} Discovering architectures/components...", file=sys.stderr)
     arch_set = set()
     comp_set = set()
 
@@ -953,13 +1017,20 @@ def generate_config(name: str, dest: str, upstream: str,
     # Detect GPG key (unless provided explicitly). Pass the discovered
     # distributions so detect_gpg_key can also look for per-suite
     # Release.gpg files (common for some third-party archives).
-    print("  [4/4] Probing for GPG key...", end="", file=sys.stderr, flush=True)
+    print(f"  {next_step_label()} Probing for GPG key...", end="", file=sys.stderr, flush=True)
     gpg_info = None
     if not (gpg_key_url and gpg_key_path):
         gpg_info = detect_gpg_key(upstream, distributions)
     # Finish the progress line before emitting any summary.
     print("", file=sys.stderr)
     
+    # Decide whether to suggest per-repo IPv6 disabling based on host health.
+    # We only do this when global IPv6 is allowed but this specific host
+    # appears to have unreliable or non-existent IPv6 while IPv4 still works.
+    disable_ipv6_for_repo = False
+    if (not global_disable_ipv6) and (not host_v6_ok) and force_ipv4:
+        disable_ipv6_for_repo = True
+
     # Generate YAML config
     config_lines = [
         f"# {name} repository",
@@ -972,6 +1043,9 @@ def generate_config(name: str, dest: str, upstream: str,
 
     if rsync_upstream and sync_method == 'rsync':
         config_lines.append(f"rsync_upstream: {rsync_upstream}")
+
+    if disable_ipv6_for_repo:
+        config_lines.append("disable_ipv6: true")
     
     if gpg_key_url and gpg_key_path:
         # Explicit GPG key provided by user, use as-is
@@ -1039,7 +1113,7 @@ def generate_config(name: str, dest: str, upstream: str,
     return '\n'.join(config_lines)
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(
         description='Scan a repository and generate mirror-dedupe configuration',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1088,6 +1162,21 @@ Examples:
     
     args = parser.parse_args()
 
+    # Load main config (if present) to obtain global defaults such as
+    # disable_ipv6. In test environments without a mirror-dedupe.conf we
+    # default to disabling IPv6, which keeps behaviour predictable.
+    cfg_path = Path(args.config_dir) / 'mirror-dedupe.conf'
+    global_disable_ipv6 = False
+    if cfg_path.exists():
+        try:
+            with cfg_path.open('r') as f:
+                cfg = yaml.safe_load(f) or {}
+            global_disable_ipv6 = cfg.get('disable_ipv6', False)
+        except Exception:
+            # On any parse error, fall back to allowing IPv6 so we can still
+            # detect and react to broken hosts.
+            global_disable_ipv6 = False
+
     # Validate explicit GPG key parameters if provided
     if args.gpg_key_url or args.gpg_key_path:
         if not (args.gpg_key_url and args.gpg_key_path):
@@ -1103,6 +1192,55 @@ Examples:
     
     # Normalise dest: default to name if not provided explicitly.
     dest = args.dest or args.name
+
+    # Derive IPv4/IPv6 behaviour for this upstream based on the global
+    # disable_ipv6 setting and a per-host IPv6 health check. Before we do
+    # that, perform a generic connectivity analysis so we can pick a stable
+    # upstream URL and decide whether IPv6 is viable.
+    conn_info = analyze_url_connectivity(args.upstream, timeout=5)
+
+    if not conn_info["reachable"]:
+        # No working path (neither IPv4 nor IPv6). There is no sensible
+        # configuration we can write for this upstream, so abort early with
+        # a concise explanation instead of generating a broken config.
+        print(f"ERROR: Upstream {args.upstream} is unreachable over both IPv4 and IPv6.", file=sys.stderr)
+        if conn_info.get("recommended_action"):
+            print(f"Recommendation: {conn_info['recommended_action']}", file=sys.stderr)
+        sys.exit(1)
+
+    # If we discovered a redirected URL, prefer that in the generated
+    # configuration so future runs do not depend on chasing the same
+    # redirect again.
+    final_url = conn_info.get("final_url") or args.upstream
+    if final_url != args.upstream:
+        print(f"NOTE: Upstream {args.upstream} redirects to {final_url}; using redirected URL in generated config.")
+        args.upstream = final_url
+
+    # If IPv6 is clearly not working but IPv4 is, treat this as an
+    # "IPv6 broken, IPv4 OK" case. We keep the probe conservative: any
+    # error at the IPv6 layer counts as "not usable" here, while a
+    # working IPv4 path is considered sufficient for a robust config.
+    ipv6_ok = bool(conn_info.get("ipv6_reachable"))
+    ipv4_ok = bool(conn_info.get("ipv4_reachable"))
+
+    parsed_upstream = urlparse(args.upstream)
+    upstream_host = parsed_upstream.hostname or ''
+    host_v6_ok = ipv6_ok or ipv6_available(args.upstream)
+
+    # Determine whether we should force IPv4 for this upstream. We honour
+    # the global disable_ipv6 first and then tighten further based on the
+    # per-host health check.
+    force_ipv4 = global_disable_ipv6 or (not host_v6_ok)
+
+    if (not global_disable_ipv6) and (not host_v6_ok) and ipv4_ok:
+        # IPv6 appears unreliable for this host but IPv4 is fine. We make a
+        # point of telling the user why we will generate a config that
+        # prefers IPv4 so they can choose to harden this by setting
+        # disable_ipv6: true in the permanent repos-available config.
+        print(
+            f"NOTE: IPv6 appears unreliable for {upstream_host}, IPv4 is OK; "
+            "this scan will prefer IPv4 for network operations."
+        )
 
     # Normalise/validate forced sync method, if supplied
     sync_method_override: Optional[str] = None
@@ -1167,6 +1305,9 @@ Examples:
         arch_override=arch_override,
         component_override=component_override,
         sync_method_override=sync_method_override,
+        force_ipv4=force_ipv4,
+        host_v6_ok=host_v6_ok,
+        global_disable_ipv6=global_disable_ipv6,
     )
     
     # Save to repos-available

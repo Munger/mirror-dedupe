@@ -18,15 +18,21 @@ import threading
 import fnmatch
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse
 
 from .indices import get_packages_index, get_sources_index, parse_release_file
 from .download import download_with_curl, verify_sha256
 from .dedupe import hardlink_file, expand_distributions, cleanup_pool
 from .sync import run_rsync, run_https_sync, download_gpg_key
-from .utils import get_disk_usage, format_bytes, calculate_total_hardlink_savings
+from .utils import get_disk_usage, format_bytes, calculate_total_hardlink_savings, ipv6_available, get_optimal_url, classify_url_issue
 
 # Components to process
 COMPONENTS = ['main', 'restricted', 'universe', 'multiverse']
+
+# Mirrors for which IPv6 appeared unreliable during this run. We add to this
+# when a host-level IPv6 probe fails but the mirror config did not already
+# disable IPv6.
+IPV6_TROUBLE_MIRRORS = set()
 
 
 def run_orchestrator_mode(mirrors, config_dir, dry_run):
@@ -144,17 +150,49 @@ def sync_mirrors(mirrors, dry_run):
         rsync_upstream = mirror.get('rsync_upstream', upstream)
         gpg_key_url = mirror.get('gpg_key_url')
         gpg_key_path = mirror.get('gpg_key_path')
+
+        # Analyze URL connectivity and get optimal URL
+        optimal_url, connectivity_info = get_optimal_url(upstream)
+        if optimal_url is None:
+            print(f"[{name}] ERROR: URL connectivity failed for {upstream}")
+            issue_type = classify_url_issue(upstream)
+            print(f"[{name}] Issue type: {issue_type}")
+            if connectivity_info.get('recommended_action'):
+                print(f"[{name}] Recommendation: {connectivity_info['recommended_action']}")
+            continue
+        
+        # Report URL corrections and issues
+        if optimal_url != upstream:
+            print(f"[{name}] NOTE: URL corrected: {upstream} → {optimal_url}")
+            upstream = optimal_url
+            # Update mirror dict for consistency
+            mirror['upstream'] = upstream
+        
+        issue_type = classify_url_issue(upstream)
+        if issue_type != 'working':
+            print(f"[{name}] NOTE: URL issue detected: {issue_type}")
+            if connectivity_info.get('recommended_action'):
+                print(f"[{name}] Recommendation: {connectivity_info['recommended_action']}")
+
+        # Start from the configured disable_ipv6 flag, then further tighten
+        # based on a cheap per-host IPv6 health check so we do not waste time
+        # probing or syncing over obviously broken IPv6 paths.
+        cfg_disable_ipv6 = mirror.get('disable_ipv6', True)
+        host_v6_ok = ipv6_available(upstream)
+        force_ipv4 = cfg_disable_ipv6 or (not host_v6_ok)
+        if (not cfg_disable_ipv6) and (not host_v6_ok):
+            IPV6_TROUBLE_MIRRORS.add(name)
         
         # Download GPG key if specified
         if gpg_key_url and gpg_key_path:
             print(f"\n[{name}] Downloading GPG key...")
-            if not download_gpg_key(gpg_key_url, dest, gpg_key_path, dry_run):
+            if not download_gpg_key(gpg_key_url, dest, gpg_key_path, dry_run, force_ipv4=force_ipv4):
                 print(f"  WARNING: GPG key download failed for {name}")
         
         print(f"\n[{name}] Syncing dists...")
-        
+
         if sync_method == 'https':
-            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run):
+            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
                 print(f"  ERROR: HTTPS sync failed for {name}")
                 sys.exit(1)
         else:
@@ -162,7 +200,7 @@ def sync_mirrors(mirrors, dry_run):
             # discovered by mirror-dedupe-scan. This keeps HTTP upstream as the
             # source of truth for curl while using a concrete rsync daemon
             # path for dists/.
-            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run):
+            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run, force_ipv4=force_ipv4):
                 print(f"  ERROR: rsync failed for {name}")
                 sys.exit(1)
 
@@ -353,6 +391,7 @@ def process_files(hash_to_files, unique_files, config, dry_run):
     curl_timeout = config.get('curl_timeout', 900)
     max_retries = config.get('max_retries', 3)
     progress_interval = config.get('progress_interval', 1000)
+    ipv4_only = config.get('disable_ipv6', True)
     
     # Reset counters for actual processing with thread-safe locks
     downloaded = 0
@@ -387,9 +426,11 @@ def process_files(hash_to_files, unique_files, config, dry_run):
                 # Wrong size, need to download
                 url = f"{first_info['upstream']}/{first_path}"
                 success = False
+                force_ipv4 = ipv4_only
                 for attempt in range(max_retries):
                     progress_info = f" - {unique_files - processed_count} files remaining"
-                    if download_with_curl(url, dest_path, curl_timeout, progress_info):
+                    ok, status = download_with_curl(url, dest_path, curl_timeout, progress_info, force_ipv4=force_ipv4)
+                    if ok:
                         if verify_sha256(dest_path, sha256, buffer_size):
                             with counter_lock:
                                 downloaded += 1
@@ -399,10 +440,25 @@ def process_files(hash_to_files, unique_files, config, dry_run):
                         else:
                             print(f"  [ERROR] Hash mismatch after download (attempt {attempt+1}/{max_retries}): {first_path}", flush=True)
                             os.remove(dest_path)
+                            # On hash mismatch we still honour max_retries, but
+                            # there is no need to change IPv4/IPv6 behaviour.
                     else:
-                        if attempt < max_retries - 1:
+                        # Do not hammer 404/403 responses; log once per run
+                        # for this file and stop retrying.
+                        if status == 'not_found':
+                            print(f"  [WARN] 404/403 Not Found, not retrying this run: {first_path}", flush=True)
+                            break
+
+                        # If IPv6 is allowed globally and we hit a timeout on
+                        # a non-IPv4 attempt, retry with IPv4-only and record
+                        # that in the logs so misbehaving v6 paths are
+                        # visible.
+                        if (not ipv4_only) and (not force_ipv4) and status == 'timeout':
+                            print(f"  [INFO] Timeout detected, retrying with IPv4 only: {first_path}", flush=True)
+                            force_ipv4 = True
+                        elif attempt < max_retries - 1:
                             print(f"  [WARN] Download failed (attempt {attempt+1}/{max_retries}), retrying: {first_path}", flush=True)
-                
+
                 if not success:
                     print(f"  [ERROR] Download failed after {max_retries} attempts: {first_path}", flush=True)
                     # Don't return - still try to hardlink if file exists elsewhere
@@ -410,9 +466,11 @@ def process_files(hash_to_files, unique_files, config, dry_run):
             # File doesn't exist, download it
             url = f"{first_info['upstream']}/{first_path}"
             success = False
+            force_ipv4 = ipv4_only
             for attempt in range(max_retries):
                 progress_info = f" - {unique_files - processed_count} files remaining"
-                if download_with_curl(url, dest_path, curl_timeout, progress_info):
+                ok, status = download_with_curl(url, dest_path, curl_timeout, progress_info, force_ipv4=force_ipv4)
+                if ok:
                     if verify_sha256(dest_path, sha256, buffer_size):
                         with counter_lock:
                             downloaded += 1
@@ -426,9 +484,16 @@ def process_files(hash_to_files, unique_files, config, dry_run):
                         except:
                             pass
                 else:
-                    if attempt < max_retries - 1:
+                    if status == 'not_found':
+                        print(f"  [WARN] 404/403 Not Found, not retrying this run: {first_path}", flush=True)
+                        break
+
+                    if (not ipv4_only) and (not force_ipv4) and status == 'timeout':
+                        print(f"  [INFO] Timeout detected, retrying with IPv4 only: {first_path}", flush=True)
+                        force_ipv4 = True
+                    elif attempt < max_retries - 1:
                         print(f"  [WARN] Download failed (attempt {attempt+1}/{max_retries}), retrying: {first_path}", flush=True)
-            
+
             if not success:
                 print(f"  [FAIL] Download failed after {max_retries} attempts: {first_path}", flush=True)
                 with processed_lock:
@@ -515,11 +580,11 @@ def cleanup_mirrors(mirrors, global_files, dry_run):
         
         print(f"\n[{name}] Syncing dists...")
         if sync_method == 'https':
-            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run):
+            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
                 print(f"  ERROR: HTTPS sync failed for {name}")
         else:
             # Use rsync_upstream for rsync metadata sync when available.
-            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run):
+            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run, force_ipv4=force_ipv4):
                 print(f"  ERROR: rsync failed for {name}")
         
         # Build expected files list for this mirror
@@ -565,5 +630,15 @@ def print_final_summary(mirrors, downloaded, hardlinked, skipped, initial_used):
     else:
         print(f"Mirror filesystem size unchanged")
     print(f"Current usage: {format_bytes(final_used)} used, {format_bytes(free)} free")
-    
+
+    # IPv6 health summary
+    if IPV6_TROUBLE_MIRRORS:
+        print(f"\nIPv6 summary")
+        print(f"{'='*60}")
+        print("The following mirrors had unreliable IPv6 and were forced to IPv4:")
+        for name in sorted(IPV6_TROUBLE_MIRRORS):
+            print(f"  - {name}")
+        print("Consider adding 'disable_ipv6: true' either globally in mirror-dedupe.conf")
+        print("or in the corresponding repos-available/*.conf entries for these mirrors.")
+
     print("\nDone!")
