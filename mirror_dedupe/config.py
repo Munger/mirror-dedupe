@@ -26,11 +26,16 @@ def load_config(config_dir: str) -> dict:
         main_config_path = Path(config_dir) / 'mirror-dedupe.conf'
         with open(main_config_path, 'r') as f:
             config = yaml.safe_load(f) or {}
-        
+
+        # Global IPv6 control: default to *allowing* IPv6 unless explicitly
+        # disabled in the main config. Mirrors can override this per-repo.
+        global_disable_ipv6 = config.get('disable_ipv6', False)
+        config['disable_ipv6'] = global_disable_ipv6
+
         # Load repo definitions from repos-enabled/
         repos_dir = Path(config_dir) / 'repos-enabled'
         mirrors = []
-        
+
         if repos_dir.exists() and repos_dir.is_dir():
             for repo_file in sorted(repos_dir.glob('*.conf')):
                 try:
@@ -42,6 +47,12 @@ def load_config(config_dir: str) -> dict:
                             dest = mirror.get('dest', '')
                             if not os.path.isabs(dest):
                                 mirror['dest'] = os.path.join(repo_root, dest)
+
+                            # Per-mirror IPv6 override: if a mirror config
+                            # specifies disable_ipv6 explicitly, honour it;
+                            # otherwise inherit the global default.
+                            mirror['disable_ipv6'] = mirror.get('disable_ipv6', global_disable_ipv6)
+
                             mirrors.append(mirror)
                 except Exception as e:
                     print(f"Warning: Failed to load {repo_file}: {e}")

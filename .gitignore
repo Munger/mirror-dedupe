@@ -36,7 +36,7 @@ env/
 .pytest_cache/
 .coverage
 htmlcov/
-tests/
+test_output/
 
 # Debian packaging
 debian/files
@@ -50,3 +50,6 @@ debian/.debhelper/
 *.deb
 *.buildinfo
 *.changes
+
+# Rsync temporary listing files
+.ls-lR.gz.*

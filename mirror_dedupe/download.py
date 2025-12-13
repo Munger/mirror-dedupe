@@ -24,8 +24,17 @@ except:
     pass
 
 
-def download_with_curl(url: str, dest_path: str, timeout: int = 300, progress_info: str = "") -> bool:
-    """Download file with curl, supports resuming partial downloads"""
+def download_with_curl(url: str, dest_path: str, timeout: int = 300,
+                       progress_info: str = "", force_ipv4: bool = False):
+    """Download file with curl, supports resuming partial downloads.
+
+    Returns a tuple (success: bool, status: str) where status is one of:
+
+        - "ok":        download succeeded
+        - "timeout":   curl timed out
+        - "not_found": HTTP 404/403 (when using -f)
+        - "error":     any other failure
+    """
     from . import utils
     
     dest_dir = os.path.dirname(dest_path)
@@ -39,26 +48,49 @@ def download_with_curl(url: str, dest_path: str, timeout: int = 300, progress_in
     print(f"  -> Downloading: {filename} ({current_active} active){progress_info}", flush=True)
     
     try:
-        # -C - enables automatic resume of partial downloads
-        cmd = ['curl', '-f', '-L', '-C', '-', '--max-time', str(timeout), '-o', dest_path, url]
+        # -C - enables automatic resume of partial downloads. We also use
+        # -w '%{http_code}' so that stdout contains only the HTTP status
+        # code, which lets us distinguish 404/403 from other failures.
+        cmd = ['curl']
+        if force_ipv4:
+            cmd.append('-4')
+        cmd.extend([
+            '-s',
+            '-f',
+            '-L',
+            '-C', '-',
+            '--max-time', str(timeout),
+            '-w', '%{http_code}',
+            '-o', dest_path,
+            url,
+        ])
         result = subprocess.run(cmd, capture_output=True)
-        
+
         with utils.download_lock:
             utils.active_downloads -= 1
             remaining = utils.active_downloads
-        
+
+        http_code = (result.stdout or b'').decode(errors='ignore').strip()
+
         if result.returncode == 0:
             print(f"  [OK] Completed: {filename} ({remaining} remaining)", flush=True)
-        else:
-            print(f"  [FAIL] Failed: {filename} ({remaining} remaining)", flush=True)
-        
-        return result.returncode == 0
+            return True, 'ok'
+
+        # Classify common failure modes for the caller's retry logic.
+        status = 'error'
+        if result.returncode == 28:
+            status = 'timeout'
+        elif http_code in ('403', '404'):
+            status = 'not_found'
+
+        print(f"  [FAIL] Failed: {filename} ({remaining} remaining)", flush=True)
+        return False, status
     except Exception as e:
         with utils.download_lock:
             utils.active_downloads -= 1
             remaining = utils.active_downloads
         print(f"  [ERROR] Error: {filename} ({remaining} remaining) - {e}", flush=True)
-        return False
+        return False, 'error'
 
 
 def verify_sha256(file_path: str, expected_hash: str, buffer_size: int = 1048576) -> bool:

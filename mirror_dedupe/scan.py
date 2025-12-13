@@ -13,8 +13,6 @@ Licence: MIT
 import sys
 import argparse
 import subprocess
-import urllib.request
-import urllib.error
 from urllib.parse import urlparse
 from typing import List, Dict, Optional
 import re
@@ -84,14 +82,19 @@ def _build_rsync_candidates(upstream: str) -> List[str]:
     return unique
 
 
-def _safe_curl_fetch(url: str, force_ipv4: bool = False, timeout: int = 10, 
-                    extra_args: List[str] = None) -> Optional[subprocess.CompletedProcess]:
-    """Centralized, safe curl function with IPv6/IPv4 fallback"""
+def http_fetch(url: str, force_ipv4: bool = False, timeout: int = 10,
+               output_file: str = None, follow_redirects: bool = True) -> Optional[subprocess.CompletedProcess]:
+    """Centralized HTTP function using curl.
+    
+    Handles all HTTP operations: text fetching, binary downloads, file output.
+    """
     cmd = ["curl"]
     cmd.extend(["-4"] if force_ipv4 else ["-6"])
     cmd.extend(["-s", "-f"])
-    if extra_args:
-        cmd.extend(extra_args)
+    if follow_redirects:
+        cmd.append("-L")
+    if output_file:
+        cmd.extend(["-o", output_file])
     cmd.append(url)
     
     try:
@@ -100,8 +103,8 @@ def _safe_curl_fetch(url: str, force_ipv4: bool = False, timeout: int = 10,
         return None
 
 
-def _safe_rsync_list(host: str, path: str, force_ipv4: bool = False, timeout: int = 6) -> Optional[subprocess.CompletedProcess]:
-    """Centralized, safe rsync listing function - ALWAYS read-only"""
+def rsync_list(host: str, path: str, force_ipv4: bool = False, timeout: int = 6) -> Optional[subprocess.CompletedProcess]:
+    """Rsync listing function - always read-only (--list-only)"""
     cmd = ["rsync"]
     cmd.extend(["-4"] if force_ipv4 else ["-6"])
     cmd.extend(["--list-only", f"{host}::{path}"])
@@ -157,7 +160,7 @@ def _discover_rsync_upstream(name: str, upstream: str, force_ipv4: bool) -> Opti
         return None
 
     # List rsync daemon modules: rsync host:: (try IPv6 first, fallback to IPv4)
-    result = _safe_rsync_list(host, "", force_ipv4=force_ipv4)
+    result = rsync_list(host, "", force_ipv4=force_ipv4)
     if result is None:
         print(
             "  NOTE: rsync binary not found on PATH; "
@@ -222,7 +225,7 @@ def _discover_rsync_upstream(name: str, upstream: str, force_ipv4: bool) -> Opti
     # ubuntu-cloud-archive). This keeps the discovery strictly based on what
     # the daemon exposes, rather than assuming layout from the HTTP path.
     chosen_child: Optional[str] = None
-    mod_list = _safe_rsync_list(host, module, force_ipv4=force_ipv4)
+    mod_list = rsync_list(host, module, force_ipv4=force_ipv4)
 
     if mod_list is not None and mod_list.returncode == 0:
         child_dirs: List[str] = []
@@ -276,7 +279,7 @@ def _discover_rsync_upstream(name: str, upstream: str, force_ipv4: bool) -> Opti
 
     for root in roots:
         # Probe for an APT-style dists/ directory using rsync (try IPv6 first, fallback to IPv4)
-        result = _safe_rsync_list(host, f"{root}/dists/", force_ipv4=force_ipv4)
+        result = rsync_list(host, f"{root}/dists/", force_ipv4=force_ipv4)
         if result is not None and result.returncode == 0:
             # We have positively identified a module/root combination with a
             # working dists/ tree; construct a concrete rsync upstream.
@@ -289,30 +292,20 @@ def _discover_rsync_upstream(name: str, upstream: str, force_ipv4: bool) -> Opti
 def fetch_url(url: str) -> Optional[str]:
     """Fetch small text content from URL, trying IPv6 first then IPv4 fallback.
 
-    This is used for HTML index pages (e.g. /dists/) and similar metadata.
-    We try curl first for better timeout control, then fall back to urllib 
-    if curl is unavailable. Binary or non-UTF8 content returns None.
+    Uses centralized curl function - no urllib fallback.
+    Binary or non-UTF8 content returns None.
     """
 
     # Try IPv6 first, then fallback to IPv4
     for force_ipv4 in [False, True]:
-        result = _safe_curl_fetch(url, force_ipv4=force_ipv4, timeout=10)
+        result = http_fetch(url, force_ipv4=force_ipv4, timeout=10)
         if result is not None and result.returncode == 0:
             try:
                 return result.stdout.decode("utf-8")
             except UnicodeDecodeError:
                 return None
 
-    # Fallback: urllib
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            data = response.read()
-            try:
-                return data.decode("utf-8")
-            except UnicodeDecodeError:
-                return None
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
-        return None
+    return None
 
 
 def url_exists(url: str, timeout: int = 1) -> bool:
@@ -451,10 +444,9 @@ def parse_release_file(upstream: str, distribution: str, timeout: int = 10) -> D
     """
     release_url = f"{upstream.rstrip('/')}/dists/{distribution}/Release"
 
-    # Prefer curl -4 for fetching the small text Release file so we get
-    # consistent IPv4 behaviour and tighter timeout control.
+    # Use centralized curl function - no urllib fallback
     content: Optional[str] = None
-    result = _safe_curl_fetch(release_url, force_ipv4=True, timeout=timeout)
+    result = http_fetch(release_url, force_ipv4=True, timeout=timeout)
     if result is not None and result.returncode == 0:
         try:
             content = result.stdout.decode("utf-8")
@@ -462,20 +454,9 @@ def parse_release_file(upstream: str, distribution: str, timeout: int = 10) -> D
             content = None
 
     if content is None:
-        try:
-            with urllib.request.urlopen(release_url, timeout=timeout) as response:
-                data = response.read()
-                try:
-                    content = data.decode("utf-8")
-                except UnicodeDecodeError:
-                    content = None
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout):
-            content = None
-    
-    if not content:
         return {}
-    
-    info = {
+
+    info: Dict[str, any] = {
         'architectures': [],
         'components': [],
         'version': None,
@@ -665,24 +646,13 @@ def detect_gpg_key(upstream: str, distributions: Optional[List[str]] = None) -> 
 def _download_binary_to_path(url: str, dest_path: str, timeout: int = 10) -> bool:
     """Download binary content from URL into dest_path.
 
-    Prefer curl for robustness and binary safety, falling back to urllib.
+    Uses centralized curl function - no urllib fallback.
     Returns True on success, False otherwise.
     """
 
-    # Try curl first
-    result = _safe_curl_fetch(url, force_ipv4=True, timeout=timeout, 
-                             extra_args=["-L", "-o", dest_path])
-    if result is not None and result.returncode == 0:
-        return True
-
-    # Fallback: urllib
-    try:
-        with urllib.request.urlopen(url, timeout=timeout) as response:
-            with open(dest_path, "wb") as f:
-                shutil.copyfileobj(response, f)
-        return True
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, socket.timeout, OSError):
-        return False
+    result = http_fetch(url, force_ipv4=True, timeout=timeout, 
+                     output_file=dest_path)
+    return result is not None and result.returncode == 0
 
 
 def _verify_gpg_key_for_suite(upstream: str, distribution: str, gpg_key_url: str) -> None:
@@ -1040,8 +1010,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(
         description='Scan a repository and generate mirror-dedupe configuration',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
+        epilog="""Examples:
   # Simple form: dest defaults to --name
   mirror-dedupe-scan --name ubuntu http://archive.ubuntu.com/ubuntu
 
@@ -1049,11 +1018,10 @@ Examples:
   mirror-dedupe-scan --name ubuntu --dest ubuntu/main http://archive.ubuntu.com/ubuntu
 
   # With an explicit GPG key override
-  mirror-dedupe-scan --name mariadb \
-    --gpg-key-url https://mirror.mariadb.org/PublicKey \
-    --gpg-key-path PublicKey \
-    https://mirror.mariadb.org/repo/10.11/ubuntu
-        """
+  mirror-dedupe-scan --name mariadb \\
+    --gpg-key-url https://mirror.mariadb.org/PublicKey \\
+    --gpg-key-path PublicKey \\
+    https://mirror.mariadb.org/repo/10.11/ubuntu"""
     )
     
     parser.add_argument('--name', required=True,
