@@ -51,7 +51,6 @@ class Distribution(Loadable, Schema.Distribution):
 
         components = Schema.Components()
         architectures = Schema.Architectures()
-        release_url = url
         release_path = url.split("/dists/", 1)[-1]
 
         super().__init__(
@@ -59,7 +58,6 @@ class Distribution(Loadable, Schema.Distribution):
             has_release=False,
             components=components,
             architectures=architectures,
-            release_url=release_url,
             release_path=release_path,
             metadata=None,
         )

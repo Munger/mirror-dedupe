@@ -14,8 +14,7 @@ class Index(Node):
 
     Required fields (stored as mapping keys):
 
-        url: str
-        path: str
+        path: str        # relative path under the repo root
         kind: str        # logical kind, e.g. "packages", "sources"
 
     Optional fields:
@@ -30,13 +29,11 @@ class Index(Node):
     def __init__(
         self,
         *,
-        url: str,
         path: str,
         kind: str,
         metadata: "Index.Metadata" | None = None,
     ) -> None:
         data: Dict[str, Any] = {
-            "url": url,
             "path": path,
             "kind": kind,
         }

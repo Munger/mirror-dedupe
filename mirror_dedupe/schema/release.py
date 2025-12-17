@@ -38,10 +38,8 @@ class Release(Node):
         *,
         suite: str,
         pocket: str | None,
-        upstream: str,
         relative_dir: str,
         path: str,
-        url: str,
         repo_type: str,
         kind: str,
         signature_extension: str | None = None,
@@ -50,10 +48,8 @@ class Release(Node):
         data: Dict[str, Any] = {
             "suite": suite,
             "pocket": pocket,
-            "upstream": upstream,
             "relative_dir": relative_dir,
             "path": path,
-            "url": url,
             "repo_type": repo_type,
             "kind": kind,
         }

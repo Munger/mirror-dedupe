@@ -27,7 +27,6 @@ class Distribution(Node):
         has_release: bool,
         components: Components,
         architectures: Architectures,
-        release_url: str,
         release_path: str,
         metadata: "Distribution.Metadata" | None = None,
     ) -> None:
@@ -36,7 +35,6 @@ class Distribution(Node):
             "has_release": has_release,
             "components": components,
             "architectures": architectures,
-            "release_url": release_url,
             "release_path": release_path,
         }
         if metadata is not None:

@@ -6,7 +6,7 @@ import sys
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib import http_client
-from mirror_dedupe.lib.html_helpers import extract_href
+from mirror_dedupe.lib.html_helpers import extract_href, build_url
 from .distribution import Distribution
 from .utils import looks_like_release
 
@@ -34,13 +34,15 @@ class DistributionsParser:
 
         upstream = self.upstream
         http_client = self.http
+        root = self.repo.INDEX_ROOT_DIR
+        anchor = self.repo.INDEX_ANCHOR_FILENAME
 
         # If explicit candidate paths were supplied, probe only those;
         # otherwise delegate all discovery to the HTML/BFS helper.
         if self._candidates:
             distributions = Schema.Distributions()
             for path in self._candidates:
-                release_url = f"{upstream.rstrip('/')}/dists/{path}/Release"
+                release_url = build_url(upstream, root, path, anchor)
                 print(f"[apt] probing Release for explicit candidate {path}: {release_url}", file=sys.stderr)
                 text = http_client.fetch_text(release_url)
                 if not text or not looks_like_release(text):
@@ -59,7 +61,7 @@ class DistributionsParser:
         # Delegate all /dists walking and candidate selection to a
         # helper so this method only needs to construct Distribution
         # nodes from the discovered paths.
-        dists_url = f"{upstream.rstrip('/')}/dists/"
+        dists_url = build_url(upstream, root)
         print(f"[apt] probing dists index: {dists_url}", file=sys.stderr)
         html = http_client.fetch_text(dists_url)
         if not html:
@@ -70,7 +72,7 @@ class DistributionsParser:
 
         distributions = Schema.Distributions()
         for path in paths:
-            release_url = f"{upstream.rstrip('/')}/dists/{path}/Release"
+            release_url = build_url(upstream, root, path, anchor)
             dist = Distribution(
                 url=release_url,
                 http_client=http_client,
@@ -81,7 +83,12 @@ class DistributionsParser:
 
         return distributions
 
-    def _discover_distribution_paths(self, upstream: str, http_client: Any, root_html: str) -> List[str]:
+    def _discover_distribution_paths(
+        self,
+        upstream: str,
+        http_client: http_client.HTTPClient,
+        root_html: str,
+    ) -> List[str]:
         """Walk /dists and return all nested paths with plausible Releases.
 
         This is responsible for suite/pocket discovery only; it never
@@ -119,7 +126,10 @@ class DistributionsParser:
             # 1) Validate this candidate via dists/<path>/Release; only
             #    accept it as a distribution if the Release looks
             #    plausible (has at least Suite/Codename metadata).
-            release_url = f"{upstream.rstrip('/')}/dists/{path}/Release"
+            root = self.repo.INDEX_ROOT_DIR
+            anchor = self.repo.INDEX_ANCHOR_FILENAME
+
+            release_url = build_url(upstream, root, path, anchor)
             print(f"[apt] probing Release for candidate {path}: {release_url}", file=sys.stderr)
             text = http_client.fetch_text(release_url)
             if text and looks_like_release(text):
@@ -129,7 +139,7 @@ class DistributionsParser:
                 # into component/arch trees such as main/binary-amd64).
                 continue
 
-            index_url = f"{upstream.rstrip('/')}/dists/{path}/"
+            index_url = build_url(upstream, root, path)
             index_html = http_client.fetch_text(index_url)
             if not index_html:
                 continue
