@@ -27,8 +27,9 @@ set -uo pipefail
 CONFIG_DIR="tests/unit-config"
 CANDIDATES_FILE="${CONFIG_DIR}/candidates.conf"
 
-# Scanner command (can be overridden, e.g. SCAN_CMD="python3 -m mirror_dedupe.scan")
-SCAN_CMD="${SCAN_CMD:-mirror-dedupe-scan}"
+# Scanner command (can be overridden). By default we invoke the scan
+# module via the current Python, which is typically the project's venv.
+SCAN_CMD="${SCAN_CMD:-python -m mirror_dedupe.scan}"
 
 scan_line() {
   local line="$1"
@@ -59,6 +60,26 @@ scan_line() {
   local -a extras=()
   if (( count > 3 )); then
     extras=(${fields[@]:3})
+  fi
+
+  # The new scanner no longer supports --gpg-key-path; strip any
+  # occurrences from the extras list while preserving order of the
+  # remaining arguments.
+  if (( ${#extras[@]} > 0 )); then
+    local -a filtered=()
+    local skip_next=0
+    for arg in "${extras[@]}"; do
+      if (( skip_next )); then
+        skip_next=0
+        continue
+      fi
+      if [[ "${arg}" == "--gpg-key-path" ]]; then
+        skip_next=1
+        continue
+      fi
+      filtered+=("${arg}")
+    done
+    extras=("${filtered[@]}")
   fi
 
   echo "=== Scanning ${name} (${upstream}) ===" >&2

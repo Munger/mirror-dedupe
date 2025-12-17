@@ -16,6 +16,10 @@ class Distribution(Node):
     Release-like metadata.
     """
 
+    # On restore we want to seed the underlying mapping directly from the
+    # snapshot payload, bypassing the keyword-only constructor.
+    _restore_via_payload = True
+
     def __init__(
         self,
         *,

@@ -10,8 +10,10 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from mirror_dedupe import schema as Schema
+from mirror_dedupe.lib.html_helpers import extract_last_path_segment
 from .distributions import DistributionsParser
 from .release import Release
+from .utils import looks_like_release
 
 
 class Apt(Schema.Repo):
@@ -25,6 +27,21 @@ class Apt(Schema.Repo):
     INDEX_ANCHOR_FILENAME = "Release"  # Primary metadata file per suite
     SIGNATURE_EXTENSION = ".gpg"       # Detached signature extension
 
+    @classmethod
+    def restore(cls, snapshot: Dict[str, Any]) -> "Apt":
+        """Restore a fully functional Apt Repo from a snapshot.
+
+        This delegates data/tree reconstruction to ``Repo.from_snapshot``,
+        which uses the Node-level metadata to restore all child
+        collections. HTTP wiring can then be provided lazily by the
+        Repo/HTTP client layer based on the restored network config.
+        """
+
+        # Repo.from_snapshot constructs ``cls`` instances. We pass a
+        # placeholder for the HTTP client; callers can replace or
+        # lazily construct it as needed based on ``repo.network``.
+        return cls.from_snapshot(snapshot, http_client=None)  # type: ignore[return-value]
+
     class Parser(Schema.Repo.Parser):
         """Concrete APT parser bound to an Apt Repo instance."""
 
@@ -36,18 +53,33 @@ class Apt(Schema.Repo):
             accordingly.
             """
 
-            repo = self.repo  # Apt instance
+            repo = self.repo  # Apt (or subclass) instance
+
+            # Debug: show which concrete Repo subclass is being parsed so
+            # we can see whether autodetection selected Apt or a
+            # subclass such as AptVendor.
+            import sys
+
+            print(f"[apt] parsing repo class: {type(repo).__name__}", file=sys.stderr)
 
             # Initialise per-repo invariants for APT layout/signatures.
             repo.vars = Schema.Vars(
                 index_root=Apt.INDEX_ROOT_DIR,
                 anchor_filename=Apt.INDEX_ANCHOR_FILENAME,
                 signature_extension=Apt.SIGNATURE_EXTENSION,
-                repo_type=Apt.REPO_TYPE,
+                # Honour the concrete Repo subclass' REPO_TYPE so
+                # AptVendor can reuse this parser without its own
+                # Parser override.
+                repo_type=repo.REPO_TYPE,
             )
             # Delegate suite/distribution parsing to the dedicated
             # DistributionsParser, which is pure and returns a list.
-            repo.distributions = DistributionsParser(repo).parse()
+            # If the Repo has been primed with explicit candidate
+            # distribution paths (e.g. by AptVendor), those are passed
+            # through so we can probe them directly instead of
+            # relying solely on /dists/ HTML.
+            candidates = getattr(repo, "dist_candidates", None)
+            repo.distributions = DistributionsParser(repo, candidates=candidates).parse()
 
             # Populate releases and indices for each distribution by
             # constructing a Release node from its URL and parsing it.
@@ -109,26 +141,33 @@ class Apt(Schema.Repo):
     def is_this_yours(cls, upstream: str, http_client: Any) -> bool:
         """Heuristic check: does this upstream look like an APT repo?"""
 
+        root = cls.INDEX_ROOT_DIR
+        anchor = cls.INDEX_ANCHOR_FILENAME
+
         try:
-            dists_url = f"{upstream.rstrip('/')}/dists/"
+            dists_url = f"{upstream.rstrip('/')}/{root}/"
             html = http_client.fetch_text(dists_url, timeout=5)
         except Exception:
             return False
-
         if not html:
             return False
 
-        # Very small HTML dir parser inline to avoid importing helpers.
+        # Very small HTML/Markdown dir parser inline. Use the shared
+        # helper so this works for both classic HTML and Markdown-style
+        # directory listings.
         suites = Schema.Suites()
         for line in html.splitlines():
-            if 'href="' in line and '/"' in line:
-                start = line.find('href="') + 6
-                end = line.find('/"', start)
-                if start > 5 and end > start:
-                    raw = line[start:end]
-                    name = raw.strip("/")
-                    if name and all(suite.name != name for suite in suites):
-                        suites.append(Schema.Suite(name=name))
+            seg = extract_last_path_segment(line)
+            if not seg:
+                continue
+
+            name = seg.strip("/")
+            # Skip structural junk and the /dists/ nav entry itself.
+            if not name or name in (".", "..", "dists"):
+                continue
+
+            if all(suite.name != name for suite in suites):
+                suites.append(Schema.Suite(name=name))
 
         if not suites:
             return False
@@ -137,31 +176,20 @@ class Apt(Schema.Repo):
         for suite_node in list(suites)[:3]:
             suite = suite_node.name
             # First try the standard flat layout: dists/<suite>/Release.
-            rel_url = f"{upstream.rstrip('/')}/dists/{suite}/Release"
+            rel_url = f"{upstream.rstrip('/')}/{root}/{suite}/{anchor}"
             try:
                 text = http_client.fetch_text(rel_url, timeout=5)
             except Exception:
                 text = None
 
-            def _looks_like_release(body: str) -> bool:
-                markers = 0
-                for line in body.splitlines():
-                    if line.startswith("Suite:") or line.startswith("Codename:"):
-                        markers += 1
-                    if line.startswith("Components:") or line.startswith("Architectures:"):
-                        markers += 1
-                    if markers >= 2:
-                        return True
-                return False
-
-            if text and _looks_like_release(text):
+            if text and looks_like_release(text):
                 return True
 
             # If there is no flat Release for this suite (or it did not look
             # like a Release), try a shallow nested pocket layout such as
             # dists/noble-updates/epoxy/Release used by ubuntu-cloud.
             try:
-                pocket_index_url = f"{upstream.rstrip('/')}/dists/{suite}/"
+                pocket_index_url = f"{upstream.rstrip('/')}/{root}/{suite}/"
                 pocket_html = http_client.fetch_text(pocket_index_url, timeout=5)
             except Exception:
                 pocket_html = None
@@ -181,13 +209,13 @@ class Apt(Schema.Repo):
                             pockets.append(name)
 
             for pocket in pockets[:3]:
-                pocket_rel_url = f"{upstream.rstrip('/')}/dists/{suite}/{pocket}/Release"
+                pocket_rel_url = f"{upstream.rstrip('/')}/{root}/{suite}/{pocket}/{anchor}"
                 try:
                     pocket_text = http_client.fetch_text(pocket_rel_url, timeout=5)
                 except Exception:
                     continue
 
-                if pocket_text and _looks_like_release(pocket_text):
+                if pocket_text and looks_like_release(pocket_text):
                     return True
 
         return False

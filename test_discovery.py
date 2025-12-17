@@ -12,15 +12,14 @@ from typing import List
 import json
 import sys
 from pathlib import Path
+from typing import List
 from urllib.parse import urlparse
 
-from mirror_dedupe.repos import Repo
-from mirror_dedupe.schema import Repos
-# Import repo-type modules to ensure they register themselves
-from mirror_dedupe.repos.apt import Apt  # noqa: F401
+from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.network_client import NetworkClient
 from mirror_dedupe.lib.rsync_discovery import RsyncDiscovery
-
+from mirror_dedupe.schema.repo import Repo, Repos
+from mirror_dedupe.repos.apt.apt import Apt
 
 def test_http_discovery() -> None:
     """Test HTTP discovery using HTTPDiscovery + Repo.Content."""
@@ -51,17 +50,34 @@ def test_http_discovery() -> None:
     for url in test_urls:
         print(f"\n=== Testing {url} ===", file=sys.stderr)
 
-        # Construct a Repo bound to this URL, seeding ipv6_ok from the global
-        # connectivity probe and pinning repo_type to "apt" so that the Apt
-        # repo-type implementation is always used while we stabilise the data
-        # model. Repo.from_url() owns the HTTP client and parser wiring.
-        repo_obj = Repo.from_url(
-            url,
-            ipv6_ok=global_ipv6_ok,
-            repo_type="apt",
-        )
+        # Derive a stable snapshot filename per host so we can reuse
+        # previously parsed schema trees without re-running HTTP discovery.
+        host = urlparse(url).netloc or "unknown"
+        snapshot_path = output_dir / f"{host}.json"
 
-        repo = repo_obj.parse()
+        if snapshot_path.exists():
+            # Fast path: restore an Apt Repo (including HTTP client wiring)
+            # from the existing JSON snapshot.
+            with snapshot_path.open("r", encoding="utf-8") as f:
+                snapshot = json.load(f)
+            repo = Apt.restore(snapshot)
+        else:
+            # Slow path: construct a Repo bound to this URL, seeding ipv6_ok
+            # from the global connectivity probe and pinning repo_type to
+            # "apt" so that the Apt repo-type implementation is always used
+            # while we stabilise the data model. Repo.from_url() owns the
+            # HTTP client and parser wiring.
+            repo_obj = Repo.from_url(
+                url,
+                ipv6_ok=global_ipv6_ok,
+                repo_type="apt",
+            )
+
+            repo = repo_obj.parse()
+
+            # Persist a snapshot of the parsed Repo for future runs.
+            with snapshot_path.open("w", encoding="utf-8") as f:
+                json.dump(repo.snapshot(), f, indent=2, sort_keys=True)
 
         if False:  # Disabled: verbose HTTP discovery noise for manual debugging.
             # distributions is now a list of Distribution nodes, not a mapping.
