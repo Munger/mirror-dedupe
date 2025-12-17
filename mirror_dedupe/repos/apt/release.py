@@ -53,10 +53,8 @@ class Release(Loadable, Schema.Release):
         super().__init__(
             suite=suite,
             pocket=pocket,
-            upstream=upstream,
             relative_dir=relative_dir,
             path=path,
-            url=url,
             repo_type=repo_type,
             kind=kind,
             signature_extension=None,
@@ -145,7 +143,6 @@ class Release(Loadable, Schema.Release):
 
                 indices.append(
                     Schema.Index(
-                        url=f"{self.upstream.rstrip('/')}/{path}",
                         path=path,
                         kind=kind,
                         metadata=metadata,

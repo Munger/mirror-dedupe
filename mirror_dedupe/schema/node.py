@@ -169,12 +169,37 @@ class Node(dict):
     def snapshot(self) -> Any:
         """Return a JSON-serialisable snapshot of this Node tree.
 
-        This is a semantic alias around ``to_plain`` and is intended to be
-        used by higher-level code that thinks in terms of saving and
-        restoring subtrees rather than pretty-printing.
+        By default this returns a plain dict/list structure suitable for
+        JSON/YAML, with a small additional guarantee for mappings: scalar
+        fields are emitted first in their original insertion order, followed
+        by nested structures (dicts/lists). This keeps snapshots readable
+        without requiring each subclass to define its own field ordering.
         """
 
-        return self.to_plain()
+        plain = self.to_plain()
+
+        # Only apply ordering heuristics to mapping payloads; lists and
+        # scalars are returned as-is.
+        if not isinstance(plain, dict):
+            return plain
+
+        scalars: Dict[str, Any] = {}
+        nested: Dict[str, Any] = {}
+
+        for key, value in plain.items():
+            if isinstance(value, (dict, list)):
+                nested[key] = value
+            else:
+                scalars[key] = value
+
+        # Preserve original insertion order within scalars and nested
+        # groups. We then rely on the concrete JSON dumper to respect
+        # this mapping order (e.g. Python 3.7+ dicts).
+        ordered: Dict[str, Any] = {}
+        ordered.update(scalars)
+        ordered.update(nested)
+
+        return ordered
 
     @classmethod
     def restore(cls, snapshot: Any) -> "Node":

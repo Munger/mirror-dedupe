@@ -22,15 +22,12 @@ class Vars(Node):
         index_root: str = "",
         anchor_filename: str = "",
         signature_extension: str = "",
-        repo_type: str | None = None,
     ) -> None:
         data: Dict[str, Any] = {
             "index_root": index_root,
             "anchor_filename": anchor_filename,
             "signature_extension": signature_extension,
         }
-        if repo_type is not None:
-            data["repo_type"] = repo_type
 
         super().__init__(data)
 
@@ -45,7 +42,3 @@ class Vars(Node):
     @property
     def signature_extension(self) -> str:
         return self.get("signature_extension", "")
-
-    @property
-    def repo_type(self) -> str | None:
-        return self.get("repo_type")

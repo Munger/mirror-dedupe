@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from mirror_dedupe import schema as Schema
-from mirror_dedupe.lib.html_helpers import extract_last_path_segment
+from mirror_dedupe.lib.html_helpers import extract_last_path_segment, build_url
 from .distributions import DistributionsParser
 from .release import Release
 from .utils import looks_like_release
@@ -67,10 +67,6 @@ class Apt(Schema.Repo):
                 index_root=Apt.INDEX_ROOT_DIR,
                 anchor_filename=Apt.INDEX_ANCHOR_FILENAME,
                 signature_extension=Apt.SIGNATURE_EXTENSION,
-                # Honour the concrete Repo subclass' REPO_TYPE so
-                # AptVendor can reuse this parser without its own
-                # Parser override.
-                repo_type=repo.REPO_TYPE,
             )
             # Delegate suite/distribution parsing to the dedicated
             # DistributionsParser, which is pure and returns a list.
@@ -84,11 +80,15 @@ class Apt(Schema.Repo):
             # Populate releases and indices for each distribution by
             # constructing a Release node from its URL and parsing it.
             for dist in repo.distributions:
+                name = str(dist.name)
+                if not name:
+                    continue
+                url = build_url(repo.upstream, repo.INDEX_ROOT_DIR, name, repo.INDEX_ANCHOR_FILENAME)
                 release = Release(
-                    url=dist.release_url,
+                    url=url,
                     http_client=repo.http,
                     upstream=repo.upstream,
-                    suite=dist.name,
+                    suite=name,
                 ).parse()
 
                 repo.releases.append(release)
@@ -145,7 +145,7 @@ class Apt(Schema.Repo):
         anchor = cls.INDEX_ANCHOR_FILENAME
 
         try:
-            dists_url = f"{upstream.rstrip('/')}/{root}/"
+            dists_url = build_url(upstream, root)
             html = http_client.fetch_text(dists_url, timeout=5)
         except Exception:
             return False
@@ -176,7 +176,7 @@ class Apt(Schema.Repo):
         for suite_node in list(suites)[:3]:
             suite = suite_node.name
             # First try the standard flat layout: dists/<suite>/Release.
-            rel_url = f"{upstream.rstrip('/')}/{root}/{suite}/{anchor}"
+            rel_url = build_url(upstream, root, suite, anchor)
             try:
                 text = http_client.fetch_text(rel_url, timeout=5)
             except Exception:
@@ -189,7 +189,7 @@ class Apt(Schema.Repo):
             # like a Release), try a shallow nested pocket layout such as
             # dists/noble-updates/epoxy/Release used by ubuntu-cloud.
             try:
-                pocket_index_url = f"{upstream.rstrip('/')}/{root}/{suite}/"
+                pocket_index_url = build_url(upstream, root, suite)
                 pocket_html = http_client.fetch_text(pocket_index_url, timeout=5)
             except Exception:
                 pocket_html = None
@@ -209,7 +209,7 @@ class Apt(Schema.Repo):
                             pockets.append(name)
 
             for pocket in pockets[:3]:
-                pocket_rel_url = f"{upstream.rstrip('/')}/{root}/{suite}/{pocket}/{anchor}"
+                pocket_rel_url = build_url(upstream, root, suite, pocket, anchor)
                 try:
                     pocket_text = http_client.fetch_text(pocket_rel_url, timeout=5)
                 except Exception:

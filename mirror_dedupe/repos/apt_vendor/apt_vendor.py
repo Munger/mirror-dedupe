@@ -13,9 +13,10 @@ mirrors.
 
 from __future__ import annotations
 
-from typing import Any
-
+from typing import Any, Dict, List
 from mirror_dedupe import schema as Schema
+from mirror_dedupe.lib.codenames import apt_codenames
+from mirror_dedupe.lib.html_helpers import build_url
 from mirror_dedupe.repos.apt.apt import Apt
 
 
@@ -80,9 +81,27 @@ class AptVendor(Apt):
                     return True
             return False
 
+        # Seed with the generic "stable" alias and then append a small
+        # bounded set of known short codenames from distro-info-data via
+        # apt_codenames(). This keeps detection cheap while remaining
+        # future-proof as new releases are added.
+        try:
+            known = apt_codenames()
+        except Exception:
+            known = []
+
+        # Prepend 'stable', then all known series. We rely on
+        # apt_codenames() for ordering and let the HTTP timeouts bound
+        # the worst-case probe cost.
+        suites_to_probe: List[str] = ["stable"]
+        suites_to_probe.extend(known)
+
         candidates: list[str] = []
-        for suite in ("stable", "bookworm", "noble"):
-            rel_url = f"{upstream.rstrip('/')}/dists/{suite}/Release"
+        for suite in suites_to_probe:
+            # Use the same layout constants and URL builder as the core
+            # Apt parser so vendor probing stays in sync with APT
+            # semantics.
+            rel_url = build_url(upstream, cls.INDEX_ROOT_DIR, suite, cls.INDEX_ANCHOR_FILENAME)
             try:
                 text = http_client.fetch_text(rel_url, timeout=5)
             except Exception:

@@ -14,10 +14,12 @@ import sys
 import argparse
 from typing import List, Optional
 import os
+import json
 
 from mirror_dedupe.schema.repo import Repo
 from mirror_dedupe.lib.rsync_discovery import RsyncDiscovery
 from mirror_dedupe.config import load_config
+from mirror_dedupe.lib.html_helpers import url_hostname
 import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 
@@ -57,14 +59,10 @@ def generate_config(repo: Repo, dest: str,
                     global_arch_mask: Optional[List[str]] = None) -> str:
     """Generate repository configuration from a fully-populated Repo.
 
-    This function now delegates discovery to the Repo/Parser framework
-    instead of implementing its own HTML and Release parsing logic. It
-    performs three high-level steps:
-
-      * Instantiate and parse a Repo instance via :func:`scan`.
-      * Detect rsync capability (if any) using :class:`RsyncDiscovery`.
-      * Apply any user-specified filters and emit a YAML configuration
-        that mirror-dedupe can consume.
+    ``repo`` is expected to have already been parsed by its concrete
+    ``Repo.Parser`` implementation and annotated by ``RsyncDiscovery``.
+    This function applies user-specified filters and emits a YAML
+    configuration that mirror-dedupe can consume.
 
     GPG keys are no longer auto-discovered here. If the caller supplies
     ``gpg_key_url``, it is passed through into the generated config
@@ -282,9 +280,8 @@ def main(argv=None):
   mirror-dedupe-scan --name ubuntu --dest ubuntu/main http://archive.ubuntu.com/ubuntu
 
   # With an explicit GPG key override
-  mirror-dedupe-scan --name mariadb \\
-    --gpg-key-url https://mirror.mariadb.org/PublicKey \\
-    --gpg-key-path PublicKey \\
+  mirror-dedupe-scan --name mariadb \
+    --gpg-key-url https://mirror.mariadb.org/PublicKey \
     https://mirror.mariadb.org/repo/10.11/ubuntu"""
     )
     
@@ -420,13 +417,31 @@ def main(argv=None):
     # Derive the config path and write the generated configuration to disk
     # so it can be used directly by mirror-dedupe. The stderr guidance
     # below is kept unchanged.
-    config_file = os.path.join(args.config_dir, 'repos-available', f'{args.name}.conf')
+    config_dir = os.path.join(args.config_dir, 'repos-available')
+    config_file = os.path.join(config_dir, f'{args.name}.conf')
 
-    os.makedirs(os.path.dirname(config_file), exist_ok=True)
+    os.makedirs(config_dir, exist_ok=True)
     with open(config_file, 'w', encoding='utf-8') as f:
         f.write(config)
         if not config.endswith("\n"):
             f.write("\n")
+
+    # Temporary: write a JSON snapshot of the Repo alongside the config,
+    # using the hostname of the upstream URL as the basename.
+    #
+    # Repo inherits from Node, which provides ``snapshot()`` as the
+    # canonical way to obtain a plain JSON-serialisable payload. Use that
+    # here instead of any older ``to_payload`` helpers.
+    try:
+        hostname = url_hostname(repo.upstream) or "unknown"
+        snapshot_path = os.path.join(config_dir, f"{hostname}.json")
+        with open(snapshot_path, 'w', encoding='utf-8') as sf:
+            # Preserve the key order produced by Repo.snapshot() (an
+            # OrderedDict) instead of re-sorting alphabetically.
+            json.dump(repo.snapshot(), sf, indent=2)
+        print(f"Snapshot saved to: {snapshot_path}", file=sys.stderr)
+    except Exception as e:  # pragma: no cover - best-effort debug aid
+        print(f"Warning: failed to write snapshot: {e}", file=sys.stderr)
 
     print(f"Configuration saved to: {config_file}", file=sys.stderr)
     print("", file=sys.stderr)
