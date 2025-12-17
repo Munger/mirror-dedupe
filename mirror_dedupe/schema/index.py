@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict
 
-from .node import Node
+from .node import Node, NodeList
 
 
 class Index(Node):
@@ -22,6 +22,10 @@ class Index(Node):
 
         metadata: Index.Metadata    # parser-specific data
     """
+
+    # On restore we want to seed the underlying mapping directly from the
+    # snapshot payload, bypassing the keyword-only constructor.
+    _restore_via_payload = True
 
     def __init__(
         self,
@@ -52,7 +56,7 @@ class Index(Node):
             super().__init__(dict(fields))
 
 
-class Indices(List[Index]):
+class Indices(NodeList[Index]):
     """Container for Index descriptors.
 
     This is just a plain list of ``Index`` nodes. Any schema or

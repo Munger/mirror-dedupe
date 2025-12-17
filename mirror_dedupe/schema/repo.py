@@ -14,12 +14,14 @@ from typing import Any, ClassVar, Dict, List, Type, TypeVar
 
 from .node import Node, NodeList
 from mirror_dedupe.lib.http_client import HTTPClient
-from ..schema.architecture import Architectures
-from ..schema.component import Components
-from ..schema.suite import Suites
-from ..schema.distribution import Distributions
-from ..schema.index import Indices
-from ..schema.release import Releases
+from ..schema.architecture import Architecture, Architectures
+from ..schema.component import Component, Components
+from ..schema.suite import Suite, Suites
+from ..schema.distribution import Distribution, Distributions
+from ..schema.index import Index, Indices
+from ..schema.release import Release, Releases
+from ..schema.vars import Vars
+from ..schema.network import NetworkConfig
 
 
 @dataclass
@@ -32,6 +34,24 @@ class Repo(Node):
     _registry: ClassVar[List[Type["Repo"]]] = []
 
     http: Any
+
+    # Minimal structural metadata so the Node-level helpers can rebuild
+    # child collections generically from snapshots without each caller
+    # having to list them explicitly.
+    _list_fields: ClassVar[Dict[str, tuple[Type[NodeList], Type[Node]]]] = {
+        "distributions": (Distributions, Distribution),
+        "architectures": (Architectures, Architecture),
+        "components": (Components, Component),
+        "suites": (Suites, Suite),
+        "indices": (Indices, Index),
+        "releases": (Releases, Release),
+    }
+
+    # Single-node children that should be restored via Node._restore_children.
+    _node_fields: ClassVar[Dict[str, Type[Node]]] = {
+        "vars": Vars,
+        "network": NetworkConfig,
+    }
 
     def __init__(
         self,
@@ -74,6 +94,11 @@ class Repo(Node):
 
         # Runtime HTTP client bound to this repo (not part of the payload).
         self.http = http_client
+
+        # Per-repo network configuration; parsers or callers can override
+        # this later, but we seed a default from the ipv6_ok hint so that
+        # restore() can reconstruct equivalent behaviour from snapshots.
+        self.network = NetworkConfig(ipv6_ok=ipv6_ok)
 
         # Initialise empty schema collections; parsers can populate or
         # replace these. Attribute assignment routes into the mapping via
@@ -226,6 +251,59 @@ class Repo(Node):
         parser = self.make_parser()
         parser.parse()
         return self
+
+    # --- snapshot / restore helpers ------------------------------------------
+
+    @classmethod
+    def from_snapshot(
+        cls,
+        snapshot: Dict[str, Any],
+        http_client: HTTPClient | None = None,
+    ) -> "Repo":
+        """Rebuild a Repo (and its children) from a plain snapshot.
+
+        This expects *snapshot* to be the result of ``repo.snapshot()`` or an
+        equivalent plain-data structure (e.g. loaded from JSON). Runtime
+        helpers such as the HTTP client are supplied explicitly via the
+        ``http_client`` argument so that callers remain in control of
+        networking policy.
+        """
+        if not isinstance(snapshot, dict):
+            raise TypeError(
+                f"from_snapshot expected mapping data for {cls.__name__}, "
+                f"got {type(snapshot)!r}"
+            )
+
+        # Seed the underlying mapping directly from the snapshot payload;
+        # any ctor-level sugar lives in ``__init__`` and does not need to
+        # run on restore for data-only fields.
+        repo = cls._from_payload(snapshot)  # type: ignore[assignment]
+
+        # Ensure a NetworkConfig exists even for legacy snapshots that
+        # predate the "network" child node.
+        if "network" not in snapshot:
+            ipv6_ok = snapshot.get("ipv6_ok", True)
+            repo.network = NetworkConfig(ipv6_ok=ipv6_ok)
+
+        # (Re)construct an HTTP client if none was supplied, using the
+        # restored network configuration as the single source of truth.
+        if http_client is None:
+            cfg = getattr(repo, "network", None)
+            ipv6_ok = bool(cfg.get("ipv6_ok", True)) if cfg is not None else bool(
+                snapshot.get("ipv6_ok", True)
+            )
+            http_client = HTTPClient(ipv6_ok=ipv6_ok)
+
+        # Reattach runtime wiring that is not part of the payload.
+        repo.http = http_client
+
+        # Delegate child reconstruction to the Node-level helper using the
+        # structural metadata defined above. This keeps the logic generic
+        # while letting subclasses add/override fields by tweaking
+        # ``_list_fields`` / ``_node_fields``.
+        cls._restore_children(repo, snapshot)
+
+        return repo
 
 
 class Repos(NodeList[Repo]):

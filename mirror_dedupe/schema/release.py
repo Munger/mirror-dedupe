@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import hashlib
 
-from .node import Node
+from .node import Node, NodeList
 
 
 class Release(Node):
@@ -28,6 +28,10 @@ class Release(Node):
 
         signature_extension: str
     """
+
+    # On restore we want to seed the underlying mapping directly from the
+    # snapshot payload, bypassing the keyword-only constructor.
+    _restore_via_payload = True
 
     def __init__(
         self,
@@ -78,7 +82,7 @@ class Release(Node):
             super().__init__(data)
 
 
-class Releases(list[Release]):
+class Releases(NodeList[Release]):
     """Container for Release descriptors.
 
     This is just a plain list of ``Release`` nodes. Any schema or
