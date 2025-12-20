@@ -47,7 +47,9 @@ class AptVendor(Apt):
         # If we already have upstream/http wired, seed dist_candidates
         # so the shared DistributionsParser can probe these directly.
         try:
-            upstream = getattr(self, "upstream", None)
+            upstreams_list = [u.url for u in self.upstreams if u.url]
+            upstream_idx = self.upstream_idx
+            upstream = upstreams_list[upstream_idx] if upstreams_list else None
             http_client = getattr(self, "http", None)
             if upstream and http_client:
                 candidates = self._probe_fallback_suites(upstream, http_client)

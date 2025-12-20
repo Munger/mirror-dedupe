@@ -23,7 +23,7 @@ class DistributionsParser:
     def __init__(self, repo: "Apt", candidates: Optional[List[str]] = None) -> None:
         self.repo = repo
         self.http = repo.http
-        self.upstream = repo.upstream
+        self.upstream_index = int(repo.get("upstream_idx", 0))
         # Optional explicit candidate paths (relative to /dists) to
         # probe directly as distributions, bypassing HTML discovery.
         self._candidates: List[str] = candidates or []
@@ -31,7 +31,8 @@ class DistributionsParser:
     def parse(self):
         """Return a Distributions list discovered under /dists without mutating the repo."""
 
-        upstream = self.upstream
+        upstreams_list = [u.url for u in self.repo.upstreams if u.url]
+        upstream = upstreams_list[self.upstream_index] if upstreams_list else ""
         http_client = self.http
         root = self.repo.INDEX_ROOT_DIR
         anchor = self.repo.INDEX_ANCHOR_FILENAME
@@ -60,10 +61,9 @@ class DistributionsParser:
         # Delegate all /dists walking and candidate selection to the
         # shared helper so this method only needs to construct
         # Distribution nodes from the discovered paths. We try the
-        # primary upstream first, then any alternates recorded on the
-        # Repo via iter_upstreams().
+        # selected upstream first, then any alternates recorded on the Repo.
         paths: List[str] = []
-        upstreams = self.repo.iter_upstreams()
+        upstreams = upstreams_list
 
         for idx, url in enumerate(upstreams):
             candidate_paths = discover_distribution_paths(

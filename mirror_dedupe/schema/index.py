@@ -60,8 +60,4 @@ class Indices(NodeList[Index]):
     metadata lives either on the individual ``Index`` instances or
     on the parent repo, not on this list type itself.
     """
-
-    def iter(self):
-        """Iterate over Index nodes in this collection."""
-
-        return iter(self)
+    
