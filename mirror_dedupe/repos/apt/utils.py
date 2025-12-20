@@ -87,6 +87,7 @@ def discover_distribution_paths(
     anchor: str = "Release",
     max_depth: int = 3,
     root_html: str | None = None,
+    _allow_child_prefix: bool = True,
 ) -> List[str]:
     """Walk ``index_root`` and return all nested paths with plausible Releases.
 
@@ -104,6 +105,28 @@ def discover_distribution_paths(
 
     if not root_html:
         print("[apt] no HTML content at /dists/; giving up on suite discovery", file=sys.stderr)
+        # Some vendor repos nest series under the upstream root (e.g., /noble/dists).
+        # If allowed, try one level of child directories under the base upstream.
+        if _allow_child_prefix:
+            base_html = http_client.fetch_text(upstream, timeout=PROBE_TIMEOUT)
+            if base_html:
+                child_dirs = list(_iter_href_names(base_html.splitlines(), dirs_only=True))
+                child_paths: List[str] = []
+                for child in child_dirs:
+                    child_upstream = build_url(upstream, child)
+                    paths = discover_distribution_paths(
+                        child_upstream,
+                        http_client,
+                        index_root=index_root,
+                        anchor=anchor,
+                        max_depth=max_depth,
+                        root_html=None,
+                        _allow_child_prefix=False,
+                    )
+                    if paths:
+                        child_paths.extend(paths)
+                if child_paths:
+                    return child_paths
         return []
 
     lines = root_html.splitlines()

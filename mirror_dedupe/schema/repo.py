@@ -63,9 +63,6 @@ class Repo(Node):
         name: str = "",
         repo_type: str = "unknown",
         gpg_key_url: str | None = None,
-        selected_distributions: list[str] | None = None,
-        selected_architectures: list[str] | None = None,
-        selected_components: list[str] | None = None,
         upstreams: Upstreams | None = None,
     ) -> None:
         """Initialise a Repo root node and bind an HTTP client.
@@ -81,9 +78,6 @@ class Repo(Node):
             "name": name,
             "repo_type": repo_type,
             "gpg_key_url": gpg_key_url,
-            "selected_distributions": selected_distributions or [],
-            "selected_architectures": selected_architectures or [],
-            "selected_components": selected_components or [],
             "upstreams": upstreams if upstreams is not None else Upstreams(),
         }
 

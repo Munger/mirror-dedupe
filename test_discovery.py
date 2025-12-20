@@ -98,17 +98,21 @@ def test_http_discovery() -> None:
                     file=sys.stderr,
                 )
 
-        # Run rsync discovery to find and persist an appropriate rsync
-        # upstream/root for this repo based on the discovered schema.
-        rsync_helper = RsyncDiscovery(repo)
-        rsync_candidates = rsync_helper.discover()
-        print("  rsync candidates:", rsync_candidates, file=sys.stderr)
+        # Run rsync discovery for each upstream to find and persist
+        # appropriate rsync roots based on the discovered schema.
+        all_candidates = []
+        for upstream in repo.upstreams:
+            rsync_helper = RsyncDiscovery(repo, upstream)
+            rsync_candidates = rsync_helper.discover()
+            if rsync_candidates:
+                all_candidates.extend(rsync_candidates)
+        print("  rsync candidates:", all_candidates, file=sys.stderr)
 
         # Keep this Repo object for the final JSON array dump.
         repos.append(repo)
 
         # Emit a per-repo JSON file named after the upstream hostname.
-        upstream = repo.upstream
+        upstream = repo.upstreams[repo.upstream_idx].url
         hostname = urlparse(upstream).hostname or "unknown"
         out_path = output_dir / f"{hostname}.json"
         with out_path.open("w", encoding="utf-8") as fh:
