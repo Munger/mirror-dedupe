@@ -83,11 +83,14 @@ class Apt(Schema.Repo):
                 name = str(dist.name)
                 if not name:
                     continue
-                url = build_url(repo.upstream, repo.INDEX_ROOT_DIR, name, repo.INDEX_ANCHOR_FILENAME)
+                upstreams_list = [u.url for u in repo.upstreams if u.url]
+                upstream_idx = repo.upstream_idx
+                upstream_url = upstreams_list[upstream_idx] if upstreams_list else ""
+                url = build_url(upstream_url, repo.INDEX_ROOT_DIR, name, repo.INDEX_ANCHOR_FILENAME)
                 release = Release(
                     url=url,
                     http_client=repo.http,
-                    upstream=repo.upstream,
+                    upstream=upstream_url,
                     suite=name,
                 ).parse()
 

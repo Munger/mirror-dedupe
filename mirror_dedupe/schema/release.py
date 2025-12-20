@@ -86,7 +86,3 @@ class Releases(NodeList[Release]):
     the parent repo, not on this list type itself.
     """
 
-    def iter(self):
-        """Iterate over Release nodes in this collection."""
-
-        return iter(self)

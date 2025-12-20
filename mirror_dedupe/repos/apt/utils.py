@@ -76,6 +76,9 @@ def _iter_href_names(lines: Iterable[str], *, dirs_only: bool = False) -> Iterab
             yield name
 
 
+PROBE_TIMEOUT = 2
+
+
 def discover_distribution_paths(
     upstream: str,
     http_client: Any,
@@ -97,7 +100,7 @@ def discover_distribution_paths(
     if root_html is None:
         dists_url = build_url(upstream, index_root)
         print(f"[apt] probing dists index: {dists_url}", file=sys.stderr)
-        root_html = http_client.fetch_text(dists_url)
+        root_html = http_client.fetch_text(dists_url, timeout=PROBE_TIMEOUT)
 
     if not root_html:
         print("[apt] no HTML content at /dists/; giving up on suite discovery", file=sys.stderr)
@@ -155,7 +158,7 @@ def discover_distribution_paths(
         #    (has at least Suite/Codename metadata).
         release_url = build_url(upstream, index_root, path, anchor)
         print(f"[apt] probing Release for candidate {path}: {release_url}", file=sys.stderr)
-        text = http_client.fetch_text(release_url)
+        text = http_client.fetch_text(release_url, timeout=PROBE_TIMEOUT)
         if text and looks_like_release(text):
             discovered_paths.append(path)
             # We found a real distribution entry-point; do not descend
@@ -169,7 +172,7 @@ def discover_distribution_paths(
             continue
 
         index_url = build_url(upstream, index_root, path)
-        index_html = http_client.fetch_text(index_url)
+        index_html = http_client.fetch_text(index_url, timeout=PROBE_TIMEOUT)
         if not index_html:
             continue
 

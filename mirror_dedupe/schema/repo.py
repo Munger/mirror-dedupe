@@ -21,6 +21,7 @@ from ..schema.distribution import Distribution, Distributions
 from ..schema.index import Index, Indices
 from ..schema.release import Release, Releases
 from ..schema.vars import Vars
+from ..schema.upstream import Upstream, Upstreams
 from ..schema.network import NetworkConfig
 
 
@@ -45,6 +46,7 @@ class Repo(Node):
         "suites": (Suites, Suite),
         "indices": (Indices, Index),
         "releases": (Releases, Release),
+        "upstreams": (Upstreams, Upstream),
     }
 
     # Single-node children that should be restored via Node._restore_children.
@@ -56,17 +58,15 @@ class Repo(Node):
     def __init__(
         self,
         *,
-        upstream: str,
+        upstream_idx: int = 0,
         http_client: Any,
         name: str = "",
         repo_type: str = "unknown",
-        ipv6_ok: bool = True,
-        sync_method: str | None = None,
         gpg_key_url: str | None = None,
-        alt_upstreams: list[str] | None = None,
         selected_distributions: list[str] | None = None,
         selected_architectures: list[str] | None = None,
         selected_components: list[str] | None = None,
+        upstreams: Upstreams | None = None,
     ) -> None:
         """Initialise a Repo root node and bind an HTTP client.
 
@@ -77,19 +77,14 @@ class Repo(Node):
 
         # Build the Repo payload explicitly, mirroring Distribution.__init__.
         data: Dict[str, Any] = {
-            "upstream": upstream,
+            "upstream_idx": upstream_idx,
             "name": name,
             "repo_type": repo_type,
-            "ipv6_ok": ipv6_ok,
-            "sync_method": sync_method,
             "gpg_key_url": gpg_key_url,
-            # Always materialise alt_upstreams as a list so callers and
-            # snapshots can rely on its presence without getattr() or
-            # None checks.
-            "alt_upstreams": alt_upstreams or [],
             "selected_distributions": selected_distributions or [],
             "selected_architectures": selected_architectures or [],
             "selected_components": selected_components or [],
+            "upstreams": upstreams if upstreams is not None else Upstreams(),
         }
 
         # Initialise the underlying Node payload with scalar fields only.
@@ -99,9 +94,8 @@ class Repo(Node):
         self.http = http_client
 
         # Per-repo network configuration; parsers or callers can override
-        # this later, but we seed a default from the ipv6_ok hint so that
-        # restore() can reconstruct equivalent behaviour from snapshots.
-        self.network = NetworkConfig(ipv6_ok=ipv6_ok)
+        # this later. Default to IPv6 enabled since most modern repos support it.
+        self.network = NetworkConfig(ipv6_ok=True)
 
         # Initialise empty schema collections; parsers can populate or
         # replace these. Attribute assignment routes into the mapping via
@@ -113,6 +107,7 @@ class Repo(Node):
         self.suites = Suites()
         self.indices = Indices()
         self.releases = Releases()
+        # upstreams is already set in the payload data by Node.__init__
 
     # --- registry helpers -------------------------------------------------
 
@@ -235,7 +230,7 @@ class Repo(Node):
         *,
         ipv6_ok: bool | None = None,
         repo_type: str | None = None,
-        alt_upstreams: list[str] | None = None,
+        upstream_urls: list[str] | None = None,
     ) -> "Repo":
         """Construct a Repo instance bound to a URL and HTTP client.
 
@@ -245,42 +240,60 @@ class Repo(Node):
         registry helper, and returns an instance bound to both the
         upstream and HTTP client.
         """
-        # Seed initial scalar config for repo detection.
-        data: Dict[str, Any] = {"upstream": upstream}
+        # Seed initial scalar config for repo detection. ``upstream_idx`` in the
+        # payload is a numeric index into the Upstreams collection; default to
+        # the first entry.
+        data: Dict[str, Any] = {"upstream_idx": 0}
         if repo_type is not None:
             data["repo_type"] = repo_type
-        if ipv6_ok is not None:
-            data["ipv6_ok"] = ipv6_ok
-
-        # Propagate any alternate upstreams into the detection payload so
-        # get_type_for_url can consider them when running is_this_yours
-        # across registered Repo types.
-        if alt_upstreams is not None:
-            data["alt_upstreams"] = alt_upstreams
 
         # Seed an initial sync_method hint based on the upstream scheme so
         # downstream code has a sensible default until a more specific
         # method (e.g. rsync) is discovered.
-        if not data.get("sync_method"):
-            if upstream.startswith("https://"):
-                data["sync_method"] = "https"
-            elif upstream.startswith("http://"):
-                data["sync_method"] = "http"
+        sync_hint = None
+        if upstream.startswith("https://"):
+            sync_hint = "https"
+        elif upstream.startswith("http://"):
+            sync_hint = "http"
 
-        http = HTTPClient(ipv6_ok=bool(data.get("ipv6_ok", True)))
+        http = HTTPClient(ipv6_ok=bool(ipv6_ok if ipv6_ok is not None else True))
 
-        # When alternate upstreams are provided, attempt detection across
-        # the full set in a deterministic order while keeping ``upstream``
-        # as the canonical primary in the Repo payload.
-        urls: list[str] = [upstream, *(alt_upstreams or [])]
+        # When multiple upstreams are provided (CLI can pass a list), attempt
+        # detection across the full set in a deterministic order while keeping
+        # ``upstream`` as the canonical primary in the Repo payload.
+        urls: list[str] = [upstream, *(upstream_urls or [])]
         rt_cls, _used_url = cls.get_type_for_urls(data, urls, http)
         if rt_cls is None:
             rt_cls = cls
 
-        # Pass the discovered scalar config through to the Repo. ``data``
-        # already contains an ``upstream`` key, so we do not pass it
-        # twice.
-        return rt_cls(http_client=http, **data)
+        # Build the upstream collection before instantiating the Repo so
+        # it is wired at construction time.
+        upstreams = Upstreams()
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for u in urls:
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            ordered.append(u)
+
+        for idx, url in enumerate(ordered):
+            upstreams.append(
+                Upstream(
+                    url=url,
+                    sync_method=sync_hint
+                    if url.split(":", 1)[0] == upstream.split(":", 1)[0]
+                    else None,
+                    ipv6_ok=ipv6_ok,
+                )
+            )
+
+        # Pass the discovered scalar config and upstream collection through
+        # to the Repo. ``data`` already contains an ``upstream`` key, so we
+        # do not pass it twice.
+        repo = rt_cls(http_client=http, upstreams=upstreams, **data)
+
+        return repo
 
     # --- high-level instance helpers ---------------------------------------
 
@@ -295,29 +308,6 @@ class Repo(Node):
         parser = self.make_parser()
         parser.parse()
         return self
-
-    # --- upstream helpers ----------------------------------------------------
-
-    def iter_upstreams(self) -> list[str]:
-        """Return the primary upstream followed by any alternates.
-
-        The first element is always ``self.upstream``. Any URLs recorded
-        in ``self.alt_upstreams`` are appended in order. Callers can use
-        this to try multiple discovery/sync endpoints while keeping a
-        single source of truth for upstream topology on the Repo.
-        """
-
-        prim = str(self.get("upstream", ""))
-        alts = self.get("alt_upstreams", []) or []
-        urls: list[str] = []
-        if prim:
-            urls.append(prim)
-        for u in alts:
-            # Avoid trivial duplication if alt_upstreams accidentally
-            # contains the primary as well.
-            if u and u not in urls:
-                urls.append(u)
-        return urls
 
     # --- snapshot / restore helpers ------------------------------------------
 

@@ -23,10 +23,9 @@ from mirror_dedupe.lib.html_helpers import url_hostname
 import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 
-def scan(name: str, upstream: str,
+def scan(name: str, upstreams: List[str],
          ipv6_ok: Optional[bool] = None,
-         repo_type: Optional[str] = None,
-         alt_upstreams: Optional[List[str]] = None) -> Repo:
+         repo_type: Optional[str] = None) -> Repo:
     """Perform HTTP and rsync discovery and return a populated Repo.
 
     This mirrors the behaviour of test_discovery.py: construct a Repo
@@ -35,24 +34,27 @@ def scan(name: str, upstream: str,
     annotate the Repo accordingly.
     """
 
-    print(f"Scanning {upstream}...", file=sys.stderr)
+    primary_upstream = upstreams[0]
+    print(f"Scanning {primary_upstream}...", file=sys.stderr)
 
     # Let Repo.from_url consult the registered Repo types (Apt, etc.) via
     # is_this_yours() while still honouring the ipv6_ok hint. Callers may
     # optionally supply repo_type to force a specific implementation (e.g.
     # "apt") for repositories with unusual layouts.
     repo = Repo.from_url(
-        upstream,
+        primary_upstream,
+        upstream_urls=upstreams[1:],
         ipv6_ok=ipv6_ok,
         repo_type=repo_type,
-        alt_upstreams=alt_upstreams,
     )
     if name:
         repo.name = name
     repo = repo.parse()
 
-    discovery = RsyncDiscovery(repo)
-    discovery.discover()
+    # Run rsync discovery for each upstream in the collection.
+    for upstream in repo.upstreams:
+        discovery = RsyncDiscovery(repo, upstream)
+        discovery.discover()
 
     return repo
 
@@ -89,9 +91,14 @@ def generate_config(repo: Repo, dest: str,
     # Step 1: assume *repo* has already been fully discovered by
     # scan(), including any rsync-related mutations.
     print(f"  {next_step_label()} Examining discovered repository structure...", file=sys.stderr)
-    sync_method = repo.sync_method
-    rsync_upstream: Optional[str] = repo.rsync_upstream if hasattr(repo, "rsync_upstream") else None
+    
+    # Use the selected upstream index to pull method and IPv6 state.
+    upstream_index = repo.upstream_idx
+    upstream_node = repo.upstreams[upstream_index] if repo.upstreams else None
 
+    sync_method = upstream_node.sync_method if upstream_node else None
+    ipv6_ok = upstream_node.ipv6_ok if upstream_node else True
+    
     # Derive discovered distributions (suite/pocket names) from the
     # Repo.distributions collection populated by the parser. Fall back to
     # a synthetic "stable" distribution if nothing was found so we can
@@ -259,38 +266,39 @@ def generate_config(repo: Repo, dest: str,
     # Generate YAML config. In this code path a blank name is treated as a
     # bug: --name is required at the CLI and scan() always sets repo.name.
     name = repo.name
-    upstream = repo.upstream
+    upstream_index = repo.upstream_idx
+    upstream_entries = []
+    for u in repo.upstreams:
+        entry = {"url": u.url}
+        if u.sync_method is not None:
+            entry["sync_method"] = u.sync_method
+        if u.ipv6_ok is not None:
+            entry["ipv6_ok"] = u.ipv6_ok
+        if getattr(u, "rsync_roots", None):
+            entry["rsync"] = u.rsync_roots
+        upstream_entries.append(entry)
 
     config_lines = [
         f"# {name} repository",
         "",
         f"name: {name}",
-        f"upstream: {upstream}",
         f"dest: {dest}",
-        f"sync_method: {sync_method}",
     ]
 
-    # If the Repo carries alternate upstreams, persist them so sync-time
-    # logic can choose between the primary upstream and known mirrors.
-    alt_upstreams = repo.alt_upstreams
-    if alt_upstreams:
-        config_lines.append("alt_upstreams:")
-        for url in alt_upstreams:
-            config_lines.append(f"  - {url}")
-
-    # Prefer the full candidate list from rsync discovery when writing
-    # rsync_upstream suggestions. When sync_method is 'rsync', the Repo
-    # is guaranteed to have rsync_upstream and rsync_candidates set by
-    # RsyncDiscovery.discover().
-    if sync_method == 'rsync':
-        primary = repo.rsync_candidates[0]
-        config_lines.append(f"rsync_upstream: {primary}")
-        for alt in repo.rsync_candidates[1:]:
-            config_lines.append(f"# rsync_upstream: {alt}")
-
-    # Persist the discovery result for IPv6 so users can see (and, if
-    # desired, override) what the scanner observed for this repo.
-    config_lines.append(f"ipv6_ok: {'true' if repo.ipv6_ok else 'false'}")
+    # Persist ordered upstreams and the selected primary index.
+    if upstream_entries:
+        config_lines.append("upstreams:")
+        for upstream in upstream_entries:
+            config_lines.append("  - url: " + upstream["url"])
+            if "sync_method" in upstream:
+                config_lines.append(f"    sync_method: {upstream['sync_method']}")
+            if "ipv6_ok" in upstream:
+                config_lines.append(f"    ipv6_ok: {'true' if upstream['ipv6_ok'] else 'false'}")
+            if "rsync" in upstream:
+                config_lines.append("    rsync:")
+                for root in upstream["rsync"]:
+                    config_lines.append(f"      - {root}")
+        config_lines.append(f"upstream_idx: {upstream_index}")
 
     if gpg_key_url:
         # Explicit GPG key URL provided by user; pass through unchanged.
@@ -473,18 +481,13 @@ def main(argv=None):
                 ordered.append(d)
         dist_overrides = ordered or None
 
-    # Determine the primary upstream and any alternates. When
-    # --upstream/--upstreams is supplied, the first URL is treated as the primary discovery
-    # upstream and any remaining URLs are recorded as alt_upstreams on
-    # the Repo for later sync-time use.
+    # Determine ordered upstreams. The first URL is used for discovery; the
+    # rest remain available for selection in the generated config.
     if args.upstreams:
-        primary_upstream = args.upstreams[0]
-        alt_upstreams: List[str] = args.upstreams[1:]
+        upstreams: List[str] = [u for u in args.upstreams if u]
+    elif args.upstream:
+        upstreams = [args.upstream]
     else:
-        primary_upstream = args.upstream
-        alt_upstreams = []
-
-    if not primary_upstream:
         print("ERROR: No upstream URL provided. Supply either a positional upstream or --upstream/--upstreams.", file=sys.stderr)
         sys.exit(1)
 
@@ -493,14 +496,13 @@ def main(argv=None):
     try:
         repo = scan(
             args.name,
-            primary_upstream,
+            upstreams,
             ipv6_ok=ipv6_ok,
             repo_type=args.repo_type,
-            alt_upstreams=alt_upstreams,
         )
     except NotImplementedError:
         print(
-            f"ERROR: No supported Repo implementation could parse upstream {primary_upstream!r}.",
+            f"ERROR: No supported Repo implementation could parse upstream {upstreams[0]!r}.",
             file=sys.stderr,
         )
         print(
@@ -512,11 +514,6 @@ def main(argv=None):
             file=sys.stderr,
         )
         sys.exit(1)
-
-    # Attach any alternate upstreams discovered via --urls to the Repo so
-    # they are captured in snapshots and configs.
-    if alt_upstreams:
-        repo.alt_upstreams = alt_upstreams
 
     config = generate_config(
         repo,
