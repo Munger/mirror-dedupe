@@ -10,10 +10,10 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from mirror_dedupe import schema as Schema
-from mirror_dedupe.lib.html_helpers import extract_last_path_segment, build_url
+from mirror_dedupe.lib.html_helpers import build_url
 from .distributions import DistributionsParser
 from .release import Release
-from .utils import looks_like_release
+from .utils import discover_distribution_paths
 
 
 class Apt(Schema.Repo):
@@ -139,86 +139,26 @@ class Apt(Schema.Repo):
 
     @classmethod
     def is_this_yours(cls, upstream: str, http_client: Any) -> bool:
-        """Heuristic check: does this upstream look like an APT repo?"""
+        """Heuristic check: does this upstream look like an APT repo?
 
-        root = cls.INDEX_ROOT_DIR
-        anchor = cls.INDEX_ANCHOR_FILENAME
+        We delegate to the shared ``discover_distribution_paths`` helper,
+        which walks ``/dists`` and looks for any ``dists/<path>/Release``
+        that passes :func:`looks_like_release`. If at least one
+        distribution path is discovered, we claim the upstream as APT.
+        """
 
         try:
-            dists_url = build_url(upstream, root)
-            html = http_client.fetch_text(dists_url, timeout=5)
+            paths = discover_distribution_paths(
+                upstream,
+                http_client,
+                index_root=cls.INDEX_ROOT_DIR,
+                anchor=cls.INDEX_ANCHOR_FILENAME,
+                max_depth=3,
+            )
         except Exception:
             return False
-        if not html:
-            return False
 
-        # Very small HTML/Markdown dir parser inline. Use the shared
-        # helper so this works for both classic HTML and Markdown-style
-        # directory listings.
-        suites = Schema.Suites()
-        for line in html.splitlines():
-            seg = extract_last_path_segment(line)
-            if not seg:
-                continue
-
-            name = seg.strip("/")
-            # Skip structural junk and the /dists/ nav entry itself.
-            if not name or name in (".", "..", "dists"):
-                continue
-
-            if all(suite.name != name for suite in suites):
-                suites.append(Schema.Suite(name=name))
-
-        if not suites:
-            return False
-
-        # Probe the first few candidates for a plausible Release file.
-        for suite_node in list(suites)[:3]:
-            suite = suite_node.name
-            # First try the standard flat layout: dists/<suite>/Release.
-            rel_url = build_url(upstream, root, suite, anchor)
-            try:
-                text = http_client.fetch_text(rel_url, timeout=5)
-            except Exception:
-                text = None
-
-            if text and looks_like_release(text):
-                return True
-
-            # If there is no flat Release for this suite (or it did not look
-            # like a Release), try a shallow nested pocket layout such as
-            # dists/noble-updates/epoxy/Release used by ubuntu-cloud.
-            try:
-                pocket_index_url = build_url(upstream, root, suite)
-                pocket_html = http_client.fetch_text(pocket_index_url, timeout=5)
-            except Exception:
-                pocket_html = None
-
-            if not pocket_html:
-                continue
-
-            pockets: List[str] = []
-            for line in pocket_html.splitlines():
-                if 'href="' in line and '/"' in line:
-                    start = line.find('href="') + 6
-                    end = line.find('/"', start)
-                    if start > 5 and end > start:
-                        raw = line[start:end]
-                        name = raw.strip("/")
-                        if name and name not in pockets:
-                            pockets.append(name)
-
-            for pocket in pockets[:3]:
-                pocket_rel_url = build_url(upstream, root, suite, pocket, anchor)
-                try:
-                    pocket_text = http_client.fetch_text(pocket_rel_url, timeout=5)
-                except Exception:
-                    continue
-
-                if pocket_text and looks_like_release(pocket_text):
-                    return True
-
-        return False
+        return bool(paths)
 
     def make_parser(self) -> "Repo.Parser":
         """Return an Apt.Parser bound to this Repo instance."""

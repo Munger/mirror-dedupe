@@ -25,7 +25,8 @@ import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 def scan(name: str, upstream: str,
          ipv6_ok: Optional[bool] = None,
-         repo_type: Optional[str] = None) -> Repo:
+         repo_type: Optional[str] = None,
+         alt_upstreams: Optional[List[str]] = None) -> Repo:
     """Perform HTTP and rsync discovery and return a populated Repo.
 
     This mirrors the behaviour of test_discovery.py: construct a Repo
@@ -40,7 +41,12 @@ def scan(name: str, upstream: str,
     # is_this_yours() while still honouring the ipv6_ok hint. Callers may
     # optionally supply repo_type to force a specific implementation (e.g.
     # "apt") for repositories with unusual layouts.
-    repo = Repo.from_url(upstream, ipv6_ok=ipv6_ok, repo_type=repo_type)
+    repo = Repo.from_url(
+        upstream,
+        ipv6_ok=ipv6_ok,
+        repo_type=repo_type,
+        alt_upstreams=alt_upstreams,
+    )
     if name:
         repo.name = name
     repo = repo.parse()
@@ -56,7 +62,8 @@ def generate_config(repo: Repo, dest: str,
                     dist_overrides: Optional[List[str]] = None,
                     arch_override: Optional[List[str]] = None,
                     component_override: Optional[List[str]] = None,
-                    global_arch_mask: Optional[List[str]] = None) -> str:
+                    global_arch_mask: Optional[List[str]] = None,
+                    collapse_dists: bool = False) -> str:
     """Generate repository configuration from a fully-populated Repo.
 
     ``repo`` is expected to have already been parsed by its concrete
@@ -95,8 +102,12 @@ def generate_config(repo: Repo, dest: str,
             if dist.name and dist.name not in discovered:
                 discovered.append(str(dist.name))
     if not discovered:
+        # Discovery could not identify any suites/pockets under dists/.
+        # Do not invent a synthetic "stable" default; the user must
+        # provide explicit --dist/--release/--releases values in this
+        # situation so the generated config reflects an intentional
+        # choice rather than a guess.
         print("      Warning: Could not auto-detect distributions", file=sys.stderr)
-        discovered = ["stable"]
 
     # Step 2: decide which distributions to use for this config. We never try to
     # "auto-select" a primary series by Version:
@@ -108,6 +119,7 @@ def generate_config(repo: Repo, dest: str,
     #     as if "--releases all" had been specified.
 
     all_dists_mode = False
+    collapsed_from_all = False
 
     if dist_overrides:
         # Normalise and inspect for the special "all" token.
@@ -116,22 +128,66 @@ def generate_config(repo: Repo, dest: str,
             all_dists_mode = True
             distributions = discovered
         else:
+            # When the user provides explicit distributions, trust the
+            # list as-is. Previous versions attempted to warn about
+            # potential spelling mistakes by checking the discovered
+            # suites under dists/, but this proved too noisy for
+            # advanced layouts and synthetic pockets, so we no longer
+            # emit those warnings here.
             distributions = dists
-            # Basic sanity check: warn if none of the specified suite parts
-            # appear under dists/.
-            discovered_set = set(discovered)
-            for d in distributions:
-                suite_part = d.split('/', 1)[0]
-                if suite_part not in discovered_set:
-                    print(
-                        f"      Warning: dist '{d}' was not found under dists/ (check spelling)",
-                        file=sys.stderr,
-                    )
     else:
-        # No explicit distributions were provided; default to all discovered
-        # suites. This is equivalent to the user specifying "--releases all".
+        # No explicit distributions were provided.
+        if not discovered:
+            # With no auto-detected suites and no overrides, we cannot
+            # safely guess a default. Require the user to specify
+            # --dist/--release/--releases explicitly.
+            print(
+                "ERROR: No distributions were auto-detected and no --dist/--release/--releases overrides were provided.",
+                file=sys.stderr,
+            )
+            print(
+                "       Please rerun with explicit --releases (or --dist) to choose which suites to mirror.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Otherwise, default to all discovered suites. This is
+        # equivalent to the user specifying "--releases all".
         all_dists_mode = True
         distributions = discovered
+
+    # Optional collapse: when enabled and operating in "all" mode,
+    # collapse pocket variants back to their base suites (e.g.
+    # noble[-updates/-security/-backports/-proposed] => noble) so that
+    # sync-time expansion can regenerate the standard pockets.
+    if all_dists_mode and collapse_dists and discovered:
+        pocket_suffixes = (
+            "-updates",
+            "-security",
+            "-backports",
+            "-proposed",
+        )
+        base_to_seen: dict[str, set[str]] = {}
+        for d in discovered:
+            # Only consider simple suite names; leave more complex
+            # paths like "noble-proposed/dalamation" untouched.
+            if "/" in d:
+                continue
+            base = d
+            for suf in pocket_suffixes:
+                if base.endswith(suf):
+                    base = base[: -len(suf)]
+                    break
+            base_to_seen.setdefault(base, set()).add(d)
+
+        # If collapsing would actually reduce the list, switch to the
+        # base names and treat this as non-all_dists_mode so that
+        # expand_distributions remains enabled. Record that this list
+        # was derived from a collapsed set of variants so we can add a
+        # helpful auto-expansion comment in the generated config.
+        if base_to_seen and len(base_to_seen) < len(discovered):
+            distributions = sorted(base_to_seen.keys())
+            all_dists_mode = False
+            collapsed_from_all = True
 
     print(f"      Using distributions: {', '.join(distributions)}", file=sys.stderr)
 
@@ -214,6 +270,14 @@ def generate_config(repo: Repo, dest: str,
         f"sync_method: {sync_method}",
     ]
 
+    # If the Repo carries alternate upstreams, persist them so sync-time
+    # logic can choose between the primary upstream and known mirrors.
+    alt_upstreams = repo.alt_upstreams
+    if alt_upstreams:
+        config_lines.append("alt_upstreams:")
+        for url in alt_upstreams:
+            config_lines.append(f"  - {url}")
+
     # Prefer the full candidate list from rsync discovery when writing
     # rsync_upstream suggestions. When sync_method is 'rsync', the Repo
     # is guaranteed to have rsync_upstream and rsync_candidates set by
@@ -253,14 +317,14 @@ def generate_config(repo: Repo, dest: str,
     else:
         for dist in distributions:
             config_lines.append(f"  - {dist}")
-        if len(distributions) == 1 and distributions[0] not in ['stable', 'unstable', 'testing']:
+        if collapsed_from_all or (len(distributions) == 1 and distributions[0] not in ['stable', 'unstable', 'testing']):
             config_lines.append("# Distribution auto-expands to include variants (e.g., -updates, -security)")
 
     # Check if we should disable distribution expansion. If only one
     # distribution and it's 'stable', disable expansion. In all_dists_mode
     # we always disable expansion because the list already enumerates all
     # suites explicitly.
-    if all_dists_mode or (len(distributions) == 1 and distributions[0] == 'stable'):
+    if (all_dists_mode and not collapse_dists) or (len(distributions) == 1 and distributions[0] == 'stable'):
         config_lines.append("expand_distributions: false")
 
     config_lines.append("")  # Trailing newline
@@ -303,11 +367,34 @@ def main(argv=None):
                        help='Component to include (may be specified multiple times)')
     parser.add_argument('--components', dest='components',
                        help='Comma-separated list of components to include')
+    parser.add_argument(
+        '-U',
+        '--upstream',
+        '--upstreams',
+        dest='upstreams',
+        nargs='+',
+        help='Primary upstream URL followed by optional alternate upstreams',
+    )
+    collapse_group = parser.add_mutually_exclusive_group()
+    collapse_group.add_argument(
+        '--collapse-dists',
+        dest='collapse_dists',
+        action='store_true',
+        help='Collapse discovered distributions to base suites where possible',
+    )
+    collapse_group.add_argument(
+        '--no-collapse-dists',
+        dest='collapse_dists',
+        action='store_false',
+        help='Do not collapse discovered distributions; emit all variants explicitly',
+    )
+    parser.set_defaults(collapse_dists=None)
     parser.add_argument('--repo-type', dest='repo_type',
                        help='Force a specific Repo type (e.g. "apt") for unusual layouts')
     parser.add_argument('-G', '--gpg-key-url',
                        help='Explicit GPG key URL for this repository')
     parser.add_argument('upstream', 
+                       nargs='?',
                        help='Upstream repository URL')
     
     args = parser.parse_args()
@@ -329,6 +416,7 @@ def main(argv=None):
     # mirror_dedupe.config._normalize_arch_mask: "*"/"all" => no mask,
     # list => list, other => None.
     arch_mask = cfg.get('architectures', '*')
+    global_collapse_dists = bool(cfg.get('collapse_distributions', False))
 
     def _normalize_arch_mask(value):
         if isinstance(value, str):
@@ -385,13 +473,34 @@ def main(argv=None):
                 ordered.append(d)
         dist_overrides = ordered or None
 
+    # Determine the primary upstream and any alternates. When
+    # --upstream/--upstreams is supplied, the first URL is treated as the primary discovery
+    # upstream and any remaining URLs are recorded as alt_upstreams on
+    # the Repo for later sync-time use.
+    if args.upstreams:
+        primary_upstream = args.upstreams[0]
+        alt_upstreams: List[str] = args.upstreams[1:]
+    else:
+        primary_upstream = args.upstream
+        alt_upstreams = []
+
+    if not primary_upstream:
+        print("ERROR: No upstream URL provided. Supply either a positional upstream or --upstream/--upstreams.", file=sys.stderr)
+        sys.exit(1)
+
     # Perform discovery first so we have a fully populated Repo, then
     # generate configuration based solely on that Repo plus CLI filters.
     try:
-        repo = scan(args.name, args.upstream, ipv6_ok=ipv6_ok, repo_type=args.repo_type)
+        repo = scan(
+            args.name,
+            primary_upstream,
+            ipv6_ok=ipv6_ok,
+            repo_type=args.repo_type,
+            alt_upstreams=alt_upstreams,
+        )
     except NotImplementedError:
         print(
-            f"ERROR: No supported Repo implementation could parse upstream {args.upstream!r}.",
+            f"ERROR: No supported Repo implementation could parse upstream {primary_upstream!r}.",
             file=sys.stderr,
         )
         print(
@@ -404,6 +513,11 @@ def main(argv=None):
         )
         sys.exit(1)
 
+    # Attach any alternate upstreams discovered via --urls to the Repo so
+    # they are captured in snapshots and configs.
+    if alt_upstreams:
+        repo.alt_upstreams = alt_upstreams
+
     config = generate_config(
         repo,
         dest,
@@ -412,13 +526,18 @@ def main(argv=None):
         arch_override=arch_override,
         component_override=component_override,
         global_arch_mask=global_arch_mask,
+        collapse_dists=(
+            args.collapse_dists
+            if args.collapse_dists is not None
+            else global_collapse_dists
+        ),
     )
  
     # Derive the config path and write the generated configuration to disk
     # so it can be used directly by mirror-dedupe. The stderr guidance
     # below is kept unchanged.
     config_dir = os.path.join(args.config_dir, 'repos-available')
-    config_file = os.path.join(config_dir, f'{args.name}.conf')
+    config_file = os.path.join(config_dir, f"{repo.name}.conf")
 
     os.makedirs(config_dir, exist_ok=True)
     with open(config_file, 'w', encoding='utf-8') as f:
@@ -427,14 +546,16 @@ def main(argv=None):
             f.write("\n")
 
     # Temporary: write a JSON snapshot of the Repo alongside the config,
-    # using the hostname of the upstream URL as the basename.
+    # using the repo name as the basename. This makes it easier to
+    # correlate snapshots with generated configs regardless of which
+    # upstream or mirror was used during discovery.
     #
     # Repo inherits from Node, which provides ``snapshot()`` as the
     # canonical way to obtain a plain JSON-serialisable payload. Use that
     # here instead of any older ``to_payload`` helpers.
     try:
-        hostname = url_hostname(repo.upstream) or "unknown"
-        snapshot_path = os.path.join(config_dir, f"{hostname}.json")
+        snapshot_basename = repo.name
+        snapshot_path = os.path.join(config_dir, f"{snapshot_basename}.json")
         with open(snapshot_path, 'w', encoding='utf-8') as sf:
             # Preserve the key order produced by Repo.snapshot() (an
             # OrderedDict) instead of re-sorting alphabetically.

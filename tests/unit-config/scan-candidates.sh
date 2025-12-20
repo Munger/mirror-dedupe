@@ -51,15 +51,16 @@ scan_line() {
     return 0
   fi
 
-  local name dest upstream
+  local name dest
   name=${fields[0]}
   dest=${fields[1]}
-  upstream=${fields[2]}
 
-  # Extra args are everything after upstream
+  # All remaining fields are passed through as scanner flags. Upstreams
+  # are expected to be supplied explicitly via -U/--upstream/--upstreams
+  # in this flags portion rather than as a positional argument.
   local -a extras=()
-  if (( count > 3 )); then
-    extras=(${fields[@]:3})
+  if (( count > 2 )); then
+    extras=(${fields[@]:2})
   fi
 
   # The new scanner no longer supports --gpg-key-path; strip any
@@ -82,24 +83,13 @@ scan_line() {
     extras=("${filtered[@]}")
   fi
 
-  echo "=== Scanning ${name} (${upstream}) ===" >&2
-  if (( ${#extras[@]} > 0 )); then
-    if ! ${SCAN_CMD} \
-      --config "${CONFIG_DIR}" \
-      --name "${name}" \
-      --dest "${dest}" \
-      "${extras[@]}" \
-      "${upstream}"; then
-      echo "ERROR: scan for ${name} failed (see above); continuing with next candidate" >&2
-    fi
-  else
-    if ! ${SCAN_CMD} \
-      --config "${CONFIG_DIR}" \
-      --name "${name}" \
-      --dest "${dest}" \
-      "${upstream}"; then
-      echo "ERROR: scan for ${name} failed (see above); continuing with next candidate" >&2
-    fi
+  echo "=== Scanning ${name} ===" >&2
+  if ! ${SCAN_CMD} \
+    --config "${CONFIG_DIR}" \
+    --name "${name}" \
+    --dest "${dest}" \
+    "${extras[@]}"; then
+    echo "ERROR: scan for ${name} failed (see above); continuing with next candidate" >&2
   fi
   echo "" >&2
 }
