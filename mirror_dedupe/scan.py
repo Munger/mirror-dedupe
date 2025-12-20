@@ -79,6 +79,10 @@ def generate_config(repo: Repo, dest: str,
     phase.
     """
 
+    # Prefer values already on the Repo payload; fall back to caller override.
+    if not gpg_key_url:
+        gpg_key_url = repo.gpg_key_url
+
     total_steps = 3
     step = 1
 
@@ -340,7 +344,7 @@ def generate_config(repo: Repo, dest: str,
     return '\n'.join(config_lines)
 
 
-def main(argv=None):
+def main() -> None:
     parser = argparse.ArgumentParser(
         description='Scan a repository and generate mirror-dedupe configuration',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -514,6 +518,11 @@ def main(argv=None):
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Persist any user-supplied GPG key URL on the Repo so it survives
+    # snapshotting alongside the generated config.
+    if args.gpg_key_url:
+        repo.gpg_key_url = args.gpg_key_url
 
     config = generate_config(
         repo,
