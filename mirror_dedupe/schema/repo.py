@@ -63,6 +63,7 @@ class Repo(Node):
         ipv6_ok: bool = True,
         sync_method: str | None = None,
         gpg_key_url: str | None = None,
+        alt_upstreams: list[str] | None = None,
         selected_distributions: list[str] | None = None,
         selected_architectures: list[str] | None = None,
         selected_components: list[str] | None = None,
@@ -82,6 +83,10 @@ class Repo(Node):
             "ipv6_ok": ipv6_ok,
             "sync_method": sync_method,
             "gpg_key_url": gpg_key_url,
+            # Always materialise alt_upstreams as a list so callers and
+            # snapshots can rely on its presence without getattr() or
+            # None checks.
+            "alt_upstreams": alt_upstreams or [],
             "selected_distributions": selected_distributions or [],
             "selected_architectures": selected_architectures or [],
             "selected_components": selected_components or [],
@@ -156,42 +161,70 @@ class Repo(Node):
 
             raise NotImplementedError
 
-    # --- selection helper -------------------------------------------------
+    # --- selection helpers ------------------------------------------------
 
     @classmethod
-    def get_type_for_url(
+    def get_type_for_urls(
         cls,
         repo: Any,
-        upstream: str,
+        urls: list[str],
         http_client: Any,
-    ) -> "Type[Repo] | None":
-        """Select an appropriate Repo class for this repo/upstream.
+    ) -> tuple["Type[Repo] | None", str | None]:
+        """Select an appropriate Repo class for this repo/URL set.
 
-        Behaviour mirrors the previous Parser.get_parser_for_url helper:
+        Behaviour mirrors the previous Parser.get_parser_for_url helper
+        but extended to support multiple candidate upstream URLs:
 
-        - If repo["repo_type"] is unset/"unknown", run is_this_yours() on
-          each registered RepoType until one claims the upstream.
-        - If repo["repo_type"] is set, pick the matching RepoType by its
-          REPO_TYPE constant.
+        - If repo["repo_type"] is unset/"unknown", run is_this_yours()
+          for each registered RepoType across all URLs until one claims
+          a URL.
+        - If repo["repo_type"] is set, only probe the matching
+          RepoType across all URLs.
+
+        Returns a tuple of (RepoClass | None, url_used | None).
         """
 
         rt_cls: Type[Repo] | None = None
+        used_url: str | None = None
         types = cls.all_types()
+
+        # Normalise and de-duplicate URL list while preserving order.
+        ordered_urls: list[str] = []
+        seen: set[str] = set()
+        for u in urls:
+            if not u:
+                continue
+            if u in seen:
+                continue
+            seen.add(u)
+            ordered_urls.append(u)
 
         repo_type_name = repo.get("repo_type")
         if not repo_type_name or repo_type_name == "unknown":
+            # Auto-detect: walk Repo types outer, URLs inner so type
+            # priority follows registration order.
             for t in types:
-                if t.is_this_yours(upstream, http_client):
-                    rt_cls = t
-                    repo["repo_type"] = getattr(t, "REPO_TYPE", "unknown")
+                for url in ordered_urls:
+                    if t.is_this_yours(url, http_client):
+                        rt_cls = t
+                        used_url = url
+                        repo["repo_type"] = getattr(t, "REPO_TYPE", "unknown")
+                        break
+                if rt_cls is not None:
                     break
         else:
+            # Fixed type: only probe the matching RepoType across all
+            # candidate URLs.
             for t in types:
                 if getattr(t, "REPO_TYPE", None) == repo_type_name:
-                    rt_cls = t
+                    for url in ordered_urls:
+                        if t.is_this_yours(url, http_client):
+                            rt_cls = t
+                            used_url = url
+                            break
                     break
 
-        return rt_cls
+        return rt_cls, used_url
 
     # --- high-level factories ----------------------------------------------
 
@@ -202,6 +235,7 @@ class Repo(Node):
         *,
         ipv6_ok: bool | None = None,
         repo_type: str | None = None,
+        alt_upstreams: list[str] | None = None,
     ) -> "Repo":
         """Construct a Repo instance bound to a URL and HTTP client.
 
@@ -218,6 +252,12 @@ class Repo(Node):
         if ipv6_ok is not None:
             data["ipv6_ok"] = ipv6_ok
 
+        # Propagate any alternate upstreams into the detection payload so
+        # get_type_for_url can consider them when running is_this_yours
+        # across registered Repo types.
+        if alt_upstreams is not None:
+            data["alt_upstreams"] = alt_upstreams
+
         # Seed an initial sync_method hint based on the upstream scheme so
         # downstream code has a sensible default until a more specific
         # method (e.g. rsync) is discovered.
@@ -229,7 +269,13 @@ class Repo(Node):
 
         http = HTTPClient(ipv6_ok=bool(data.get("ipv6_ok", True)))
 
-        rt_cls = cls.get_type_for_url(data, upstream, http) or cls
+        # When alternate upstreams are provided, attempt detection across
+        # the full set in a deterministic order while keeping ``upstream``
+        # as the canonical primary in the Repo payload.
+        urls: list[str] = [upstream, *(alt_upstreams or [])]
+        rt_cls, _used_url = cls.get_type_for_urls(data, urls, http)
+        if rt_cls is None:
+            rt_cls = cls
 
         # Pass the discovered scalar config through to the Repo. ``data``
         # already contains an ``upstream`` key, so we do not pass it
@@ -249,6 +295,29 @@ class Repo(Node):
         parser = self.make_parser()
         parser.parse()
         return self
+
+    # --- upstream helpers ----------------------------------------------------
+
+    def iter_upstreams(self) -> list[str]:
+        """Return the primary upstream followed by any alternates.
+
+        The first element is always ``self.upstream``. Any URLs recorded
+        in ``self.alt_upstreams`` are appended in order. Callers can use
+        this to try multiple discovery/sync endpoints while keeping a
+        single source of truth for upstream topology on the Repo.
+        """
+
+        prim = str(self.get("upstream", ""))
+        alts = self.get("alt_upstreams", []) or []
+        urls: list[str] = []
+        if prim:
+            urls.append(prim)
+        for u in alts:
+            # Avoid trivial duplication if alt_upstreams accidentally
+            # contains the primary as well.
+            if u and u not in urls:
+                urls.append(u)
+        return urls
 
     # --- snapshot / restore helpers ------------------------------------------
 
