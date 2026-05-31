@@ -1,3 +1,16 @@
+mirror-dedupe (0.2.11-1) noble; urgency=medium
+
+  * Add force_ipv4 / disable_ipv6 support to the runtime sync pipeline:
+    - download_with_curl() now accepts force_ipv4 to pass curl -4
+    - run_rsync(), run_https_sync(), download_gpg_key() accept force_ipv4
+    - sync_mirrors() and cleanup_mirrors() read disable_ipv6 from mirror
+      config and pass it through as force_ipv4
+    The scanner (mirror-dedupe-scan) already used -4 everywhere; this brings
+    the runtime in line so that mirrors with broken IPv6 (e.g. aarch64 hosts)
+    can be configured with disable_ipv6: true and avoid timeouts.
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 31 May 2026 12:00:00 +0000
+
 mirror-dedupe (0.2.10-1) noble; urgency=medium
 
   * Teach mirror-dedupe-scan to discover a concrete rsync_upstream using
