@@ -24,7 +24,7 @@ except:
     pass
 
 
-def download_with_curl(url: str, dest_path: str, timeout: int = 300, progress_info: str = "") -> bool:
+def download_with_curl(url: str, dest_path: str, timeout: int = 300, progress_info: str = "", force_ipv4: bool = False) -> bool:
     """Download file with curl, supports resuming partial downloads"""
     from . import utils
     
@@ -40,7 +40,10 @@ def download_with_curl(url: str, dest_path: str, timeout: int = 300, progress_in
     
     try:
         # -C - enables automatic resume of partial downloads
-        cmd = ['curl', '-f', '-L', '-C', '-', '--max-time', str(timeout), '-o', dest_path, url]
+        cmd = ['curl']
+        if force_ipv4:
+            cmd.append('-4')
+        cmd.extend(['-f', '-L', '-C', '-', '--max-time', str(timeout), '-o', dest_path, url])
         result = subprocess.run(cmd, capture_output=True)
         
         with utils.download_lock:

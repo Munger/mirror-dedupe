@@ -15,7 +15,7 @@ import subprocess
 from .indices import parse_release_file
 
 
-def download_gpg_key(gpg_key_url: str, dest_base: str, gpg_key_path: str, dry_run: bool = False) -> bool:
+def download_gpg_key(gpg_key_url: str, dest_base: str, gpg_key_path: str, dry_run: bool = False, force_ipv4: bool = False) -> bool:
     """Download GPG key to mirror"""
     dest_file = os.path.join(dest_base, gpg_key_path)
     dest_dir = os.path.dirname(dest_file)
@@ -31,7 +31,10 @@ def download_gpg_key(gpg_key_url: str, dest_base: str, gpg_key_path: str, dry_ru
         print(f"  DRY RUN - would download GPG key")
         return True
     
-    cmd = ['curl', '-fsSL', '-o', dest_file, gpg_key_url]
+    cmd = ['curl']
+    if force_ipv4:
+        cmd.append('-4')
+    cmd.extend(['-fsSL', '-o', dest_file, gpg_key_url])
     result = subprocess.run(cmd, capture_output=True)
     
     if result.returncode == 0:
@@ -42,7 +45,7 @@ def download_gpg_key(gpg_key_url: str, dest_base: str, gpg_key_path: str, dry_ru
         return False
 
 
-def run_rsync(distributions: list, dest_base: str, upstream_url: str, architectures: list = None, dry_run: bool = True):
+def run_rsync(distributions: list, dest_base: str, upstream_url: str, architectures: list = None, dry_run: bool = True, force_ipv4: bool = False):
     """Run rsync for dists metadata and verify existing pool files"""
     print(f"\n{'='*60}")
     print("Running rsync for dists metadata")
@@ -59,14 +62,16 @@ def run_rsync(distributions: list, dest_base: str, upstream_url: str, architectu
     # Build rsync command for dists/ only
     # We don't sync all of pool/ because it contains files for all architectures
     # The curl/hardlink phase already downloaded the specific files we need
-    cmd = [
-        'rsync',
+    cmd = ['rsync']
+    if force_ipv4:
+        cmd.append('-4')
+    cmd.extend([
         '-rtl',  # recursive + preserve times + copy symlinks
         '--delete',
         '--compress',
         '--progress',
         '--stats',
-    ]
+    ])
     
     cmd.append('--include=/dists/')
     
@@ -101,7 +106,7 @@ def run_rsync(distributions: list, dest_base: str, upstream_url: str, architectu
     return True
 
 
-def run_https_sync(distributions: list, dest_base: str, upstream_url: str, architectures: list = None, components: list = None, dry_run: bool = True):
+def run_https_sync(distributions: list, dest_base: str, upstream_url: str, architectures: list = None, components: list = None, dry_run: bool = True, force_ipv4: bool = False):
     """Download dists metadata via HTTPS using curl"""
     print(f"\n{'='*60}")
     print("Downloading dists metadata via HTTPS")
@@ -123,6 +128,13 @@ def run_https_sync(distributions: list, dest_base: str, upstream_url: str, archi
     
     success = True
     
+    def _curl_cmd(dest_file: str, url: str):
+        cmd = ['curl']
+        if force_ipv4:
+            cmd.append('-4')
+        cmd.extend(['-fsSL', '-o', dest_file, url])
+        return cmd
+    
     for dist in distributions:
         dist_dir = f"{dest_base}/dists/{dist}"
         os.makedirs(dist_dir, exist_ok=True)
@@ -132,7 +144,7 @@ def run_https_sync(distributions: list, dest_base: str, upstream_url: str, archi
             url = f"{upstream_url}dists/{dist}/{filename}"
             dest_file = f"{dist_dir}/{filename}"
             
-            cmd = ['curl', '-fsSL', '-o', dest_file, url]
+            cmd = _curl_cmd(dest_file, url)
             
             if dry_run:
                 print(f"DRY RUN - Would download: {url}")
@@ -160,7 +172,7 @@ def run_https_sync(distributions: list, dest_base: str, upstream_url: str, archi
                             url = f"{upstream_url}dists/{dist}/{component}/binary-{arch}/{filename}"
                             dest_file = f"{comp_dir}/{filename}"
                             
-                            cmd = ['curl', '-fsSL', '-o', dest_file, url]
+                            cmd = _curl_cmd(dest_file, url)
                             
                             if dry_run:
                                 print(f"DRY RUN - Would download: {url}")
@@ -178,7 +190,7 @@ def run_https_sync(distributions: list, dest_base: str, upstream_url: str, archi
                     url = f"{upstream_url}dists/{dist}/{component}/source/{filename}"
                     dest_file = f"{comp_dir}/{filename}"
                     
-                    cmd = ['curl', '-fsSL', '-o', dest_file, url]
+                    cmd = _curl_cmd(dest_file, url)
                     
                     if dry_run:
                         print(f"DRY RUN - Would download: {url}")
@@ -193,7 +205,7 @@ def run_https_sync(distributions: list, dest_base: str, upstream_url: str, archi
                 url = f"{upstream_url}dists/{dist}/{filename}"
                 dest_file = f"{dist_dir}/{filename}"
                 
-                cmd = ['curl', '-fsSL', '-o', dest_file, url]
+                cmd = _curl_cmd(dest_file, url)
                 
                 if dry_run:
                     print(f"DRY RUN - Would download: {url}")

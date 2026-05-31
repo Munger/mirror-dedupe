@@ -144,17 +144,18 @@ def sync_mirrors(mirrors, dry_run):
         rsync_upstream = mirror.get('rsync_upstream', upstream)
         gpg_key_url = mirror.get('gpg_key_url')
         gpg_key_path = mirror.get('gpg_key_path')
+        force_ipv4 = mirror.get('disable_ipv6', False)
         
         # Download GPG key if specified
         if gpg_key_url and gpg_key_path:
             print(f"\n[{name}] Downloading GPG key...")
-            if not download_gpg_key(gpg_key_url, dest, gpg_key_path, dry_run):
+            if not download_gpg_key(gpg_key_url, dest, gpg_key_path, dry_run, force_ipv4=force_ipv4):
                 print(f"  WARNING: GPG key download failed for {name}")
         
         print(f"\n[{name}] Syncing dists...")
         
         if sync_method == 'https':
-            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run):
+            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
                 print(f"  ERROR: HTTPS sync failed for {name}")
                 sys.exit(1)
         else:
@@ -162,7 +163,7 @@ def sync_mirrors(mirrors, dry_run):
             # discovered by mirror-dedupe-scan. This keeps HTTP upstream as the
             # source of truth for curl while using a concrete rsync daemon
             # path for dists/.
-            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run):
+            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run, force_ipv4=force_ipv4):
                 print(f"  ERROR: rsync failed for {name}")
                 sys.exit(1)
 
@@ -512,14 +513,15 @@ def cleanup_mirrors(mirrors, global_files, dry_run):
         components = mirror.get('components', COMPONENTS)
         sync_method = mirror.get('sync_method', 'rsync')
         rsync_upstream = mirror.get('rsync_upstream', upstream)
+        force_ipv4 = mirror.get('disable_ipv6', False)
         
         print(f"\n[{name}] Syncing dists...")
         if sync_method == 'https':
-            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run):
+            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
                 print(f"  ERROR: HTTPS sync failed for {name}")
         else:
             # Use rsync_upstream for rsync metadata sync when available.
-            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run):
+            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run, force_ipv4=force_ipv4):
                 print(f"  ERROR: rsync failed for {name}")
         
         # Build expected files list for this mirror
