@@ -168,6 +168,19 @@ class Apt(Schema.Repo):
 
         return Apt.Parser(self)
 
+    # --- sync --------------------------------------------------------------
+
+    def sync(self, pool_path: str) -> None:
+        """Synchronize this Apt repo into the shared pool.
+
+        TODO: implement HTTP sync flow:
+          - parse Release/indices
+          - fetch indices via IndexFetcher
+          - parse indexes to emit required objects
+          - hand off to shared pool Fetcher for download/link
+        """
+        raise NotImplementedError("Apt.sync() not implemented yet.")
+
 
 # Register this Repo so discovery code can obtain it via the
 # shared Repo registry rather than hard-coding it in multiple

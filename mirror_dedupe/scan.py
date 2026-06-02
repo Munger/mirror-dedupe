@@ -18,7 +18,7 @@ import json
 
 from mirror_dedupe.schema.repo import Repo
 from mirror_dedupe.lib.rsync_discovery import RsyncDiscovery
-from mirror_dedupe.config import load_config
+from mirror_dedupe.config import Config
 from mirror_dedupe.lib.html_helpers import url_hostname
 import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
@@ -420,15 +420,15 @@ def main() -> None:
     # Load global config once so we can honour IPv6 policy when scanning
     # and apply the same global architectures mask that mirror-dedupe
     # will later enforce at sync time.
-    cfg = load_config(args.config_dir)
-    global_disable_ipv6 = bool(cfg.get('disable_ipv6', False))
+    cfg = Config.get(args.config_dir)
+    global_disable_ipv6 = bool(cfg.disable_ipv6)
     ipv6_ok = not global_disable_ipv6
 
     # Normalise the global architectures mask. Behaviour mirrors
     # mirror_dedupe.config._normalize_arch_mask: "*"/"all" => no mask,
     # list => list, other => None.
-    arch_mask = cfg.get('architectures', '*')
-    global_collapse_dists = bool(cfg.get('collapse_distributions', False))
+    arch_mask = cfg.architectures
+    global_collapse_dists = bool(cfg.collapse_distributions)
 
     def _normalize_arch_mask(value):
         if isinstance(value, str):
