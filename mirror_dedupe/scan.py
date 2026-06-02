@@ -24,8 +24,7 @@ import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 def scan(name: str, upstreams: List[str],
          ipv6_ok: Optional[bool] = None,
-         repo_type: Optional[str] = None,
-         dist_overrides: Optional[List[str]] = None) -> Repo:
+         repo_type: Optional[str] = None) -> Repo:
     """Perform HTTP discovery and return a populated Repo."""
 
     primary_upstream = upstreams[0]
@@ -43,14 +42,6 @@ def scan(name: str, upstreams: List[str],
     )
     if name:
         repo.name = name
-
-    # If the user specified explicit distribution names (--release/--dist),
-    # seed dist_candidates so the parser probes those paths directly instead
-    # of relying solely on /dists/ HTML discovery (which fails on S3-hosted
-    # repos that do not serve directory listings).
-    if dist_overrides:
-        repo.dist_candidates = dist_overrides
-
     repo = repo.parse()
 
     return repo
@@ -274,8 +265,6 @@ def generate_config(repo: Repo, dest: str,
             entry["sync_method"] = u.sync_method
         if u.ipv6_ok is not None:
             entry["ipv6_ok"] = u.ipv6_ok
-        if getattr(u, "rsync_roots", None):
-            entry["rsync"] = u.rsync_roots
         upstream_entries.append(entry)
 
     config_lines = [
@@ -294,10 +283,6 @@ def generate_config(repo: Repo, dest: str,
                 config_lines.append(f"    sync_method: {upstream['sync_method']}")
             if "ipv6_ok" in upstream:
                 config_lines.append(f"    ipv6_ok: {'true' if upstream['ipv6_ok'] else 'false'}")
-            if "rsync" in upstream:
-                config_lines.append("    rsync:")
-                for root in upstream["rsync"]:
-                    config_lines.append(f"      - {root}")
         config_lines.append(f"upstream_idx: {upstream_index}")
 
     if gpg_key_url:
@@ -499,7 +484,6 @@ def main() -> None:
             upstreams,
             ipv6_ok=ipv6_ok,
             repo_type=args.repo_type,
-            dist_overrides=dist_overrides,
         )
     except NotImplementedError:
         print(
