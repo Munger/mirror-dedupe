@@ -1,3 +1,14 @@
+## @file vars.py
+##
+## @brief Per-repo variables populated by parsers.
+##
+## ``Vars`` holds invariants and derived facts that apply to the entire
+## repository (e.g. APT layout conventions), not per-release data.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -6,14 +17,11 @@ from .node import Node
 
 
 class Vars(Node):
-    """Per-repo variables populated by parsers.
+    ## @brief Per-repo variables populated by parsers.
+    ##
+    ## Holds invariants and derived facts that apply to the entire
+    ## repository (e.g. APT layout conventions), not per-release data.
 
-    Vars holds invariants and derived facts that apply to the entire
-    repository (e.g. APT layout conventions), not per-release data.
-    """
-
-    # On restore we want to seed the underlying mapping directly from the
-    # snapshot payload, bypassing the keyword-only constructor.
     _restore_via_payload = True
 
     def __init__(

@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""
-cli.py
-
-  Ubuntu mirror synchronisation with global deduplication
-
-Copyright (c) 2025 Tim Hosking
-Email: tim@mungerware.com
-Website: https://github.com/munger
-Licence: MIT
-"""
+## @file cli.py
+##
+## @brief CLI entry point and management operations for mirror-dedupe.
+##
+## Provides the ``main()`` entry point with subcommands for listing,
+## activating, deactivating, testing, and deleting mirrors, plus the
+## core mirror-sync + deduplication orchestration pipeline.
+##
+## @copyright Copyright (c) 2025-2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
 import os
 import sys
@@ -25,47 +26,46 @@ from collections import defaultdict
 import yaml
 
 from .config import Config, DEFAULT_CONFIG_DIR
-from .utils import (acquire_lock, release_lock, signal_handler, 
+from .utils import (acquire_lock, release_lock, signal_handler,
                     get_disk_usage, format_bytes)
 from .dedupe import expand_distributions
 from .orchestrate import (run_orchestrator_mode, sync_mirrors, collect_files,
-                          analyse_deduplication, check_existing_files, 
+                          analyse_deduplication, check_existing_files,
                           process_files, cleanup_mirrors, print_final_summary)
 
 
 def main():
-    """Main entry point for mirror-dedupe"""
+    ## @brief Main entry point for mirror-dedupe.
+
     parser = argparse.ArgumentParser(
         description='Mirror repository with global deduplication',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    
+
     parser.add_argument('--config', dest='config_dir', default=None,
-                       help='Path to configuration directory (default: /etc/mirror-dedupe)')
+                        help='Path to configuration directory (default: /etc/mirror-dedupe)')
     parser.add_argument('--dry-run', action='store_true',
-                       help='Show what would be done without actually doing it')
+                        help='Show what would be done without actually doing it')
     parser.add_argument('--mirror', type=str,
-                       help='Process only the specified mirror (by name)')
+                        help='Process only the specified mirror (by name)')
     parser.add_argument('--dedupe-only', action='store_true',
-                       help='Only run deduplication phase (skip mirror sync)')
+                        help='Only run deduplication phase (skip mirror sync)')
     parser.add_argument('--list', action='store_true',
-                       help='List available mirrors (active and inactive)')
+                        help='List available mirrors (active and inactive)')
     parser.add_argument('--activate', metavar='MIRROR',
-                       help='Activate a mirror by creating a symlink in repos-enabled')
+                        help='Activate a mirror by creating a symlink in repos-enabled')
     parser.add_argument('--deactivate', metavar='MIRROR',
-                       help='Deactivate a mirror by removing its symlink from repos-enabled')
+                        help='Deactivate a mirror by removing its symlink from repos-enabled')
     parser.add_argument('--test', metavar='MIRROR',
-                       help='Test a mirror configuration and summarise what it will fetch')
+                        help='Test a mirror configuration and summarise what it will fetch')
     parser.add_argument('--delete', metavar='MIRROR',
-                       help='Deactivate a mirror and delete all its data (requires PIN confirmation)')
-    
+                        help='Deactivate a mirror and delete all its data (requires PIN confirmation)')
+
     args = parser.parse_args()
-    
-    # Configuration directory (allow default)
+
     config_dir = args.config_dir or DEFAULT_CONFIG_DIR
     cfg_main = Config.load(config_dir)
 
-    # Management operations (mutually exclusive)
     management_ops = [
         bool(args.list),
         bool(args.activate),
@@ -217,7 +217,6 @@ def main():
             print(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", file=sys.stderr)
             sys.exit(1)
 
-        # Use global config for repo_root
         repo_root = cfg_main.repo_root
 
         with open(src, 'r') as f:
@@ -271,8 +270,7 @@ def main():
 
         print("Mirror delete completed.")
         sys.exit(0)
-    
-    # Determine mode and acquire appropriate lock
+
     if args.dedupe_only:
         if not acquire_lock('dedupe'):
             sys.exit(1)
@@ -285,26 +283,22 @@ def main():
         atexit.register(release_lock)
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
-    
-    # Load configuration via singleton (defaulting to /etc/mirror-dedupe)
+
     config_dir = args.config_dir or DEFAULT_CONFIG_DIR
     config = Config.load(config_dir)
     mirrors = config.get('mirrors', [])
-    
+
     if not mirrors:
         print("No mirrors defined in configuration")
         sys.exit(1)
-    
+
     print(f"\n{'='*60}")
     print(f"Loaded {len(mirrors)} mirror(s) from configuration")
     print(f"{'='*60}")
-    
-    # Orchestrator mode: spawn subprocess for each mirror
+
     if not args.mirror and not args.dedupe_only:
         run_orchestrator_mode(mirrors, config_dir, args.dry_run)
-        # This function exits, so we never reach here
-    
-    # Filter mirrors if --mirror specified
+
     if args.mirror:
         filtered_mirrors = [m for m in mirrors if m['name'] == args.mirror]
         if not filtered_mirrors:
@@ -314,8 +308,7 @@ def main():
         print(f"\n{'='*60}")
         print(f"SINGLE MIRROR MODE: Processing '{args.mirror}'")
         print(f"{'='*60}")
-    
-    # Skip mirror sync if --dedupe-only
+
     if args.dedupe_only:
         print(f"\n{'='*60}")
         print("DEDUPE-ONLY MODE: Skipping mirror sync")
@@ -323,7 +316,6 @@ def main():
     else:
         sync_mirrors(mirrors, args.dry_run)
 
-    # If no_hardlinks is enabled in the main config, skip dedupe entirely
     if cfg_main.no_hardlinks:
         print(f"\n{'='*60}")
         print("NO_HARDLINKS enabled in configuration - skipping deduplication phase")
@@ -332,41 +324,32 @@ def main():
         print("Mirror sync completed.")
         sys.exit(0)
 
-    # Collect all files needed across all mirrors
     global_files = collect_files(mirrors)
-    
-    # Analyse deduplication potential
+
     hash_to_files, unique_files = analyse_deduplication(global_files)
-    
-    # Check existing files
+
     check_existing_files(hash_to_files)
-    
-    # Get initial disk usage
+
     print(f"\n{'='*60}")
     print("Initial disk usage")
     print(f"{'='*60}")
     first_dest = mirrors[0]['dest']
     total, initial_used, free = get_disk_usage(first_dest)
     print(f"Overall mirror filesystem: Used: {format_bytes(initial_used)}, Free: {format_bytes(free)}")
-    
-    # In single-mirror mode, note that cross-mirror deduplication will be handled separately
+
     if args.mirror:
         print(f"\n{'='*60}")
         print(f"Single mirror mode: Deduplication will be handled separately")
         print(f"{'='*60}")
-    
-    # Process files (download and hardlink)
+
     downloaded, hardlinked, skipped = process_files(hash_to_files, unique_files, config, args.dry_run)
-    
-    # In single-mirror mode, exit after downloading (skip cleanup and cross-mirror dedup)
+
     if args.mirror:
         print(f"\nMirror '{args.mirror}' sync completed successfully!")
         sys.exit(0)
-    
-    # Cleanup mirrors
+
     cleanup_mirrors(mirrors, global_files, args.dry_run)
-    
-    # Print final summary
+
     print_final_summary(mirrors, downloaded, hardlinked, skipped, initial_used)
 
 

@@ -1,3 +1,15 @@
+## @file release.py
+##
+## @brief APT-specific Release node with index parsing.
+##
+## ``Release`` extends ``Loadable`` and ``Schema.Release``, adding the
+## ability to fetch a Release file and parse its hash sections into
+## ``Schema.Index`` entries for Packages and Sources.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
+
 from __future__ import annotations
 
 from typing import Any, Dict, List
@@ -7,10 +19,10 @@ from mirror_dedupe.lib.loadable import Loadable
 
 
 class Release(Loadable, Schema.Release):
-    """APT-specific Release node that can parse its own indices."""
+    ## @brief APT-specific Release node that can parse its own indices.
 
     class IndexMetadata(Schema.Index.Metadata):
-        """APT-specific metadata for an index entry derived from a Release."""
+        ## @brief APT-specific metadata for an index entry derived from a Release.
 
         def __init__(
             self,
@@ -35,14 +47,16 @@ class Release(Loadable, Schema.Release):
         upstream: str,
         suite: str,
     ) -> None:
-        """Construct an APT Release bound to a URL and HTTP client.
-
-        This initialises the underlying Schema.Release with APT-specific
-        layout defaults and wires an internal loader for ``url`` using the
-        provided HTTP client, so callers can simply use
-
-            Release(url=..., http_client=..., upstream=..., suite=...).parse()
-        """
+        ## @brief Construct an APT Release bound to a URL and HTTP client.
+        ##
+        ## Initialises the underlying ``Schema.Release`` with APT-specific
+        ## layout defaults and wires an internal loader so callers can
+        ## simply use ``Release(url=..., http_client=..., ...).parse()``.
+        ##
+        ## @param url          URL of the Release file.
+        ## @param http_client  HTTPClient for fetching.
+        ## @param upstream     Base upstream URL.
+        ## @param suite        Logical suite name (e.g. ``"noble"``).
 
         pocket: str | None = None
         relative_dir = f"dists/{suite}"
@@ -61,23 +75,30 @@ class Release(Loadable, Schema.Release):
             digest=None,
         )
 
-        # Wire a simple URL loader using the provided HTTP client.
         def load(_url: str) -> str:
             return http_client.fetch_text(_url)
 
-        self._load_text = load  # type: ignore[attr-defined]
+        self._load_text = load
         self.url = url
         self.upstream = upstream
         self.suite = suite
 
     @classmethod
-    def _make_url_loader(cls, url: str, http_client: Any, **_: Any):  # type: ignore[override]
+    def _make_url_loader(cls, url: str, http_client: Any, **_: Any):
         def load(_url: str) -> str:
             return http_client.fetch_text(_url)
 
         return load
 
     def _parse_hash_section(self, data: str, section: str) -> List[Dict[str, Any]]:
+        ## @brief Parse a single hash section (``MD5Sum``, ``SHA1``, ``SHA256``)
+        ##        from a Release body.
+        ##
+        ## @param data     Raw Release text.
+        ## @param section  Section name to parse.
+        ## @return List of entries with keys ``algorithm``, ``checksum``,
+        ##         ``size``, ``path``.
+
         lines = data.splitlines()
         entries: List[Dict[str, Any]] = []
         in_section = False
@@ -116,9 +137,10 @@ class Release(Loadable, Schema.Release):
         return entries
 
     def parse(self) -> "Release":
-        """Populate indices for this Release from its hash sections and return self."""
+        ## @brief Populate indices for this Release from its hash sections.
+        ## @return This Release (for chaining).
 
-        text = self._load_text(self.url)  # type: ignore[attr-defined]
+        text = self._load_text(self.url)
         if not text:
             return self
 
@@ -149,5 +171,5 @@ class Release(Loadable, Schema.Release):
                     )
                 )
 
-        self.indices = indices  # type: ignore[attr-defined]
+        self.indices = indices
         return self

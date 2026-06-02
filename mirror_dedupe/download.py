@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""
-download.py
-
-  Ubuntu mirror synchronisation with global deduplication
-
-Copyright (c) 2025 Tim Hosking
-Email: tim@mungerware.com
-Website: https://github.com/munger
-Licence: MIT
-"""
+## @file download.py
+##
+## @brief Download and verification helpers for mirror-dedupe.
+##
+## Provides ``download_with_curl`` for HTTP downloads with resume and
+## retry, and ``verify_sha256`` for hash verification using either the
+## system ``sha256sum`` utility or Python's hashlib.
+##
+## @copyright Copyright (c) 2025-2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
 import os
 import subprocess
 import hashlib
 from .utils import download_lock, active_downloads
 
-# Check if sha256sum is available at startup
 USE_SHA256SUM = False
 try:
     result = subprocess.run(['sha256sum', '--version'], capture_output=True)
@@ -26,31 +26,30 @@ except:
 
 def download_with_curl(url: str, dest_path: str, timeout: int = 300,
                        progress_info: str = "", force_ipv4: bool = False):
-    """Download file with curl, supports resuming partial downloads.
+    ## @brief Download a file with curl, supporting resuming partial downloads.
+    ##
+    ## Returns a tuple ``(success: bool, status: str)`` where *status* is
+    ## one of ``"ok"``, ``"timeout"``, ``"not_found"``, or ``"error"``.
+    ##
+    ## @param url            Remote URL to download.
+    ## @param dest_path      Local destination path.
+    ## @param timeout        Maximum time in seconds for the transfer.
+    ## @param progress_info  Extra text appended to the status line.
+    ## @param force_ipv4     If True, use ``curl -4`` (IPv4 only).
+    ## @return Tuple of ``(success, status)``.
 
-    Returns a tuple (success: bool, status: str) where status is one of:
-
-        - "ok":        download succeeded
-        - "timeout":   curl timed out
-        - "not_found": HTTP 404/403 (when using -f)
-        - "error":     any other failure
-    """
     from . import utils
-    
+
     dest_dir = os.path.dirname(dest_path)
     os.makedirs(dest_dir, exist_ok=True)
-    
-    # Show what we're downloading
+
     filename = os.path.basename(dest_path)
     with utils.download_lock:
         utils.active_downloads += 1
         current_active = utils.active_downloads
     print(f"  -> Downloading: {filename} ({current_active} active){progress_info}", flush=True)
-    
+
     try:
-        # -C - enables automatic resume of partial downloads. We also use
-        # -w '%{http_code}' so that stdout contains only the HTTP status
-        # code, which lets us distinguish 404/403 from other failures.
         cmd = ['curl']
         if force_ipv4:
             cmd.append('-4')
@@ -76,7 +75,6 @@ def download_with_curl(url: str, dest_path: str, timeout: int = 300,
             print(f"  [OK] Completed: {filename} ({remaining} remaining)", flush=True)
             return True, 'ok'
 
-        # Classify common failure modes for the caller's retry logic.
         status = 'error'
         if result.returncode == 28:
             status = 'timeout'
@@ -94,12 +92,20 @@ def download_with_curl(url: str, dest_path: str, timeout: int = 300,
 
 
 def verify_sha256(file_path: str, expected_hash: str, buffer_size: int = 1048576) -> bool:
-    """Verify file SHA256 hash using sha256sum or Python hashlib"""
+    ## @brief Verify a file's SHA-256 hash.
+    ##
+    ## Uses the system ``sha256sum`` utility if available (faster),
+    ## otherwise falls back to Python's hashlib.
+    ##
+    ## @param file_path       Path to the file to verify.
+    ## @param expected_hash   Expected SHA-256 hex digest.
+    ## @param buffer_size     Read buffer size for hashlib fallback.
+    ## @return True if the hash matches.
+
     if USE_SHA256SUM:
-        # Use fast sha256sum command
         try:
-            result = subprocess.run(['sha256sum', file_path], 
-                                  capture_output=True, text=True)
+            result = subprocess.run(['sha256sum', file_path],
+                                    capture_output=True, text=True)
             if result.returncode == 0:
                 actual_hash = result.stdout.split()[0]
                 return actual_hash == expected_hash
@@ -107,7 +113,6 @@ def verify_sha256(file_path: str, expected_hash: str, buffer_size: int = 1048576
         except:
             return False
     else:
-        # Use Python hashlib
         try:
             sha256 = hashlib.sha256()
             with open(file_path, 'rb') as f:

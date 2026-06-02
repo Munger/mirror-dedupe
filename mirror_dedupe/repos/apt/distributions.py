@@ -1,3 +1,16 @@
+## @file distributions.py
+##
+## @brief Distribution discovery across ``/dists/`` for APT repos.
+##
+## ``DistributionsParser`` walks the upstream index to find all plausible
+## distribution paths, then delegates per-path parsing to the
+## ``Distribution`` class.  Supports explicit candidate paths for repos
+## whose ``/dists/`` directory is not browsable.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
+
 from __future__ import annotations
 
 from typing import List, TYPE_CHECKING, Optional
@@ -14,22 +27,30 @@ if TYPE_CHECKING:
 
 
 class DistributionsParser:
-    """Discover distributions under /dists and delegate per-distribution parsing.
-
-    This parser is pure with respect to the Apt repo: it only reads upstream
-    and http from the repo instance and returns a Distributions list.
-    """
+    ## @brief Discover distributions under ``/dists`` and delegate
+    ##        per-distribution parsing.
+    ##
+    ## Pure with respect to the Apt repo: it only reads upstream and http
+    ## from the repo instance and returns a ``Distributions`` list.
 
     def __init__(self, repo: "Apt", candidates: Optional[List[str]] = None) -> None:
+        ## @param repo        The Apt Repo instance to discover for.
+        ## @param candidates  Optional explicit distribution paths to probe
+        ##                    directly, bypassing HTML discovery.
+
         self.repo = repo
         self.http = repo.http
         self.upstream_index = int(repo.get("upstream_idx", 0))
-        # Optional explicit candidate paths (relative to /dists) to
-        # probe directly as distributions, bypassing HTML discovery.
         self._candidates: List[str] = candidates or []
 
     def parse(self):
-        """Return a Distributions list discovered under /dists without mutating the repo."""
+        ## @brief Return a ``Distributions`` list discovered under ``/dists``.
+        ##
+        ## When ``_candidates`` is set, probes only those explicit paths.
+        ## Otherwise delegates to ``discover_distribution_paths`` for
+        ## BFS-based HTML discovery.
+        ##
+        ## @return A ``Distributions`` NodeList.
 
         upstreams_list = [u.url for u in self.repo.upstreams if u.url]
         upstream = upstreams_list[self.upstream_index] if upstreams_list else ""
@@ -37,8 +58,6 @@ class DistributionsParser:
         root = self.repo.INDEX_ROOT_DIR
         anchor = self.repo.INDEX_ANCHOR_FILENAME
 
-        # If explicit candidate paths were supplied, probe only those;
-        # otherwise delegate all discovery to the HTML/BFS helper.
         if self._candidates:
             distributions = Schema.Distributions()
             for path in self._candidates:
@@ -58,10 +77,6 @@ class DistributionsParser:
 
             return distributions
 
-        # Delegate all /dists walking and candidate selection to the
-        # shared helper so this method only needs to construct
-        # Distribution nodes from the discovered paths. We try the
-        # selected upstream first, then any alternates recorded on the Repo.
         paths: List[str] = []
         upstreams = upstreams_list
 
@@ -87,9 +102,6 @@ class DistributionsParser:
 
         distributions = Schema.Distributions()
         for path in paths:
-            # Always build Release URLs from the primary upstream so the
-            # resulting Repo snapshot describes the logical layout
-            # independently of which mirror was used for discovery.
             release_url = build_url(upstream, root, path, anchor)
             dist = Distribution(
                 url=release_url,

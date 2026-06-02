@@ -1,3 +1,18 @@
+## @file inventory.py
+##
+## @brief In-memory inventory of pool hashes, inodes, and repo-path
+##        links with filesystem helpers.
+##
+## The ``Inventory`` dataclass tracks the relationship between SHA-256
+## hashes, filesystem inodes, and repository paths.  It is the
+## authoritative view for the ``Fetcher`` and provides helpers for
+## hardlinking, unlinking, and bootstrapping the pool from existing
+## repo files.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
+
 from __future__ import annotations
 
 import hashlib
@@ -11,18 +26,32 @@ from mirror_dedupe.config import Config
 
 @dataclass
 class Inventory:
-    # inode -> {"hash": str | None, "links": int}
+    ## @brief Tracks inodes, pool hashes, and repo-path links.
+    ##
+    ## Fields:
+    ## * ``inodes``    — ``{inode: {"hash": str | None, "links": int}}``
+    ## * ``pool_files`` — ``{hash: inode}``
+    ## * ``repo_files`` — ``{repo_path: inode}``
+    ## * ``pool_root``  — resolved pool root
+    ## * ``repos_root`` — resolved repos root
+
     inodes: Dict[int, Dict[str, object]] = field(default_factory=dict)
-    # hash -> inode
     pool_files: Dict[str, int] = field(default_factory=dict)
-    # repo_path -> inode
     repo_files: Dict[str, int] = field(default_factory=dict)
     pool_root: str = ""
     repos_root: str = ""
 
     @classmethod
     def get(cls, refresh: bool = False) -> "Inventory":
-        """Lazy singleton accessor: build once per process unless refresh=True."""
+        ## @brief Lazy singleton accessor.
+        ##
+        ## Builds once per process unless *refresh* is True.  The
+        ## singleton is re-built when ``pool_root`` or ``repos_root``
+        ## change between calls.
+        ##
+        ## @param refresh  Force a full rebuild even if a cache exists.
+        ## @return The singleton Inventory instance.
+
         global _inventory_cache
         cfg = Config.load()
         pool_root_resolved = str(Path(cfg.pool_root).resolve())
@@ -40,7 +69,11 @@ class Inventory:
     # --- update helpers -------------------------------------------------
 
     def record_pool_hash(self, h: str, inode: int, links: int | None = None) -> None:
-        """Record a hash present in the pool (inode from pool file)."""
+        ## @brief Record a hash present in the pool.
+        ## @param h      SHA-256 hash string.
+        ## @param inode  Filesystem inode of the pool file.
+        ## @param links  Hardlink count (optional; read from stat if omitted).
+
         entry = self.inodes.setdefault(inode, {"hash": h, "links": links or 0})
         entry["hash"] = h
         if links is not None:
@@ -48,18 +81,26 @@ class Inventory:
         self.pool_files[h] = inode
 
     def record_repo_link(self, h: str, repo_path: str) -> None:
-        """Record that a repo path links (or should link) to a hash."""
+        ## @brief Record that a repo path links (or should link) to a hash.
+        ## @param h          SHA-256 hash.
+        ## @param repo_path  Absolute path of the repo file.
+
         repo_inode = self.pool_files.get(h)
         if repo_inode is None:
             return
         self.repo_files[repo_path] = repo_inode
 
     def remove_repo_path(self, repo_path: str) -> None:
-        """Remove a repo path from bookkeeping (e.g., deletion)."""
+        ## @brief Remove a repo path from bookkeeping (e.g., deletion).
+        ## @param repo_path  Absolute path to remove.
+
         self.repo_files.pop(repo_path, None)
 
     def link_count(self, h: str) -> int:
-        """Return how many repo paths are recorded for this hash."""
+        ## @brief Return how many repo paths are recorded for this hash.
+        ## @param h  SHA-256 hash.
+        ## @return The recorded link count for the inode holding *h*.
+
         inode = self.pool_files.get(h)
         if inode is not None:
             entry = self.inodes.get(inode)
@@ -73,7 +114,18 @@ class Inventory:
         return Path(self.pool_root) / "by-hash" / "SHA256" / h[:2] / h[2:4] / h
 
     def link_repo_path(self, h: str, repo_path: str) -> None:
-        """Hardlink the pool hash file into repo_path and update bookkeeping."""
+        ## @brief Hardlink the pool hash file into *repo_path* and update bookkeeping.
+        ##
+        ## Creates parent directories as needed.  If *repo_path* already
+        ## exists and shares the same inode as the pool file, this is a
+        ## no-op.  If it exists with a different inode, a
+        ## ``FileExistsError`` is raised to prevent data corruption.
+        ##
+        ## @param h          SHA-256 hash.
+        ## @param repo_path  Target path for the hardlink.
+        ## @raise FileNotFoundError  If the pool hash file is missing.
+        ## @raise FileExistsError    If *repo_path* exists with different content.
+
         dest = self._hash_path(h)
         repo_p = Path(repo_path)
         repo_p.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +134,6 @@ class Inventory:
         if repo_p.exists():
             try:
                 if dest.stat().st_ino == repo_p.stat().st_ino:
-                    # Already linked; refresh counts/mapping
                     st = dest.stat()
                     self.record_pool_hash(h, st.st_ino, st.st_nlink)
                     self.record_repo_link(h, str(repo_p))
@@ -96,7 +147,13 @@ class Inventory:
         self.record_repo_link(h, str(repo_p))
 
     def unlink_repo_path(self, repo_path: str) -> None:
-        """Unlink a repo path from the filesystem and update bookkeeping."""
+        ## @brief Unlink a repo path from the filesystem and update bookkeeping.
+        ##
+        ## If the pool file's link count drops to 1 (only the pool
+        ## itself), the pool file is also removed.
+        ##
+        ## @param repo_path  Target path to unlink.
+
         repo_p = Path(repo_path)
         repo_inode = self.repo_files.get(str(repo_p))
         if repo_p.exists():
@@ -124,14 +181,24 @@ class Inventory:
         self.remove_repo_path(repo_path)
 
     def link_pool_from_repo(self, h: str, repo_path: str, verify: bool = True) -> None:
-        """Ensure the pool has this hash by linking from an existing repo file."""
+        ## @brief Ensure the pool has this hash by linking from an existing repo file.
+        ##
+        ## Used when bootstrapping the pool from pre-existing repo files
+        ## (e.g. initial migration).  Optionally verifies the SHA-256
+        ## digest before linking.
+        ##
+        ## @param h          SHA-256 hash.
+        ## @param repo_path  Source file to link into the pool.
+        ## @param verify     Whether to verify the hash before linking (default True).
+        ## @raise FileNotFoundError  If the source file is missing.
+        ## @raise ValueError        If the hash does not match (when *verify* is True).
+
         repo_p = Path(repo_path)
         if not repo_p.exists():
             raise FileNotFoundError(f"Repo file missing: {repo_p}")
         dest = self._hash_path(h)
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
-            # Already present; just link repo -> pool mapping.
             st = dest.stat()
             self.record_pool_hash(h, st.st_ino, st.st_nlink)
             self.record_repo_link(h, str(repo_p))
@@ -150,7 +217,15 @@ _inventory_cache: Inventory | None = None
 
 
 def build_inventory(pool_root: str, repos_root: str) -> Inventory:
-    """Scan pool and repos once via find to map hashes to repo paths."""
+    ## @brief Scan pool and repos via ``find`` to map hashes to repo paths.
+    ##
+    ## Uses a single ``find`` invocation with ``-printf`` to collect
+    ## inode, link count, and path for every file under both roots.
+    ## Builds and returns a populated ``Inventory``.
+    ##
+    ## @param pool_root   Absolute path to the content-addressable pool.
+    ## @param repos_root  Absolute path to the repo tree.
+    ## @return A fully populated Inventory.
 
     proc = subprocess.run(
         ["find", pool_root, repos_root, "-xdev", "-type", "f", "-printf", "%i %n %p\0"],

@@ -1,3 +1,15 @@
+## @file network.py
+##
+## @brief Per-repo network policy and configuration.
+##
+## ``NetworkConfig`` captures durable network-related settings (IPv6
+## policy, timeouts, user-agent) while keeping transport implementations
+## free of persistence concerns.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -6,13 +18,12 @@ from .node import Node
 
 
 class NetworkConfig(Node):
-    """Per-repo network policy/configuration.
-
-    This captures durable network-related settings (IPv6 policy, timeouts,
-    user-agent, etc.) while keeping transport implementations (HTTP, etc.)
-    free of persistence concerns. Runtime-only state such as
-    connection pools lives on the respective clients, not here.
-    """
+    ## @brief Per-repo network policy and configuration.
+    ##
+    ## Captures durable network-related settings (IPv6 policy, timeouts,
+    ## user-agent, etc.) while keeping transport implementations (HTTP,
+    ## etc.) free of persistence concerns.  Runtime-only state such as
+    ## connection pools lives on the respective clients, not here.
 
     _restore_via_payload = True
 
