@@ -24,7 +24,7 @@ class Inventory:
     def get(cls, refresh: bool = False) -> "Inventory":
         """Lazy singleton accessor: build once per process unless refresh=True."""
         global _inventory_cache
-        cfg = Config.get()
+        cfg = Config.load()
         pool_root_resolved = str(Path(cfg.pool_root).resolve())
         repos_root_resolved = str(Path(cfg.repo_root).resolve())
         if (

@@ -9,8 +9,8 @@ class NetworkConfig(Node):
     """Per-repo network policy/configuration.
 
     This captures durable network-related settings (IPv6 policy, timeouts,
-    user-agent, etc.) while keeping transport implementations (HTTP, rsync,
-    etc.) free of persistence concerns. Runtime-only state such as
+    user-agent, etc.) while keeping transport implementations (HTTP, etc.)
+    free of persistence concerns. Runtime-only state such as
     connection pools lives on the respective clients, not here.
     """
 

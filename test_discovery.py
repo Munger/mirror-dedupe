@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.network_client import NetworkClient
-from mirror_dedupe.lib.rsync_discovery import RsyncDiscovery
 from mirror_dedupe.schema.repo import Repo, Repos
 from mirror_dedupe.repos.apt.apt import Apt
 
@@ -97,16 +96,6 @@ def test_http_discovery() -> None:
                     f"architectures={architectures}",
                     file=sys.stderr,
                 )
-
-        # Run rsync discovery for each upstream to find and persist
-        # appropriate rsync roots based on the discovered schema.
-        all_candidates = []
-        for upstream in repo.upstreams:
-            rsync_helper = RsyncDiscovery(repo, upstream)
-            rsync_candidates = rsync_helper.discover()
-            if rsync_candidates:
-                all_candidates.extend(rsync_candidates)
-        print("  rsync candidates:", all_candidates, file=sys.stderr)
 
         # Keep this Repo object for the final JSON array dump.
         repos.append(repo)

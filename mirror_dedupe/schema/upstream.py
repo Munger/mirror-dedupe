@@ -13,10 +13,8 @@ class Upstream(Node):
 
     - url: base HTTP/HTTPS URL for discovery and sync
     - sync_method: preferred sync method for this upstream ("https",
-      "http", "rsync", etc.)
+      "http", etc.)
     - ipv6_ok: whether IPv6 is known to work for this upstream
-    - rsync_roots: optional list of rsync daemon roots discovered for this upstream
-
     An open-ended metadata mapping is also provided so callers can
     attach additional per-upstream details without changing the
     schema.
@@ -39,7 +37,6 @@ class Upstream(Node):
         url: str,
         sync_method: str | None = "https",
         ipv6_ok: bool | None = True,
-        rsync_roots: List[str] | None = None,
         metadata: "Upstream.Metadata" | None = None,
     ) -> None:
         data: Dict[str, Any] = {
@@ -49,8 +46,6 @@ class Upstream(Node):
             data["sync_method"] = sync_method
         if ipv6_ok is not None:
             data["ipv6_ok"] = ipv6_ok
-        if rsync_roots is not None:
-            data["rsync_roots"] = rsync_roots
         if metadata is not None:
             data["metadata"] = metadata
         super().__init__(data)

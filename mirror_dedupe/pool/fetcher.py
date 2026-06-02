@@ -30,7 +30,7 @@ from .inventory import Inventory
 
 class Fetcher:
     def __init__(self) -> None:
-        cfg = Config.get()
+        cfg = Config.load()
         self.pool_root = Path(cfg.pool_root)
         self.hash_root = self.pool_root / "by-hash" / "SHA256"
         self.hash_root.mkdir(parents=True, exist_ok=True)

@@ -13,7 +13,7 @@ Ubuntu/Debian mirror synchronisation with intelligent deduplication using hardli
 
 - Downloads from upstream and hardlinks duplicate files (same SHA256 hash) to save bandwidth and disk space
 - Supports multiple mirrors with global deduplication across all mirrors
-- Relies on standard command-line tools: curl, rsync, nc (netcat)
+- Relies on standard command-line tools: curl, nc (netcat)
 - Configurable via YAML files
 - Systemd timer support for automated synchronisation
 
