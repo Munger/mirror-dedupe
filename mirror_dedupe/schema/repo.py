@@ -150,6 +150,14 @@ class Repo(Node):
 
             raise NotImplementedError
 
+    # --- sync contract -----------------------------------------------------
+
+    @abstractmethod
+    def sync(self, pool_path: str) -> None:
+        """Synchronize this repository against its upstream into the shared pool."""
+
+        raise NotImplementedError
+
     # --- selection helpers ------------------------------------------------
 
     @classmethod

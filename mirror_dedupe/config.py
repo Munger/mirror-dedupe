@@ -16,25 +16,55 @@ import yaml
 from pathlib import Path
 
 
-def load_config(config_dir: str) -> dict:
-    """Load mirror configuration from config directory
-    
-    Loads main config and all repo definitions from repos-enabled/
-    """
-    try:
-        # Load main config
-        main_config_path = Path(config_dir) / 'mirror-dedupe.conf'
-        with open(main_config_path, 'r') as f:
-            config = yaml.safe_load(f) or {}
+DEFAULT_CONFIG_DIR = "/etc/mirror-dedupe"
 
-        # Global IPv6 control: default to *allowing* IPv6 unless explicitly
-        # disabled in the main config. Mirrors can override this per-repo.
-        global_disable_ipv6 = config.get('disable_ipv6', False)
-        config['disable_ipv6'] = global_disable_ipv6
+
+class Config:
+    """Singleton-style loader for global config with attribute access."""
+
+    _instance: "Config | None" = None
+    _config_dir: str | None = None
+
+    @classmethod
+    def get(cls, config_dir: str = DEFAULT_CONFIG_DIR) -> "Config":
+        config_dir_resolved = str(Path(config_dir or DEFAULT_CONFIG_DIR).resolve())
+        if cls._instance is not None and cls._config_dir == config_dir_resolved:
+            return cls._instance
+        cls._instance = cls(config_dir_resolved)
+        cls._config_dir = config_dir_resolved
+        return cls._instance
+
+    def __init__(self, config_dir_resolved: str) -> None:
+        # Load main config
+        main_config_path = Path(config_dir_resolved) / 'mirror-dedupe.conf'
+        try:
+            with open(main_config_path, 'r') as f:
+                self._data = yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"Error loading configuration from {config_dir_resolved}: {e}")
+            sys.exit(1)
+
+        # Global IPv6 control
+        global_disable_ipv6 = self._data.get('disable_ipv6', False)
+        self.disable_ipv6 = global_disable_ipv6
+
+        # Global roots
+        self.repo_root = self._data.get('repo_root', '/srv/mirror/repos')
+        self.pool_root = self._data.get('pool_root', '/srv/mirror/pool')
+
+        # Optional tuning parameters
+        self.architectures = self._data.get('architectures', '*')
+        self.collapse_distributions = self._data.get('collapse_distributions', False)
+        self.buffer_size = self._data.get('buffer_size', 1048576)
+        self.parallel_downloads = self._data.get('parallel_downloads', 10)
+        self.curl_timeout = self._data.get('curl_timeout', 900)
+        self.max_retries = self._data.get('max_retries', 3)
+        self.progress_interval = self._data.get('progress_interval', 1000)
+        self.no_hardlinks = bool(self._data.get('no_hardlinks', False))
 
         # Load repo definitions from repos-enabled/
-        repos_dir = Path(config_dir) / 'repos-enabled'
-        mirrors = []
+        repos_dir = Path(config_dir_resolved) / 'repos-enabled'
+        mirrors: list[dict] = []
 
         if repos_dir.exists() and repos_dir.is_dir():
             for repo_file in sorted(repos_dir.glob('*.conf')):
@@ -42,29 +72,19 @@ def load_config(config_dir: str) -> dict:
                     with open(repo_file, 'r') as f:
                         mirror = yaml.safe_load(f)
                         if mirror:
-                            # Prepend repo_root to dest if it's relative
-                            repo_root = config.get('repo_root', '/srv/mirror/repos')
+                            repo_root = self.repo_root
                             dest = mirror.get('dest', '')
                             if not os.path.isabs(dest):
                                 mirror['dest'] = os.path.join(repo_root, dest)
-
-                            # Per-mirror IPv6 override: if a mirror config
-                            # specifies disable_ipv6 explicitly, honour it;
-                            # otherwise inherit the global default.
                             mirror['disable_ipv6'] = mirror.get('disable_ipv6', global_disable_ipv6)
-
                             mirrors.append(mirror)
                 except Exception as e:
                     print(f"Warning: Failed to load {repo_file}: {e}")
-        
+
         # Apply global architecture mask, if configured
-        arch_mask = config.get('architectures', '*')
+        arch_mask = self._data.get('architectures', '*')
 
         def _normalize_arch_mask(value):
-            """Normalise global architectures mask.
-
-            Returns None for no restriction, or a list of architectures.
-            """
             if isinstance(value, str):
                 v = value.strip()
                 if v.lower() in ('*', 'all') or not v:
@@ -90,10 +110,25 @@ def load_config(config_dir: str) -> dict:
                         f"after applying global mask {mask_arches}; keeping original list {repo_arches}",
                     )
 
-        # Add mirrors to config
-        config['mirrors'] = mirrors
-        
-        return config
-    except Exception as e:
-        print(f"Error loading config: {e}")
-        sys.exit(1)
+        self.mirrors = mirrors
+        # keep the raw data for legacy item access
+        self._data['disable_ipv6'] = self.disable_ipv6
+        self._data['repo_root'] = self.repo_root
+        self._data['pool_root'] = self.pool_root
+        self._data['architectures'] = self.architectures
+        self._data['collapse_distributions'] = self.collapse_distributions
+        self._data['buffer_size'] = self.buffer_size
+        self._data['parallel_downloads'] = self.parallel_downloads
+        self._data['curl_timeout'] = self.curl_timeout
+        self._data['max_retries'] = self.max_retries
+        self._data['progress_interval'] = self.progress_interval
+        self._data['no_hardlinks'] = self.no_hardlinks
+        self._data['mirrors'] = self.mirrors
+
+    def __getitem__(self, key):
+        return self._data[key]
+
+    def get(self, key, default=None):
+        return self._data.get(key, default)
+
+

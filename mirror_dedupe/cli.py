@@ -24,7 +24,7 @@ from collections import defaultdict
 
 import yaml
 
-from .config import load_config
+from .config import Config, DEFAULT_CONFIG_DIR
 from .utils import (acquire_lock, release_lock, signal_handler, 
                     get_disk_usage, format_bytes)
 from .dedupe import expand_distributions
@@ -40,7 +40,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    parser.add_argument('--config', dest='config_dir', default='/etc/mirror-dedupe',
+    parser.add_argument('--config', dest='config_dir', default=None,
                        help='Path to configuration directory (default: /etc/mirror-dedupe)')
     parser.add_argument('--dry-run', action='store_true',
                        help='Show what would be done without actually doing it')
@@ -61,8 +61,9 @@ def main():
     
     args = parser.parse_args()
     
-    # Configuration directory
-    config_dir = args.config_dir
+    # Configuration directory (allow default)
+    config_dir = args.config_dir or DEFAULT_CONFIG_DIR
+    cfg_main = Config.get(config_dir)
 
     # Management operations (mutually exclusive)
     management_ops = [
@@ -76,8 +77,9 @@ def main():
         print("ERROR: Only one of --list/--activate/--deactivate/--test/--delete may be used at a time", file=sys.stderr)
         sys.exit(1)
 
-    repos_available = Path(config_dir) / 'repos-available'
-    repos_enabled = Path(config_dir) / 'repos-enabled'
+    config_dir_path = Path(config_dir)
+    repos_available = config_dir_path / 'repos-available'
+    repos_enabled = config_dir_path / 'repos-enabled'
 
     if args.list:
         if not repos_available.exists():
@@ -215,13 +217,8 @@ def main():
             print(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", file=sys.stderr)
             sys.exit(1)
 
-        # Load main config for repo_root
-        main_config_path = Path(config_dir) / 'mirror-dedupe.conf'
-        repo_root = '/srv/mirror/repos'
-        if main_config_path.exists():
-            with open(main_config_path, 'r') as f:
-                main_cfg = yaml.safe_load(f) or {}
-                repo_root = main_cfg.get('repo_root', repo_root)
+        # Use global config for repo_root
+        repo_root = cfg_main.repo_root
 
         with open(src, 'r') as f:
             mirror_cfg = yaml.safe_load(f) or {}
@@ -289,9 +286,9 @@ def main():
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
     
-    # Load configuration
-    config_dir = args.config_dir
-    config = load_config(config_dir)
+    # Load configuration via singleton (defaulting to /etc/mirror-dedupe)
+    config_dir = args.config_dir or DEFAULT_CONFIG_DIR
+    config = Config.get(config_dir)
     mirrors = config.get('mirrors', [])
     
     if not mirrors:
@@ -327,7 +324,7 @@ def main():
         sync_mirrors(mirrors, args.dry_run)
 
     # If no_hardlinks is enabled in the main config, skip dedupe entirely
-    if config.get('no_hardlinks'):
+    if cfg_main.no_hardlinks:
         print(f"\n{'='*60}")
         print("NO_HARDLINKS enabled in configuration - skipping deduplication phase")
         print("mirror-dedupe will behave as a plain mirror (no global hardlinking)")
