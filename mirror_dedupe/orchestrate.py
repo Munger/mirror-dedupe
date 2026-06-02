@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""
-orchestrate.py
-
-  Ubuntu mirror synchronisation with global deduplication
-
-Copyright (c) 2025 Tim Hosking
-Email: tim@mungerware.com
-Website: https://github.com/munger
-Licence: MIT
-"""
+## @file orchestrate.py
+##
+## @brief Mirror orchestration, sync, file collection, deduplication, and
+##        cleanup pipeline.
+##
+## Provides the top-level pipeline functions called by ``cli.py``:
+## orchestrator mode (subprocess-per-mirror), dists sync, local index
+## parsing, deduplication analysis, parallel download, cleanup, and
+## final summary.
+##
+## @copyright Copyright (c) 2025-2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
 import os
 import sys
@@ -26,31 +29,34 @@ from .dedupe import hardlink_file, expand_distributions, cleanup_pool
 from .sync import run_https_sync, download_gpg_key
 from .utils import get_disk_usage, format_bytes, calculate_total_hardlink_savings, ipv6_available, get_optimal_url, classify_url_issue
 
-# Components to process
 COMPONENTS = ['main', 'restricted', 'universe', 'multiverse']
 
-# Mirrors for which IPv6 appeared unreliable during this run. We add to this
-# when a host-level IPv6 probe fails but the mirror config did not already
-# disable IPv6.
 IPV6_TROUBLE_MIRRORS = set()
 
 
 def run_orchestrator_mode(mirrors, config_dir, dry_run):
-    """Orchestrator mode: spawn subprocess for each mirror"""
+    ## @brief Orchestrator mode: spawn a subprocess for each mirror.
+    ##
+    ## Checks lock files to skip mirrors already being processed, then
+    ## spawns parallel subprocesses and waits for all to complete.
+    ## Finally runs the deduplication phase.
+    ##
+    ## @param mirrors     List of mirror configuration dicts.
+    ## @param config_dir  Path to the configuration directory.
+    ## @param dry_run     If True, pass ``--dry-run`` to subprocesses.
+
     print(f"\n{'='*60}")
     print("ORCHESTRATOR MODE: Spawning subprocesses for available mirrors")
     print(f"{'='*60}")
-    
+
     processes = []
     skipped = []
-    script_path = sys.argv[0]  # Entry point script
-    
-    # Check which mirrors are available (not locked)
+    script_path = sys.argv[0]
+
     for mirror in mirrors:
         mirror_name = mirror['name']
         lock_file = f'/var/run/mirror_dedupe.{mirror_name}.pid'
-        
-        # Check if mirror is already being processed
+
         if os.path.exists(lock_file):
             try:
                 with open(lock_file, 'r') as f:
@@ -61,21 +67,18 @@ def run_orchestrator_mode(mirrors, config_dir, dry_run):
                     skipped.append(mirror_name)
                     continue
                 except OSError:
-                    # Stale lock file, remove it
                     os.remove(lock_file)
             except:
                 pass
-        
-        # Mirror is available, spawn subprocess
+
         cmd = [sys.executable, script_path, '--config', str(config_dir), '--mirror', mirror_name]
         if dry_run:
             cmd.append('--dry-run')
-        
+
         print(f"\n[START] Spawning subprocess for mirror: {mirror_name}")
         proc = subprocess.Popen(cmd)
         processes.append((mirror_name, proc))
-    
-    # If no mirrors were available, exit
+
     if not processes:
         print(f"\n{'='*60}")
         if skipped:
@@ -85,14 +88,13 @@ def run_orchestrator_mode(mirrors, config_dir, dry_run):
             print("No mirrors to process")
         print(f"{'='*60}")
         sys.exit(0)
-    
-    # Wait for all mirror processes to complete
+
     print(f"\n{'='*60}")
     print(f"Waiting for {len(processes)} mirror subprocess(es) to complete...")
     if skipped:
         print(f"(Skipped {len(skipped)} already-running: {', '.join(skipped)})")
     print(f"{'='*60}")
-    
+
     failed = []
     for mirror_name, proc in processes:
         returncode = proc.wait()
@@ -101,7 +103,7 @@ def run_orchestrator_mode(mirrors, config_dir, dry_run):
             failed.append(mirror_name)
         else:
             print(f"\n[OK] Mirror '{mirror_name}' completed successfully")
-    
+
     if failed:
         print(f"\n{'='*60}")
         print(f"ERROR: {len(failed)} mirror(s) failed:")
@@ -109,23 +111,22 @@ def run_orchestrator_mode(mirrors, config_dir, dry_run):
             print(f"  - {name}")
         print(f"{'='*60}")
         sys.exit(1)
-    
-    # All mirrors completed, now run dedupe
+
     print(f"\n{'='*60}")
     print("All mirrors completed. Running deduplication...")
     print(f"{'='*60}")
-    
+
     cmd = [sys.executable, script_path, '--config', str(config_dir), '--dedupe-only']
     if dry_run:
         cmd.append('--dry-run')
-    
+
     proc = subprocess.Popen(cmd)
     returncode = proc.wait()
-    
+
     if returncode != 0:
         print(f"\n[FAIL] Deduplication failed with exit code {returncode}")
         sys.exit(1)
-    
+
     print(f"\n{'='*60}")
     print("ALL OPERATIONS COMPLETED SUCCESSFULLY")
     print(f"{'='*60}")
@@ -133,11 +134,18 @@ def run_orchestrator_mode(mirrors, config_dir, dry_run):
 
 
 def sync_mirrors(mirrors, dry_run):
-    """Sync dists metadata for all mirrors"""
+    ## @brief Sync ``dists/`` metadata for all mirrors.
+    ##
+    ## Analyses URL connectivity for each mirror, determines IPv6/IPv4
+    ## policy, downloads GPG keys if configured, and runs the HTTPS sync.
+    ##
+    ## @param mirrors  List of mirror configuration dicts.
+    ## @param dry_run  If True, print actions without downloading.
+
     print(f"\n{'='*60}")
     print("Syncing dists metadata for all mirrors")
     print(f"{'='*60}")
-    
+
     for idx, mirror in enumerate(mirrors):
         name = mirror['name']
         upstream = mirror['upstream']
@@ -149,7 +157,6 @@ def sync_mirrors(mirrors, dry_run):
         gpg_key_url = mirror.get('gpg_key_url')
         gpg_key_path = mirror.get('gpg_key_path')
 
-        # Analyze URL connectivity and get optimal URL
         optimal_url, connectivity_info = get_optimal_url(upstream)
         if optimal_url is None:
             print(f"[{name}] ERROR: URL connectivity failed for {upstream}")
@@ -158,35 +165,29 @@ def sync_mirrors(mirrors, dry_run):
             if connectivity_info.get('recommended_action'):
                 print(f"[{name}] Recommendation: {connectivity_info['recommended_action']}")
             continue
-        
-        # Report URL corrections and issues
+
         if optimal_url != upstream:
-            print(f"[{name}] NOTE: URL corrected: {upstream} → {optimal_url}")
+            print(f"[{name}] NOTE: URL corrected: {upstream} -> {optimal_url}")
             upstream = optimal_url
-            # Update mirror dict for consistency
             mirror['upstream'] = upstream
-        
+
         issue_type = classify_url_issue(upstream)
         if issue_type != 'working':
             print(f"[{name}] NOTE: URL issue detected: {issue_type}")
             if connectivity_info.get('recommended_action'):
                 print(f"[{name}] Recommendation: {connectivity_info['recommended_action']}")
 
-        # Start from the configured disable_ipv6 flag, then further tighten
-        # based on a cheap per-host IPv6 health check so we do not waste time
-        # probing or syncing over obviously broken IPv6 paths.
         cfg_disable_ipv6 = mirror.get('disable_ipv6', True)
         host_v6_ok = ipv6_available(upstream)
         force_ipv4 = cfg_disable_ipv6 or (not host_v6_ok)
         if (not cfg_disable_ipv6) and (not host_v6_ok):
             IPV6_TROUBLE_MIRRORS.add(name)
-        
-        # Download GPG key if specified
+
         if gpg_key_url and gpg_key_path:
             print(f"\n[{name}] Downloading GPG key...")
             if not download_gpg_key(gpg_key_url, dest, gpg_key_path, dry_run, force_ipv4=force_ipv4):
                 print(f"  WARNING: GPG key download failed for {name}")
-        
+
         print(f"\n[{name}] Syncing dists...")
         if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
             print(f"  ERROR: HTTPS sync failed for {name}")
@@ -194,14 +195,22 @@ def sync_mirrors(mirrors, dry_run):
 
 
 def collect_files(mirrors):
-    """Collect all files needed across all mirrors from local indices"""
+    ## @brief Collect all file entries across all mirrors from local indices.
+    ##
+    ## Parses local Packages.gz and Sources.gz files for each mirror,
+    ## applying optional per-mirror storage filters (exclude_packages,
+    ## exclude_paths).
+    ##
+    ## @param mirrors  List of mirror configuration dicts.
+    ## @return Dict of ``{(mirror_idx, path): file_info}``.
+
     print(f"\n{'='*60}")
     print("Parsing local indices")
     print(f"{'='*60}")
-    
-    global_files = {}  # {(mirror_idx, path): file_info}
+
+    global_files = {}
     all_search_paths = []
-    
+
     for idx, mirror in enumerate(mirrors):
         name = mirror['name']
         upstream = mirror['upstream']
@@ -210,57 +219,46 @@ def collect_files(mirrors):
         components = mirror.get('components', COMPONENTS)
         expand_dists = mirror.get('expand_distributions', True)
         distributions = expand_distributions(mirror['distributions']) if expand_dists else mirror['distributions']
-        
+
         all_search_paths.append(dest)
-        
+
         print(f"\n[{name}] {upstream}")
         print(f"  Dest: {dest}")
         print(f"  Arch: {', '.join(architectures)}")
         print(f"  Comp: {', '.join(components)}")
         print(f"  Dist: {', '.join(distributions)}")
-        
-        # Optional per-mirror storage filters (do not affect indices).
-        # These control which files are downloaded/kept, but indices
-        # remain an exact copy of upstream.
+
         storage_filters = mirror.get('storage_filters', {})
         exclude_packages = storage_filters.get('exclude_packages', [])
         exclude_paths = storage_filters.get('exclude_paths', [])
 
         for dist in distributions:
             files = {}
-            
-            # Parse Release file to see what's available
+
             available_indices = parse_release_file(dest, dist)
-            
-            # Collect binary packages from local indices
+
             for component in components:
                 for arch in architectures:
-                    # Check if this index exists in Release file
                     index_path = f"{component}/binary-{arch}/Packages.gz"
                     if index_path in available_indices:
                         packages = get_packages_index(dest, dist, component, arch)
                         files.update(packages)
-            
-            # Collect sources from local indices (only if they exist)
+
             for component in components:
                 index_path = f"{component}/source/Sources.gz"
                 if index_path in available_indices:
                     sources = get_sources_index(dest, dist, component)
                     files.update(sources)
-            
-            # Add to global collection, applying optional per-mirror
-            # storage filters so that some files are not planned or kept.
+
             for path, info in files.items():
                 pkg_name = info.get('package', '')
 
                 excluded = False
-                # Path-based filters first
                 for pattern in exclude_paths:
                     if fnmatch.fnmatch(path, pattern):
                         excluded = True
                         break
 
-                # Package-name-based filters
                 if not excluded:
                     for pattern in exclude_packages:
                         if fnmatch.fnmatch(pkg_name, pattern):
@@ -278,42 +276,51 @@ def collect_files(mirrors):
                     'dest_base': dest,
                     'upstream': upstream
                 }
-    
+
     print(f"\n{'='*60}")
     print(f"Collected {len(global_files)} file entries across all mirrors")
     print(f"{'='*60}")
-    
+
     return global_files
 
 
 def analyse_deduplication(global_files):
-    """Group files by SHA256 and analyse deduplication potential"""
-    # Group by SHA256 globally
+    ## @brief Group files by SHA-256 and analyse deduplication potential.
+    ##
+    ## @param global_files  Dict from ``collect_files``.
+    ## @return Tuple of ``(hash_to_files, unique_files_count)``.
+
     hash_to_files = defaultdict(list)
     for key, info in global_files.items():
         sha256 = info['sha256']
         hash_to_files[sha256].append((key, info))
-    
+
     unique_hashes = len([h for h, files in hash_to_files.items() if len(files) == 1])
     duplicate_hashes = len([h for h, files in hash_to_files.items() if len(files) > 1])
     total_entries = len(global_files)
     unique_files = unique_hashes + duplicate_hashes
-    
+
     print(f"\nGlobal deduplication analysis:")
     print(f"  Total file references: {total_entries}")
     print(f"  Unique SHA256 hashes: {unique_files}")
     print(f"    - Appear once: {unique_hashes}")
     print(f"    - Appear 2+ times: {duplicate_hashes}")
     print(f"  Extra copies to hardlink: {total_entries - unique_files}")
-    
+
     return hash_to_files, unique_files
 
 
 def check_existing_files(hash_to_files):
-    """Check which files already exist with correct size"""
+    ## @brief Check which files already exist with the correct size.
+    ##
+    ## Uses a quick size-based check (no hashing) to determine which
+    ## files need downloading and how many hardlinks would be created.
+    ##
+    ## @param hash_to_files  Dict from ``analyse_deduplication``.
+    ## @return Tuple of ``(downloaded, hardlinked, skipped)`` estimates.
+
     print(f"\nAnalysing existing files (checking size, trusting upstream hashes)...")
-    
-    # Build list of files to check with expected size from upstream
+
     files_to_check = []
     for sha256, file_list in hash_to_files.items():
         first_key, first_info = file_list[0]
@@ -321,67 +328,72 @@ def check_existing_files(hash_to_files):
         dest_path = os.path.join(first_info['dest_base'], first_path)
         expected_size = int(first_info.get('size', 0))
         files_to_check.append((dest_path, sha256, expected_size, len(file_list) - 1))
-    
+
     print(f"  Checking {len(files_to_check)} files...")
-    
+
     downloaded = 0
     hardlinked = 0
     skipped = 0
-    
-    # Quick size-based check - no hashing needed!
+
     last_update = time.time()
     for idx, (dest_path, expected_hash, expected_size, dup_count) in enumerate(files_to_check):
-        # Update progress every 1000 files or every 2 seconds
         now = time.time()
         if (idx > 0 and idx % 1000 == 0) or (now - last_update >= 2):
             percent = (idx / len(files_to_check)) * 100
             print(f"  Checking files: {idx}/{len(files_to_check)} ({percent:.1f}%) - found: {skipped}, need download: {downloaded}")
             last_update = now
-        
+
         try:
             stat = os.stat(dest_path)
-            # Trust upstream hash if file exists with correct size
             if stat.st_size == expected_size:
                 skipped += 1
                 hardlinked += dup_count
             else:
-                # Wrong size, need to re-download
                 downloaded += 1
                 hardlinked += dup_count
         except:
-            # File doesn't exist
             downloaded += 1
             hardlinked += dup_count
-    
-    # Print final status
+
     print(f"  Checking files: {len(files_to_check)}/{len(files_to_check)} (100.0%) - found: {skipped}, need download: {downloaded}")
     print(f"  Check complete!")
-    
+
     print(f"\n{'='*60}")
     print("Estimated actions:")
     print(f"{'='*60}")
     print(f"  Files to download: {downloaded}")
     print(f"  Files to skip (already present): {skipped}")
     print(f"  Hardlinks to create: {hardlinked}")
-    
+
     return downloaded, hardlinked, skipped
 
 
 def process_files(hash_to_files, unique_files, config, dry_run):
-    """Download and hardlink files"""
+    ## @brief Download and hardlink files in parallel.
+    ##
+    ## Processes each unique hash group: downloads the first occurrence
+    ## (if not already present with correct size), then hardlinks it to
+    ## all other occurrences across mirrors.  Uses a thread pool for
+    ## parallel downloads.
+    ##
+    ## @param hash_to_files  Dict from ``analyse_deduplication``.
+    ## @param unique_files   Number of unique hash groups.
+    ## @param config         Config instance with tuning parameters.
+    ## @param dry_run        If True, print actions without changes.
+    ## @return Tuple of ``(downloaded, hardlinked, skipped)``.
+
     if dry_run:
         print("\nDRY RUN - no changes made")
         print("\nDone!")
         return
-    
+
     buffer_size = config.get('buffer_size', 1048576)
     parallel_downloads = config.get('parallel_downloads', 10)
     curl_timeout = config.get('curl_timeout', 900)
     max_retries = config.get('max_retries', 3)
     progress_interval = config.get('progress_interval', 1000)
     ipv4_only = config.get('disable_ipv6', True)
-    
-    # Reset counters for actual processing with thread-safe locks
+
     downloaded = 0
     hardlinked = 0
     skipped = 0
@@ -391,17 +403,15 @@ def process_files(hash_to_files, unique_files, config, dry_run):
     last_milestone = 0
     milestone_start_time = time.time()
     show_dots = False
-    
+
     def process_hash_group(sha256, file_list):
-        """Process one hash group: download first file and hardlink duplicates"""
         nonlocal downloaded, hardlinked, skipped, processed_count, last_milestone, milestone_start_time, show_dots
-        
+
         first_key, first_info = file_list[0]
         _, first_path = first_key
         dest_path = os.path.join(first_info['dest_base'], first_path)
         expected_size = int(first_info.get('size', 0))
-        
-        # Check if already exists with correct size (trust upstream hash)
+
         file_downloaded = False
         file_exists = False
         try:
@@ -411,7 +421,6 @@ def process_files(hash_to_files, unique_files, config, dry_run):
                 with counter_lock:
                     skipped += 1
             else:
-                # Wrong size, need to download
                 url = f"{first_info['upstream']}/{first_path}"
                 success = False
                 force_ipv4 = ipv4_only
@@ -428,19 +437,11 @@ def process_files(hash_to_files, unique_files, config, dry_run):
                         else:
                             print(f"  [ERROR] Hash mismatch after download (attempt {attempt+1}/{max_retries}): {first_path}", flush=True)
                             os.remove(dest_path)
-                            # On hash mismatch we still honour max_retries, but
-                            # there is no need to change IPv4/IPv6 behaviour.
                     else:
-                        # Do not hammer 404/403 responses; log once per run
-                        # for this file and stop retrying.
                         if status == 'not_found':
                             print(f"  [WARN] 404/403 Not Found, not retrying this run: {first_path}", flush=True)
                             break
 
-                        # If IPv6 is allowed globally and we hit a timeout on
-                        # a non-IPv4 attempt, retry with IPv4-only and record
-                        # that in the logs so misbehaving v6 paths are
-                        # visible.
                         if (not ipv4_only) and (not force_ipv4) and status == 'timeout':
                             print(f"  [INFO] Timeout detected, retrying with IPv4 only: {first_path}", flush=True)
                             force_ipv4 = True
@@ -449,9 +450,7 @@ def process_files(hash_to_files, unique_files, config, dry_run):
 
                 if not success:
                     print(f"  [ERROR] Download failed after {max_retries} attempts: {first_path}", flush=True)
-                    # Don't return - still try to hardlink if file exists elsewhere
         except:
-            # File doesn't exist, download it
             url = f"{first_info['upstream']}/{first_path}"
             success = False
             force_ipv4 = ipv4_only
@@ -487,74 +486,70 @@ def process_files(hash_to_files, unique_files, config, dry_run):
                 with processed_lock:
                     processed_count += 1
                 return
-        
-        # Hardlink to all other occurrences
+
         local_hardlinked = 0
         for key, info in file_list[1:]:
             _, path = key
             other_dest = os.path.join(info['dest_base'], path)
             if hardlink_file(dest_path, other_dest, sha256):
                 local_hardlinked += 1
-        
+
         if local_hardlinked > 0:
             with counter_lock:
                 hardlinked += local_hardlinked
-        
-        # Update progress counter
+
         with processed_lock:
             processed_count += 1
-            
-            # Check if we've been working on this milestone for >1 second
+
             current_milestone = (processed_count // progress_interval) * progress_interval
             if current_milestone > last_milestone:
-                # New milestone - reset timer
                 last_milestone = current_milestone
                 milestone_start_time = time.time()
                 show_dots = False
             elif not show_dots and (time.time() - milestone_start_time) > 1.0:
-                # Been working for >1 second, start showing dots
                 show_dots = True
-            
-            # Show dot for each file checked (not downloaded) if enabled and in terminal
+
             if show_dots and sys.stdout.isatty() and not file_downloaded:
                 print(".", end="", flush=True)
-            
-            # Print milestone summary
+
             if processed_count % progress_interval == 0:
                 if show_dots:
-                    print()  # Newline after dots
+                    print()
                 print(f"  Processed {processed_count}/{unique_files} files... (downloaded: {downloaded}, hardlinked: {hardlinked}, skipped: {skipped})")
-    
+
     print(f"\nProcessing {unique_files} unique files with {parallel_downloads} parallel downloads...")
-    
-    # Process hash groups in parallel
+
     with ThreadPoolExecutor(max_workers=parallel_downloads) as executor:
-        # Submit all tasks
-        futures = {executor.submit(process_hash_group, sha256, file_list): sha256 
+        futures = {executor.submit(process_hash_group, sha256, file_list): sha256
                    for sha256, file_list in hash_to_files.items()}
-        
-        # Wait for completion
+
         for future in as_completed(futures):
             try:
                 future.result()
             except Exception as e:
                 sha256 = futures[future]
                 print(f"  [ERROR] Error processing hash group {sha256[:16]}...: {e}")
-    
-    # Print final summary
+
     print(f"  Processed {processed_count}/{unique_files} files... (downloaded: {downloaded}, hardlinked: {hardlinked}, skipped: {skipped})")
     print(f"  Processing complete!")
-    
+
     return downloaded, hardlinked, skipped
 
 
 def cleanup_mirrors(mirrors, global_files, dry_run):
-    """Sync dists metadata and cleanup pool for each mirror"""
+    ## @brief Re-sync ``dists/`` metadata and clean up the pool for each mirror.
+    ##
+    ## Rebuilds the expected file set from *global_files* for each mirror
+    ## and removes files not in that set from the pool.
+    ##
+    ## @param mirrors       List of mirror configuration dicts.
+    ## @param global_files  Dict from ``collect_files``.
+    ## @param dry_run       If True, print actions without changing files.
+
     print(f"\n{'='*60}")
     print("Syncing dists metadata and cleaning up pool")
     print(f"{'='*60}")
-    
-    # Rebuild expected files per mirror
+
     for idx, mirror in enumerate(mirrors):
         name = mirror['name']
         upstream = mirror['upstream']
@@ -566,33 +561,39 @@ def cleanup_mirrors(mirrors, global_files, dry_run):
         print(f"\n[{name}] Syncing dists...")
         if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
             print(f"  ERROR: HTTPS sync failed for {name}")
-        
-        # Build expected files list for this mirror
+
         print(f"\n[{name}] Building expected files list...")
         expected_files = set()
         for key, info in global_files.items():
             mirror_idx, path = key
             if mirror_idx == idx:
                 expected_files.add(path)
-        
+
         print(f"  Expected {len(expected_files)} files in pool")
-        
-        # Cleanup unwanted files
+
         print(f"\n[{name}] Cleaning up pool...")
         cleanup_pool(dest, expected_files, dry_run)
 
 
 def print_final_summary(mirrors, downloaded, hardlinked, skipped, initial_used):
-    """Print final summary of operations"""
+    ## @brief Print the final summary of all operations.
+    ##
+    ## Shows download/hardlink/skip counts, disk usage delta, total
+    ## hardlink savings, and IPv6 health warnings.
+    ##
+    ## @param mirrors       List of mirror configuration dicts.
+    ## @param downloaded    Number of files downloaded.
+    ## @param hardlinked    Number of hardlinks created.
+    ## @param skipped       Number of files already present.
+    ## @param initial_used  Initial disk usage in bytes.
+
     first_dest = mirrors[0]['dest']
     total, final_used, free = get_disk_usage(first_dest)
     delta = final_used - initial_used
-    
-    # Calculate total hardlink savings
+
     print(f"\nCalculating total hardlink savings...")
     total_hardlinked_files, total_hardlinked_bytes = calculate_total_hardlink_savings(mirrors)
-    
-    # Final summary at the end
+
     print(f"\n{'='*60}")
     print("OVERALL SUMMARY")
     print(f"{'='*60}")
@@ -611,7 +612,6 @@ def print_final_summary(mirrors, downloaded, hardlinked, skipped, initial_used):
         print(f"Mirror filesystem size unchanged")
     print(f"Current usage: {format_bytes(final_used)} used, {format_bytes(free)} free")
 
-    # IPv6 health summary
     if IPV6_TROUBLE_MIRRORS:
         print(f"\nIPv6 summary")
         print(f"{'='*60}")

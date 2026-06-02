@@ -1,3 +1,15 @@
+## @file distribution.py
+##
+## @brief APT-specific Distribution node with Release parsing.
+##
+## ``Distribution`` extends ``Loadable`` and ``Schema.Distribution``,
+## adding the ability to fetch and parse a Release file to populate
+## components, architectures, fields, and hash sections.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
+
 from __future__ import annotations
 
 from typing import Any, Dict, List
@@ -7,15 +19,14 @@ from mirror_dedupe.lib.loadable import Loadable
 
 
 class Distribution(Loadable, Schema.Distribution):
-    """APT-specific Distribution node that can parse its own Release.
-
-    Construct with ``url=`` (pointing at the Release file), an HTTP client,
-    and the usual Distribution fields; then call ``parse()`` to populate
-    its metadata from the Release body.
-    """
+    ## @brief APT-specific Distribution node that can parse its own Release.
+    ##
+    ## Construct with ``url=`` (pointing at the Release file), an HTTP
+    ## client, and the usual Distribution fields; then call ``parse()`` to
+    ## populate its metadata from the Release body.
 
     class Metadata(Schema.Distribution.Metadata):
-        """APT-specific metadata for a distribution derived from a Release."""
+        ## @brief APT-specific metadata for a distribution derived from a Release.
 
         def __init__(
             self,
@@ -42,12 +53,16 @@ class Distribution(Loadable, Schema.Distribution):
         upstream: str,
         name: str,
     ) -> None:
-        """Construct an APT Distribution bound to a Release URL and HTTP client.
-
-        This initialises the underlying Schema.Distribution with empty
-        Components/Architectures and wires an internal loader for the
-        provided URL using the given HTTP client.
-        """
+        ## @brief Construct an APT Distribution bound to a Release URL and HTTP client.
+        ##
+        ## Initialises the underlying ``Schema.Distribution`` with empty
+        ## Components/Architectures and wires an internal loader for the
+        ## provided URL.
+        ##
+        ## @param url          URL pointing at the Release file.
+        ## @param http_client  HTTPClient for fetching.
+        ## @param upstream     Base upstream URL.
+        ## @param name         Distribution name (e.g. ``"noble"``).
 
         components = Schema.Components()
         architectures = Schema.Architectures()
@@ -62,15 +77,19 @@ class Distribution(Loadable, Schema.Distribution):
             metadata=None,
         )
 
-        # Wire a simple URL loader using the provided HTTP client.
         def load(_url: str) -> str:
             return http_client.fetch_text(_url)
 
-        self._load_text = load  # type: ignore[attr-defined]
+        self._load_text = load
         self.url = url
         self.upstream = upstream
 
-    def _parse_release_headers(self, data: str) -> Dict[str, Any]:  # noqa: D401
+    def _parse_release_headers(self, data: str) -> Dict[str, Any]:
+        ## @brief Extract top-level fields, components, and architectures
+        ##        from a Release body.
+        ## @param data  Raw Release text.
+        ## @return Dict with keys ``components``, ``architectures``, ``fields``.
+
         components = Schema.Components()
         architectures = Schema.Architectures()
         fields: Dict[str, str] = {}
@@ -103,10 +122,13 @@ class Distribution(Loadable, Schema.Distribution):
         }
 
     def _parse_hash_sections(self, data: str) -> Dict[str, List[Dict[str, Any]]]:
-        """Parse all known hash sections into a section->entries mapping.
-
-        Each entry is a dict with keys: algorithm, checksum, size, path.
-        """
+        ## @brief Parse all known hash sections from a Release body.
+        ##
+        ## Each entry is a dict with keys ``algorithm``, ``checksum``,
+        ## ``size``, ``path``.
+        ##
+        ## @param data  Raw Release text.
+        ## @return Dict mapping section name to list of entries.
 
         sections: Dict[str, List[Dict[str, Any]]] = {}
         for section in ("MD5Sum", "SHA1", "SHA256"):
@@ -151,10 +173,10 @@ class Distribution(Loadable, Schema.Distribution):
         return sections
 
     def parse(self) -> "Distribution":
-        """Fetch and parse this distribution's Release, populating metadata."""
+        ## @brief Fetch and parse this distribution's Release, populating metadata.
+        ## @return This Distribution (for chaining).
 
-        # Use loader wired by Node(url=..., http_client=...) constructor.
-        text = self._load_text(self.url)  # type: ignore[attr-defined]
+        text = self._load_text(self.url)
         if not text:
             return self
 
@@ -163,7 +185,6 @@ class Distribution(Loadable, Schema.Distribution):
         architectures = parsed.get("architectures", Schema.Architectures())
         release_fields = parsed.get("fields", {})
 
-         # Capture all hash sections we see for this distribution.
         hash_sections = self._parse_hash_sections(text)
 
         release_metadata = self.Metadata(
@@ -174,7 +195,6 @@ class Distribution(Loadable, Schema.Distribution):
             body=Schema.Release.Digest(text=text),
         )
 
-        # Set Distribution fields expected by the schema model.
         self["has_release"] = True
         self["components"] = components
         self["architectures"] = architectures

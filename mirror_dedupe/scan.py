@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""
-scan.py
-
-  Repository scanner for mirror-dedupe
-
-Copyright (c) 2025 Tim Hosking
-Email: tim@mungerware.com
-Website: https://github.com/munger
-Licence: MIT
-"""
+## @file scan.py
+##
+## @brief Repository scanner for mirror-dedupe.
+##
+## Provides the ``mirror-dedupe-scan`` CLI entry point for HTTP
+## discovery of repository metadata (distributions, architectures,
+## components) and generation of ``repos-available/*.conf`` files.
+##
+## @copyright Copyright (c) 2025-2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
 import sys
 import argparse
@@ -24,16 +25,24 @@ import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 def scan(name: str, upstreams: List[str],
          ipv6_ok: Optional[bool] = None,
-         repo_type: Optional[str] = None) -> Repo:
-    """Perform HTTP discovery and return a populated Repo."""
+         repo_type: Optional[str] = None,
+         dist_overrides: Optional[List[str]] = None) -> Repo:
+    ## @brief Perform HTTP discovery and return a populated Repo.
+    ##
+    ## Creates a Repo via ``Repo.from_url``, optionally primes explicit
+    ## distribution candidates, and runs the concrete parser to populate
+    ## distributions, architectures, components, and releases.
+    ##
+    ## @param name            Repository name.
+    ## @param upstreams       Ordered list of upstream URLs (first is primary).
+    ## @param ipv6_ok         Whether IPv6 is considered usable.
+    ## @param repo_type       Force a specific Repo type (e.g. ``"apt"``).
+    ## @param dist_overrides  Explicit distribution names to probe.
+    ## @return A fully parsed Repo instance.
 
     primary_upstream = upstreams[0]
     print(f"Scanning {primary_upstream}...", file=sys.stderr)
 
-    # Let Repo.from_url consult the registered Repo types (Apt, etc.) via
-    # is_this_yours() while still honouring the ipv6_ok hint. Callers may
-    # optionally supply repo_type to force a specific implementation (e.g.
-    # "apt") for repositories with unusual layouts.
     repo = Repo.from_url(
         primary_upstream,
         upstream_urls=upstreams[1:],
@@ -42,6 +51,10 @@ def scan(name: str, upstreams: List[str],
     )
     if name:
         repo.name = name
+
+    if dist_overrides:
+        repo.dist_candidates = dist_overrides
+
     repo = repo.parse()
 
     return repo
@@ -54,19 +67,27 @@ def generate_config(repo: Repo, dest: str,
                     component_override: Optional[List[str]] = None,
                     global_arch_mask: Optional[List[str]] = None,
                     collapse_dists: bool = False) -> str:
-    """Generate repository configuration from a fully-populated Repo.
+    ## @brief Generate repository configuration from a fully-populated Repo.
+    ##
+    ## ``repo`` is expected to have already been parsed by its concrete
+    ## ``Repo.Parser`` implementation.  This function applies user-specified
+    ## filters and emits a YAML configuration that mirror-dedupe can consume.
+    ##
+    ## GPG keys are no longer auto-discovered here.  If the caller supplies
+    ## ``gpg_key_url``, it is passed through into the generated config
+    ## unchanged; trust decisions and verification are left to the sync
+    ## phase.
+    ##
+    ## @param repo               Parsed Repo instance.
+    ## @param dest               Destination path (relative to repo_root).
+    ## @param gpg_key_url        Optional GPG key URL.
+    ## @param dist_overrides     Override distribution list.
+    ## @param arch_override      Override architecture list.
+    ## @param component_override Override component list.
+    ## @param global_arch_mask   Global architecture mask from config.
+    ## @param collapse_dists     Whether to collapse pocket variants.
+    ## @return YAML configuration string.
 
-    ``repo`` is expected to have already been parsed by its concrete
-    ``Repo.Parser`` implementation. This function applies user-specified
-    filters and emits a YAML configuration that mirror-dedupe can consume.
-
-    GPG keys are no longer auto-discovered here. If the caller supplies
-    ``gpg_key_url``, it is passed through into the generated config
-    unchanged; trust decisions and verification are left to the sync
-    phase.
-    """
-
-    # Prefer values already on the Repo payload; fall back to caller override.
     if not gpg_key_url:
         gpg_key_url = repo.gpg_key_url
 
@@ -79,66 +100,34 @@ def generate_config(repo: Repo, dest: str,
         step += 1
         return label
 
-    # Step 1: assume *repo* has already been fully discovered by
-    # scan(), including any rsync-related mutations.
     print(f"  {next_step_label()} Examining discovered repository structure...", file=sys.stderr)
-    
-    # Use the selected upstream index to pull method and IPv6 state.
+
     upstream_index = repo.upstream_idx
     upstream_node = repo.upstreams[upstream_index] if repo.upstreams else None
 
     sync_method = upstream_node.sync_method if upstream_node else None
     ipv6_ok = upstream_node.ipv6_ok if upstream_node else True
-    
-    # Derive discovered distributions (suite/pocket names) from the
-    # Repo.distributions collection populated by the parser. Fall back to
-    # a synthetic "stable" distribution if nothing was found so we can
-    # still produce a minimal, editable config.
+
     discovered: List[str] = []
     if repo.distributions:
         for dist in repo.distributions:
             if dist.name and dist.name not in discovered:
                 discovered.append(str(dist.name))
     if not discovered:
-        # Discovery could not identify any suites/pockets under dists/.
-        # Do not invent a synthetic "stable" default; the user must
-        # provide explicit --dist/--release/--releases values in this
-        # situation so the generated config reflects an intentional
-        # choice rather than a guess.
         print("      Warning: Could not auto-detect distributions", file=sys.stderr)
-
-    # Step 2: decide which distributions to use for this config. We never try to
-    # "auto-select" a primary series by Version:
-    #
-    #   * If the user provides explicit --dist/--release/--releases values,
-    #     we use them exactly (with a special "all" value meaning all
-    #     discovered suites).
-    #   * If the user provides nothing, we default to all discovered suites
-    #     as if "--releases all" had been specified.
 
     all_dists_mode = False
     collapsed_from_all = False
 
     if dist_overrides:
-        # Normalise and inspect for the special "all" token.
         dists = [d for d in dist_overrides if d]
         if any(d.lower() == "all" for d in dists):
             all_dists_mode = True
             distributions = discovered
         else:
-            # When the user provides explicit distributions, trust the
-            # list as-is. Previous versions attempted to warn about
-            # potential spelling mistakes by checking the discovered
-            # suites under dists/, but this proved too noisy for
-            # advanced layouts and synthetic pockets, so we no longer
-            # emit those warnings here.
             distributions = dists
     else:
-        # No explicit distributions were provided.
         if not discovered:
-            # With no auto-detected suites and no overrides, we cannot
-            # safely guess a default. Require the user to specify
-            # --dist/--release/--releases explicitly.
             print(
                 "ERROR: No distributions were auto-detected and no --dist/--release/--releases overrides were provided.",
                 file=sys.stderr,
@@ -148,15 +137,9 @@ def generate_config(repo: Repo, dest: str,
                 file=sys.stderr,
             )
             sys.exit(1)
-        # Otherwise, default to all discovered suites. This is
-        # equivalent to the user specifying "--releases all".
         all_dists_mode = True
         distributions = discovered
 
-    # Optional collapse: when enabled and operating in "all" mode,
-    # collapse pocket variants back to their base suites (e.g.
-    # noble[-updates/-security/-backports/-proposed] => noble) so that
-    # sync-time expansion can regenerate the standard pockets.
     if all_dists_mode and collapse_dists and discovered:
         pocket_suffixes = (
             "-updates",
@@ -166,8 +149,6 @@ def generate_config(repo: Repo, dest: str,
         )
         base_to_seen: dict[str, set[str]] = {}
         for d in discovered:
-            # Only consider simple suite names; leave more complex
-            # paths like "noble-proposed/dalamation" untouched.
             if "/" in d:
                 continue
             base = d
@@ -177,11 +158,6 @@ def generate_config(repo: Repo, dest: str,
                     break
             base_to_seen.setdefault(base, set()).add(d)
 
-        # If collapsing would actually reduce the list, switch to the
-        # base names and treat this as non-all_dists_mode so that
-        # expand_distributions remains enabled. Record that this list
-        # was derived from a collapsed set of variants so we can add a
-        # helpful auto-expansion comment in the generated config.
         if base_to_seen and len(base_to_seen) < len(discovered):
             distributions = sorted(base_to_seen.keys())
             all_dists_mode = False
@@ -189,9 +165,6 @@ def generate_config(repo: Repo, dest: str,
 
     print(f"      Using distributions: {', '.join(distributions)}", file=sys.stderr)
 
-    # Step 3: derive architectures and components from the parsed Repo
-    # instead of re-parsing Release files here. The Apt parser populates
-    # repo.architectures and repo.components with unique schema nodes.
     print(f"  {next_step_label()} Discovering architectures/components...", file=sys.stderr)
     arch_set = set()
     comp_set = set()
@@ -206,13 +179,9 @@ def generate_config(repo: Repo, dest: str,
             if comp.name:
                 comp_set.add(str(comp.name))
 
-    # Fallbacks if nothing useful was found.
     detected_arches = sorted(arch_set) if arch_set else ["amd64"]
     detected_components = sorted(comp_set) if comp_set else ["main"]
 
-    # Honour explicit architecture/component filters as hard restrictions.
-    # We still use the detected sets for basic sanity warnings, but the
-    # generated config reflects exactly what the user requested.
     if arch_override:
         architectures = [a for a in arch_override if a]
         detected_set = set(detected_arches)
@@ -237,8 +206,6 @@ def generate_config(repo: Repo, dest: str,
     else:
         components = detected_components
 
-    # Apply a global architectures mask from mirror-dedupe.conf, if any, so
-    # the generated config matches the effective sync-time policy.
     if global_arch_mask:
         mask_set = set(global_arch_mask)
         before = architectures
@@ -250,12 +217,10 @@ def generate_config(repo: Repo, dest: str,
                 file=sys.stderr,
             )
 
-    print("", file=sys.stderr)  # newline after dots
+    print("", file=sys.stderr)
     print(f"      Architectures: {', '.join(architectures)}", file=sys.stderr)
     print(f"      Components: {', '.join(components)}", file=sys.stderr)
 
-    # Generate YAML config. In this code path a blank name is treated as a
-    # bug: --name is required at the CLI and scan() always sets repo.name.
     name = repo.name
     upstream_index = repo.upstream_idx
     upstream_entries = []
@@ -274,7 +239,6 @@ def generate_config(repo: Repo, dest: str,
         f"dest: {dest}",
     ]
 
-    # Persist ordered upstreams and the selected primary index.
     if upstream_entries:
         config_lines.append("upstreams:")
         for upstream in upstream_entries:
@@ -286,25 +250,19 @@ def generate_config(repo: Repo, dest: str,
         config_lines.append(f"upstream_idx: {upstream_index}")
 
     if gpg_key_url:
-        # Explicit GPG key URL provided by user; pass through unchanged.
-        # Trust decisions and any signature verification are deferred to
-        # the sync phase rather than being handled here.
         config_lines.append(f"gpg_key_url: {gpg_key_url}")
         print(f"      GPG key URL (user-supplied): {gpg_key_url}", file=sys.stderr)
-    
+
     config_lines.append("architectures:")
     for arch in architectures:
         config_lines.append(f"  - {arch}")
-    
+
     config_lines.append("components:")
     for comp in components:
         config_lines.append(f"  - {comp}")
-    
+
     config_lines.append("distributions:")
     if all_dists_mode:
-        # In all_dists_mode we emit every discovered suite literally. This is
-        # intended for full/archival mirrors and is expected to be edited by
-        # hand afterwards.
         for dist in discovered:
             config_lines.append(f"  - {dist}")
     else:
@@ -313,19 +271,17 @@ def generate_config(repo: Repo, dest: str,
         if collapsed_from_all or (len(distributions) == 1 and distributions[0] not in ['stable', 'unstable', 'testing']):
             config_lines.append("# Distribution auto-expands to include variants (e.g., -updates, -security)")
 
-    # Check if we should disable distribution expansion. If only one
-    # distribution and it's 'stable', disable expansion. In all_dists_mode
-    # we always disable expansion because the list already enumerates all
-    # suites explicitly.
     if (all_dists_mode and not collapse_dists) or (len(distributions) == 1 and distributions[0] == 'stable'):
         config_lines.append("expand_distributions: false")
 
-    config_lines.append("")  # Trailing newline
-    
+    config_lines.append("")
+
     return '\n'.join(config_lines)
 
 
 def main() -> None:
+    ## @brief CLI entry point for ``mirror-dedupe-scan``.
+
     parser = argparse.ArgumentParser(
         description='Scan a repository and generate mirror-dedupe configuration',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -341,25 +297,25 @@ def main() -> None:
     --gpg-key-url https://mirror.mariadb.org/PublicKey \
     https://mirror.mariadb.org/repo/10.11/ubuntu"""
     )
-    
+
     parser.add_argument('--name', required=True,
-                       help='Repository name (used for config filename and mirror-dedupe NAME)')
+                        help='Repository name (used for config filename and mirror-dedupe NAME)')
     parser.add_argument('--dest',
-                       help='Destination path (relative to repo_root). Defaults to --name if omitted.')
+                        help='Destination path (relative to repo_root). Defaults to --name if omitted.')
     parser.add_argument('--config', '--config-dir', dest='config_dir', default='/etc/mirror-dedupe',
-                       help='Configuration directory (default: /etc/mirror-dedupe)')
+                        help='Configuration directory (default: /etc/mirror-dedupe)')
     parser.add_argument('-r', '--dist', '--release', action='append', dest='dist',
-                       help='Override the primary distribution/suite (may be specified multiple times)')
+                        help='Override the primary distribution/suite (may be specified multiple times)')
     parser.add_argument('-R', '--releases', dest='releases',
-                       help='Comma-separated list of distributions/suites to override')
+                        help='Comma-separated list of distributions/suites to override')
     parser.add_argument('--arch', action='append', dest='arch',
-                       help='Architecture to include (may be specified multiple times)')
+                        help='Architecture to include (may be specified multiple times)')
     parser.add_argument('--architectures', dest='architectures',
-                       help='Comma-separated list of architectures to include')
+                        help='Comma-separated list of architectures to include')
     parser.add_argument('--component', action='append', dest='component',
-                       help='Component to include (may be specified multiple times)')
+                        help='Component to include (may be specified multiple times)')
     parser.add_argument('--components', dest='components',
-                       help='Comma-separated list of components to include')
+                        help='Comma-separated list of components to include')
     parser.add_argument(
         '-U',
         '--upstream',
@@ -383,31 +339,21 @@ def main() -> None:
     )
     parser.set_defaults(collapse_dists=None)
     parser.add_argument('--repo-type', dest='repo_type',
-                       help='Force a specific Repo type (e.g. "apt") for unusual layouts')
+                        help='Force a specific Repo type (e.g. "apt") for unusual layouts')
     parser.add_argument('-G', '--gpg-key-url',
-                       help='Explicit GPG key URL for this repository')
-    parser.add_argument('upstream', 
-                       nargs='?',
-                       help='Upstream repository URL')
-    
+                        help='Explicit GPG key URL for this repository')
+    parser.add_argument('upstream',
+                        nargs='?',
+                        help='Upstream repository URL')
+
     args = parser.parse_args()
 
-    # No GPG key auto-detection or reachability checks here; if provided,
-    # gpg_key_url is simply passed through into the generated config.
-
-    # Normalise dest: default to name if not provided explicitly.
     dest = args.dest or args.name
 
-    # Load global config once so we can honour IPv6 policy when scanning
-    # and apply the same global architectures mask that mirror-dedupe
-    # will later enforce at sync time.
     cfg = Config.load(args.config_dir)
     global_disable_ipv6 = bool(cfg.disable_ipv6)
     ipv6_ok = not global_disable_ipv6
 
-    # Normalise the global architectures mask. Behaviour mirrors
-    # mirror_dedupe.config._normalize_arch_mask: "*"/"all" => no mask,
-    # list => list, other => None.
     arch_mask = cfg.architectures
     global_collapse_dists = bool(cfg.collapse_distributions)
 
@@ -423,7 +369,6 @@ def main() -> None:
 
     global_arch_mask = _normalize_arch_mask(arch_mask)
 
-    # Normalise arch/component overrides
     def _split_csv(values):
         items = []
         for v in values or []:
@@ -431,7 +376,6 @@ def main() -> None:
                 continue
             parts = [p.strip() for p in v.split(',')]
             items.extend([p for p in parts if p])
-        # De-duplicate while preserving order
         seen = set()
         result = []
         for item in items:
@@ -448,8 +392,6 @@ def main() -> None:
     if not component_override:
         component_override = None
 
-    # Dist overrides: singular flags (--dist/--release) are repeatable
-    # single values; the plural form (--releases) is a comma-separated list.
     dist_overrides: Optional[List[str]] = None
     dist_values: List[str] = []
     if args.dist:
@@ -457,7 +399,6 @@ def main() -> None:
     if args.releases:
         dist_values.extend(_split_csv([args.releases]))
     if dist_values:
-        # De-duplicate while preserving order
         seen_d = set()
         ordered: List[str] = []
         for d in dist_values:
@@ -466,8 +407,6 @@ def main() -> None:
                 ordered.append(d)
         dist_overrides = ordered or None
 
-    # Determine ordered upstreams. The first URL is used for discovery; the
-    # rest remain available for selection in the generated config.
     if args.upstreams:
         upstreams: List[str] = [u for u in args.upstreams if u]
     elif args.upstream:
@@ -476,14 +415,13 @@ def main() -> None:
         print("ERROR: No upstream URL provided. Supply either a positional upstream or --upstream/--upstreams.", file=sys.stderr)
         sys.exit(1)
 
-    # Perform discovery first so we have a fully populated Repo, then
-    # generate configuration based solely on that Repo plus CLI filters.
     try:
         repo = scan(
             args.name,
             upstreams,
             ipv6_ok=ipv6_ok,
             repo_type=args.repo_type,
+            dist_overrides=dist_overrides,
         )
     except NotImplementedError:
         print(
@@ -500,8 +438,6 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Persist any user-supplied GPG key URL on the Repo so it survives
-    # snapshotting alongside the generated config.
     if args.gpg_key_url:
         repo.gpg_key_url = args.gpg_key_url
 
@@ -519,10 +455,7 @@ def main() -> None:
             else global_collapse_dists
         ),
     )
- 
-    # Derive the config path and write the generated configuration to disk
-    # so it can be used directly by mirror-dedupe. The stderr guidance
-    # below is kept unchanged.
+
     config_dir = os.path.join(args.config_dir, 'repos-available')
     config_file = os.path.join(config_dir, f"{repo.name}.conf")
 
@@ -532,23 +465,13 @@ def main() -> None:
         if not config.endswith("\n"):
             f.write("\n")
 
-    # Temporary: write a JSON snapshot of the Repo alongside the config,
-    # using the repo name as the basename. This makes it easier to
-    # correlate snapshots with generated configs regardless of which
-    # upstream or mirror was used during discovery.
-    #
-    # Repo inherits from Node, which provides ``snapshot()`` as the
-    # canonical way to obtain a plain JSON-serialisable payload. Use that
-    # here instead of any older ``to_payload`` helpers.
     try:
         snapshot_basename = repo.name
         snapshot_path = os.path.join(config_dir, f"{snapshot_basename}.json")
         with open(snapshot_path, 'w', encoding='utf-8') as sf:
-            # Preserve the key order produced by Repo.snapshot() (an
-            # OrderedDict) instead of re-sorting alphabetically.
             json.dump(repo.snapshot(), sf, indent=2)
         print(f"Snapshot saved to: {snapshot_path}", file=sys.stderr)
-    except Exception as e:  # pragma: no cover - best-effort debug aid
+    except Exception as e:
         print(f"Warning: failed to write snapshot: {e}", file=sys.stderr)
 
     print(f"Configuration saved to: {config_file}", file=sys.stderr)

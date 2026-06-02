@@ -1,3 +1,15 @@
+## @file upstream.py
+##
+## @brief Upstream endpoint descriptor and collection.
+##
+## An ``Upstream`` captures the base URL, preferred sync method, and
+## optional metadata for a single remote source. ``Upstreams`` is the
+## corresponding ``NodeList`` wrapper.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
+
 from __future__ import annotations
 
 from typing import Any, Dict, List
@@ -6,27 +18,24 @@ from .node import Node, NodeList
 
 
 class Upstream(Node):
-    """Represents a single upstream endpoint for a Repo.
-
-    Core fields capture the information needed by scan/discovery and
-    sync policy:
-
-    - url: base HTTP/HTTPS URL for discovery and sync
-    - sync_method: preferred sync method for this upstream ("https",
-      "http", etc.)
-    - ipv6_ok: whether IPv6 is known to work for this upstream
-    An open-ended metadata mapping is also provided so callers can
-    attach additional per-upstream details without changing the
-    schema.
-    """
+    ## @brief A single upstream endpoint for a Repo.
+    ##
+    ## Core fields capture the information needed by scan/discovery and
+    ## sync policy:
+    ##
+    ## * ``url``         — base HTTP/HTTPS URL for discovery and sync
+    ## * ``sync_method`` — preferred sync method (e.g. ``"https"``, ``"http"``)
+    ## * ``ipv6_ok``     — whether IPv6 is known to work for this upstream
+    ##
+    ## An open-ended metadata mapping is also provided so callers can
+    ## attach additional per-upstream details without changing the schema.
 
     class Metadata(Node):
-        """Opaque per-upstream metadata container.
-
-        This nested Node allows callers to attach additional structured
-        information to an Upstream without changing the top-level
-        schema. The payload is an arbitrary mapping.
-        """
+        ## @brief Opaque per-upstream metadata container.
+        ##
+        ## Allows callers to attach additional structured information to an
+        ## Upstream without changing the top-level schema. The payload is
+        ## an arbitrary mapping.
 
         def __init__(self, **values: Any) -> None:  # type: ignore[override]
             super().__init__(dict(values))
@@ -52,4 +61,5 @@ class Upstream(Node):
 
 
 class Upstreams(NodeList[Upstream]):
-    """Collection wrapper for Upstream nodes."""
+    ## @brief Collection wrapper for Upstream nodes.
+    pass

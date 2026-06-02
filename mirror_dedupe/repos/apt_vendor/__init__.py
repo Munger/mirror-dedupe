@@ -1,8 +1,12 @@
-"""AptVendor package.
+## @file __init__.py
+##
+## @brief Vendor-flavoured APT Repo implementation.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
-This package exposes the :class:`AptVendor` Repo implementation for
-vendor-style APT archives.
-"""
+from __future__ import annotations
 
 from .apt_vendor import AptVendor
 

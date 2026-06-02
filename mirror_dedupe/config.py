@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""
-config.py
-
-  Ubuntu mirror synchronisation with global deduplication
-
-Copyright (c) 2025 Tim Hosking
-Email: tim@mungerware.com
-Website: https://github.com/munger
-Licence: MIT
-"""
+## @file config.py
+##
+## @brief Configuration loader for mirror-dedupe.
+##
+## Provides the ``Config`` singleton-style class that loads
+## ``mirror-dedupe.conf`` and discovers enabled mirrors from
+## ``repos-enabled/*.conf``.  Exposes settings via both named attributes
+## and dict-style access.
+##
+## @copyright Copyright (c) 2025-2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
 import os
 import sys
@@ -20,13 +22,21 @@ DEFAULT_CONFIG_DIR = "/etc/mirror-dedupe"
 
 
 class Config:
-    """Singleton-style loader for global config with attribute access."""
+    ## @brief Singleton-style loader for global config with attribute access.
 
     _instance: "Config | None" = None
     _config_dir: str | None = None
 
     @classmethod
     def load(cls, config_dir: str = DEFAULT_CONFIG_DIR) -> "Config":
+        ## @brief Load (or return cached) Config for *config_dir*.
+        ##
+        ## Returns the cached instance if one exists for the same
+        ## resolved directory; otherwise creates a new one.
+        ##
+        ## @param config_dir  Path to the configuration directory.
+        ## @return A Config instance.
+
         config_dir_resolved = str(Path(config_dir or DEFAULT_CONFIG_DIR).resolve())
         if cls._instance is not None and cls._config_dir == config_dir_resolved:
             return cls._instance
@@ -35,7 +45,14 @@ class Config:
         return cls._instance
 
     def __init__(self, config_dir_resolved: str) -> None:
-        # Load main config
+        ## @brief Initialise Config from a resolved directory path.
+        ##
+        ## Loads ``mirror-dedupe.conf`` for global settings and iterates
+        ## ``repos-enabled/*.conf`` for mirror definitions.
+        ##
+        ## @param config_dir_resolved  Absolute path to the configuration
+        ##                             directory.
+
         main_config_path = Path(config_dir_resolved) / 'mirror-dedupe.conf'
         try:
             with open(main_config_path, 'r') as f:
@@ -44,15 +61,12 @@ class Config:
             print(f"Error loading configuration from {config_dir_resolved}: {e}")
             sys.exit(1)
 
-        # Global IPv6 control
         global_disable_ipv6 = self._data.get('disable_ipv6', False)
         self.disable_ipv6 = global_disable_ipv6
 
-        # Global roots
         self.repo_root = self._data.get('repo_root', '/srv/mirror/repos')
         self.pool_root = self._data.get('pool_root', '/srv/mirror/pool')
 
-        # Optional tuning parameters
         self.architectures = self._data.get('architectures', '*')
         self.collapse_distributions = self._data.get('collapse_distributions', False)
         self.buffer_size = self._data.get('buffer_size', 1048576)
@@ -62,7 +76,6 @@ class Config:
         self.progress_interval = self._data.get('progress_interval', 1000)
         self.no_hardlinks = bool(self._data.get('no_hardlinks', False))
 
-        # Load repo definitions from repos-enabled/
         repos_dir = Path(config_dir_resolved) / 'repos-enabled'
         mirrors: list[dict] = []
 
@@ -81,7 +94,6 @@ class Config:
                 except Exception as e:
                     print(f"Warning: Failed to load {repo_file}: {e}")
 
-        # Apply global architecture mask, if configured
         arch_mask = self._data.get('architectures', '*')
 
         def _normalize_arch_mask(value):
@@ -111,7 +123,6 @@ class Config:
                     )
 
         self.mirrors = mirrors
-        # keep the raw data for legacy item access
         self._data['disable_ipv6'] = self.disable_ipv6
         self._data['repo_root'] = self.repo_root
         self._data['pool_root'] = self.pool_root
@@ -130,5 +141,3 @@ class Config:
 
     def get(self, key, default=None):
         return self._data.get(key, default)
-
-

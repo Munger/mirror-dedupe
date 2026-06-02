@@ -1,9 +1,15 @@
-"""APT repo helpers for mirror-dedupe.
-
-This module currently provides a small helper for parsing Debian/Ubuntu
-Release files. In the future it can grow into a fuller AptParser that
-also understands indices, layouts, etc.
-"""
+## @file apt.py
+##
+## @brief APT Repo implementation and parser.
+##
+## Provides the concrete ``Apt`` Repo subclass with a parser that
+## discovers suites under ``/dists/``, fetches Release files, and
+## populates the schema tree.  Also handles the ``is_this_yours()``
+## probe and registration in the global registry.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
 from __future__ import annotations
 
@@ -17,68 +23,55 @@ from .utils import discover_distribution_paths
 
 
 class Apt(Schema.Repo):
-    """APT Repo implementation and its parser helpers."""
+    ## @brief APT Repo implementation and its parser helpers.
 
     REPO_TYPE = "apt"
 
-    # Canonical APT layout/signature constants so other components can
-    # refer to them without hard-coding strings.
-    INDEX_ROOT_DIR = "dists"           # Root under which suites live
-    INDEX_ANCHOR_FILENAME = "Release"  # Primary metadata file per suite
-    SIGNATURE_EXTENSION = ".gpg"       # Detached signature extension
+    INDEX_ROOT_DIR = "dists"
+    INDEX_ANCHOR_FILENAME = "Release"
+    SIGNATURE_EXTENSION = ".gpg"
 
     @classmethod
     def restore(cls, snapshot: Dict[str, Any]) -> "Apt":
-        """Restore a fully functional Apt Repo from a snapshot.
+        ## @brief Restore a fully functional Apt Repo from a snapshot.
+        ##
+        ## Delegates data/tree reconstruction to ``Repo.from_snapshot``,
+        ## which uses Node-level metadata to restore all child collections.
+        ## HTTP wiring can be provided lazily based on the restored
+        ## network config.
+        ##
+        ## @param snapshot  Plain dict from an earlier ``snapshot()`` call.
+        ## @return A reconstructed Apt instance.
 
-        This delegates data/tree reconstruction to ``Repo.from_snapshot``,
-        which uses the Node-level metadata to restore all child
-        collections. HTTP wiring can then be provided lazily by the
-        Repo/HTTP client layer based on the restored network config.
-        """
-
-        # Repo.from_snapshot constructs ``cls`` instances. We pass a
-        # placeholder for the HTTP client; callers can replace or
-        # lazily construct it as needed based on ``repo.network``.
-        return cls.from_snapshot(snapshot, http_client=None)  # type: ignore[return-value]
+        return cls.from_snapshot(snapshot, http_client=None)
 
     class Parser(Schema.Repo.Parser):
-        """Concrete APT parser bound to an Apt Repo instance."""
+        ## @brief Concrete APT parser bound to an Apt Repo instance.
 
         def parse(self):
-            """Parse an APT-style upstream and return the complete Apt repo.
+            ## @brief Parse an APT-style upstream and return the complete Apt repo.
+            ##
+            ## Performs suite discovery under ``/dists/``, fetches Release
+            ## files, parses them, and populates ``repo.distributions``
+            ## accordingly.
+            ##
+            ## @return The populated Apt Repo instance.
 
-            This performs suite discovery under /dists/, fetches Release
-            files, parses them, and populates repo.distributions
-            accordingly.
-            """
+            repo = self.repo
 
-            repo = self.repo  # Apt (or subclass) instance
-
-            # Debug: show which concrete Repo subclass is being parsed so
-            # we can see whether autodetection selected Apt or a
-            # subclass such as AptVendor.
             import sys
 
             print(f"[apt] parsing repo class: {type(repo).__name__}", file=sys.stderr)
 
-            # Initialise per-repo invariants for APT layout/signatures.
             repo.vars = Schema.Vars(
                 index_root=Apt.INDEX_ROOT_DIR,
                 anchor_filename=Apt.INDEX_ANCHOR_FILENAME,
                 signature_extension=Apt.SIGNATURE_EXTENSION,
             )
-            # Delegate suite/distribution parsing to the dedicated
-            # DistributionsParser, which is pure and returns a list.
-            # If the Repo has been primed with explicit candidate
-            # distribution paths (e.g. by AptVendor), those are passed
-            # through so we can probe them directly instead of
-            # relying solely on /dists/ HTML.
+
             candidates = getattr(repo, "dist_candidates", None)
             repo.distributions = DistributionsParser(repo, candidates=candidates).parse()
 
-            # Populate releases and indices for each distribution by
-            # constructing a Release node from its URL and parsing it.
             for dist in repo.distributions:
                 name = str(dist.name)
                 if not name:
@@ -100,10 +93,6 @@ class Apt(Schema.Repo):
                 if indices:
                     repo.indices.extend(indices)
 
-            # Populate top-level suites, components, and architectures
-            # from the discovered distributions and their metadata.
-
-            # Suites: unique logical suite names (before any pocket suffix).
             repo.suites = Schema.Suites()
             seen_suites = set()
             for dist in repo.distributions:
@@ -112,8 +101,6 @@ class Apt(Schema.Repo):
                     seen_suites.add(suite_name)
                     repo.suites.append(Schema.Suite(name=suite_name))
 
-            # Components and architectures: roll up uniques from
-            # per-distribution metadata.
             repo.components = Schema.Components()
             repo.architectures = Schema.Architectures()
             seen_components = set()
@@ -142,13 +129,16 @@ class Apt(Schema.Repo):
 
     @classmethod
     def is_this_yours(cls, upstream: str, http_client: Any) -> bool:
-        """Heuristic check: does this upstream look like an APT repo?
-
-        We delegate to the shared ``discover_distribution_paths`` helper,
-        which walks ``/dists`` and looks for any ``dists/<path>/Release``
-        that passes :func:`looks_like_release`. If at least one
-        distribution path is discovered, we claim the upstream as APT.
-        """
+        ## @brief Heuristic check: does this upstream look like an APT repo?
+        ##
+        ## Delegates to ``discover_distribution_paths``, which walks
+        ## ``/dists`` and looks for any ``dists/<path>/Release`` that
+        ## passes the ``looks_like_release`` heuristic.  Returns True if
+        ## at least one distribution path is discovered.
+        ##
+        ## @param upstream     Upstream URL to probe.
+        ## @param http_client  HTTPClient for fetching.
+        ## @return True if the upstream appears to be APT.
 
         try:
             paths = discover_distribution_paths(
@@ -164,25 +154,19 @@ class Apt(Schema.Repo):
         return bool(paths)
 
     def make_parser(self) -> "Repo.Parser":
-        """Return an Apt.Parser bound to this Repo instance."""
+        ## @brief Return an ``Apt.Parser`` bound to this Repo instance.
+        ## @return An Apt.Parser instance.
 
         return Apt.Parser(self)
 
     # --- sync --------------------------------------------------------------
 
     def sync(self, pool_path: str) -> None:
-        """Synchronize this Apt repo into the shared pool.
+        ## @brief Synchronise this Apt repo into the shared pool.
+        ## @param pool_path  Filesystem path to the content-addressable pool.
+        ## @raise NotImplementedError  Not yet implemented.
 
-        TODO: implement HTTP sync flow:
-          - parse Release/indices
-          - fetch indices via IndexFetcher
-          - parse indexes to emit required objects
-          - hand off to shared pool Fetcher for download/link
-        """
         raise NotImplementedError("Apt.sync() not implemented yet.")
 
 
-# Register this Repo so discovery code can obtain it via the
-# shared Repo registry rather than hard-coding it in multiple
-# modules.
 Schema.Repo.register(Apt)

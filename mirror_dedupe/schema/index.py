@@ -1,3 +1,17 @@
+## @file index.py
+##
+## @brief Generic index file descriptor and collection.
+##
+## An ``Index`` represents a single index metadata file (e.g.
+## ``Packages.gz``, ``Sources.xz``).  It is repo-type agnostic at the
+## top level and provides a place for parsers to attach their own
+## payloads under a namespaced key.  ``Indices`` is the corresponding
+## ``NodeList`` wrapper.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
+
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -6,24 +20,17 @@ from .node import Node, NodeList
 
 
 class Index(Node):
-    """Generic descriptor for a single index file.
+    ## @brief Generic descriptor for a single index file.
+    ##
+    ## Required fields:
+    ##
+    ## * ``path`` — relative path under the repo root
+    ## * ``kind`` — logical kind, e.g. ``"packages"``, ``"sources"``
+    ##
+    ## Optional fields:
+    ##
+    ## * ``metadata`` — parser-specific data stored in an ``Index.Metadata`` node
 
-    This is repo-type agnostic at the top level and provides a place
-    for parsers to attach their own payloads under a namespaced key
-    (e.g. "apt", "yum", etc.).
-
-    Required fields (stored as mapping keys):
-
-        path: str        # relative path under the repo root
-        kind: str        # logical kind, e.g. "packages", "sources"
-
-    Optional fields:
-
-        metadata: Index.Metadata    # parser-specific data
-    """
-
-    # On restore we want to seed the underlying mapping directly from the
-    # snapshot payload, bypassing the keyword-only constructor.
     _restore_via_payload = True
 
     def __init__(
@@ -42,22 +49,20 @@ class Index(Node):
         super().__init__(data)
 
     class Metadata(Node):
-        """Base class for parser-specific index payloads.
-
-        Parsers are free to subclass this to provide a more structured
-        schema for their index metadata while keeping the outer Index
-        envelope generic.
-        """
+        ## @brief Base class for parser-specific index payloads.
+        ##
+        ## Parsers are free to subclass this to provide a more structured
+        ## schema for their index metadata while keeping the outer Index
+        ## envelope generic.
 
         def __init__(self, **fields: Any) -> None:
             super().__init__(dict(fields))
 
 
 class Indices(NodeList[Index]):
-    """Container for Index descriptors.
-
-    This is just a plain list of ``Index`` nodes. Any schema or
-    metadata lives either on the individual ``Index`` instances or
-    on the parent repo, not on this list type itself.
-    """
-    
+    ## @brief Container for Index descriptors.
+    ##
+    ## This is just a plain list of ``Index`` nodes.  Any schema or
+    ## metadata lives either on the individual ``Index`` instances or
+    ## on the parent repo, not on this list type itself.
+    pass
