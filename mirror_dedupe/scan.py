@@ -17,7 +17,6 @@ import os
 import json
 
 from mirror_dedupe.schema.repo import Repo
-from mirror_dedupe.lib.rsync_discovery import RsyncDiscovery
 from mirror_dedupe.config import Config
 from mirror_dedupe.lib.html_helpers import url_hostname
 import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
@@ -25,14 +24,9 @@ import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 def scan(name: str, upstreams: List[str],
          ipv6_ok: Optional[bool] = None,
-         repo_type: Optional[str] = None) -> Repo:
-    """Perform HTTP and rsync discovery and return a populated Repo.
-
-    This mirrors the behaviour of test_discovery.py: construct a Repo
-    from a single upstream URL, run its parser, then run
-    RsyncDiscovery(repo).discover() to detect rsync capabilities and
-    annotate the Repo accordingly.
-    """
+         repo_type: Optional[str] = None,
+         dist_overrides: Optional[List[str]] = None) -> Repo:
+    """Perform HTTP discovery and return a populated Repo."""
 
     primary_upstream = upstreams[0]
     print(f"Scanning {primary_upstream}...", file=sys.stderr)
@@ -49,12 +43,15 @@ def scan(name: str, upstreams: List[str],
     )
     if name:
         repo.name = name
-    repo = repo.parse()
 
-    # Run rsync discovery for each upstream in the collection.
-    for upstream in repo.upstreams:
-        discovery = RsyncDiscovery(repo, upstream)
-        discovery.discover()
+    # If the user specified explicit distribution names (--release/--dist),
+    # seed dist_candidates so the parser probes those paths directly instead
+    # of relying solely on /dists/ HTML discovery (which fails on S3-hosted
+    # repos that do not serve directory listings).
+    if dist_overrides:
+        repo.dist_candidates = dist_overrides
+
+    repo = repo.parse()
 
     return repo
 
@@ -69,9 +66,8 @@ def generate_config(repo: Repo, dest: str,
     """Generate repository configuration from a fully-populated Repo.
 
     ``repo`` is expected to have already been parsed by its concrete
-    ``Repo.Parser`` implementation and annotated by ``RsyncDiscovery``.
-    This function applies user-specified filters and emits a YAML
-    configuration that mirror-dedupe can consume.
+    ``Repo.Parser`` implementation. This function applies user-specified
+    filters and emits a YAML configuration that mirror-dedupe can consume.
 
     GPG keys are no longer auto-discovered here. If the caller supplies
     ``gpg_key_url``, it is passed through into the generated config
@@ -420,7 +416,7 @@ def main() -> None:
     # Load global config once so we can honour IPv6 policy when scanning
     # and apply the same global architectures mask that mirror-dedupe
     # will later enforce at sync time.
-    cfg = Config.get(args.config_dir)
+    cfg = Config.load(args.config_dir)
     global_disable_ipv6 = bool(cfg.disable_ipv6)
     ipv6_ok = not global_disable_ipv6
 
@@ -503,6 +499,7 @@ def main() -> None:
             upstreams,
             ipv6_ok=ipv6_ok,
             repo_type=args.repo_type,
+            dist_overrides=dist_overrides,
         )
     except NotImplementedError:
         print(

@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from .indices import get_packages_index, get_sources_index, parse_release_file
 from .download import download_with_curl, verify_sha256
 from .dedupe import hardlink_file, expand_distributions, cleanup_pool
-from .sync import run_rsync, run_https_sync, download_gpg_key
+from .sync import run_https_sync, download_gpg_key
 from .utils import get_disk_usage, format_bytes, calculate_total_hardlink_savings, ipv6_available, get_optimal_url, classify_url_issue
 
 # Components to process
@@ -146,8 +146,6 @@ def sync_mirrors(mirrors, dry_run):
         distributions = expand_distributions(mirror['distributions']) if expand_dists else mirror['distributions']
         architectures = mirror.get('architectures', [])
         components = mirror.get('components', COMPONENTS)
-        sync_method = mirror.get('sync_method', 'rsync')
-        rsync_upstream = mirror.get('rsync_upstream', upstream)
         gpg_key_url = mirror.get('gpg_key_url')
         gpg_key_path = mirror.get('gpg_key_path')
 
@@ -190,19 +188,9 @@ def sync_mirrors(mirrors, dry_run):
                 print(f"  WARNING: GPG key download failed for {name}")
         
         print(f"\n[{name}] Syncing dists...")
-
-        if sync_method == 'https':
-            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
-                print(f"  ERROR: HTTPS sync failed for {name}")
-                sys.exit(1)
-        else:
-            # For rsync-based metadata sync, prefer an explicit rsync_upstream
-            # discovered by mirror-dedupe-scan. This keeps HTTP upstream as the
-            # source of truth for curl while using a concrete rsync daemon
-            # path for dists/.
-            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run, force_ipv4=force_ipv4):
-                print(f"  ERROR: rsync failed for {name}")
-                sys.exit(1)
+        if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
+            print(f"  ERROR: HTTPS sync failed for {name}")
+            sys.exit(1)
 
 
 def collect_files(mirrors):
@@ -575,17 +563,9 @@ def cleanup_mirrors(mirrors, global_files, dry_run):
         expand_dists = mirror.get('expand_distributions', True)
         distributions = expand_distributions(mirror['distributions']) if expand_dists else mirror['distributions']
         components = mirror.get('components', COMPONENTS)
-        sync_method = mirror.get('sync_method', 'rsync')
-        rsync_upstream = mirror.get('rsync_upstream', upstream)
-        
         print(f"\n[{name}] Syncing dists...")
-        if sync_method == 'https':
-            if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
-                print(f"  ERROR: HTTPS sync failed for {name}")
-        else:
-            # Use rsync_upstream for rsync metadata sync when available.
-            if not run_rsync(distributions, dest, rsync_upstream, architectures, dry_run, force_ipv4=force_ipv4):
-                print(f"  ERROR: rsync failed for {name}")
+        if not run_https_sync(distributions, dest, upstream, architectures, components, dry_run, force_ipv4=force_ipv4):
+            print(f"  ERROR: HTTPS sync failed for {name}")
         
         # Build expected files list for this mirror
         print(f"\n[{name}] Building expected files list...")

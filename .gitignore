@@ -51,5 +51,4 @@ debian/.debhelper/
 *.buildinfo
 *.changes
 
-# Rsync temporary listing files
-.ls-lR.gz.*
+

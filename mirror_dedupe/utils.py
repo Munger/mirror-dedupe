@@ -377,8 +377,7 @@ def ipv6_available(url: str, timeout: int = 5) -> bool:
     """Return True if IPv6 appears usable for URL's host.
 
     For HTTP/HTTPS URLs this performs an IPv6-only HTTP HEAD probe using
-    ``curl -6`` with a short timeout. For rsync URLs it probes the
-    rsync daemon using ``rsync -6 host::``. Results are cached per host for
+    ``curl -6`` with a short timeout. Results are cached per host for
     duration of process. This is intentionally conservative: any error or
     timeout is treated as "IPv6 not usable" for that host.
     
@@ -409,18 +408,6 @@ def ipv6_available(url: str, timeout: int = 5) -> bool:
             # Use the new generic connectivity analysis
             info = analyze_url_connectivity(url, timeout)
             ok = info['ipv6_reachable']
-        elif scheme == "rsync":
-            # rsync: probe daemon over IPv6.
-            result = subprocess.run(
-                [
-                    "rsync",
-                    "-6",
-                    f"{host}::",
-                ],
-                capture_output=True,
-                timeout=timeout,
-            )
-            ok = result.returncode == 0
         else:
             # Unknown scheme: be conservative.
             ok = False

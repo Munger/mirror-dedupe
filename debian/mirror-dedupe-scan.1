@@ -31,7 +31,7 @@ mirror-dedupe-scan \- scan and generate repository configuration for mirror-dedu
 .SH DESCRIPTION
 .B mirror-dedupe-scan
 automatically scans a Debian/Ubuntu repository and generates a configuration file for use with mirror-dedupe.
-It detects the sync method (rsync or HTTPS), available architectures, components, distributions, and GPG key locations.
+It detects the sync method (HTTPS), available architectures, components, distributions, and GPG key locations.
 .PP
 The generated configuration is saved to
 .I /etc/mirror-dedupe/repos-available/
@@ -87,8 +87,8 @@ Relative GPG key path under repo_root (for example, \fBkeys/vendor.asc\fR).
 Must be used together with \fB\-G\fR/\fB\-\-gpg-key-url\fR.
 .TP
 .BR \-\-method " " \fIMETHOD\fR
-Force the sync method to use either \fBrsync\fR or \fBhttps\fR. When omitted,
-the sync method is auto-detected.
+Force the sync method to use \fBhttps\fR. When omitted,
+the sync method defaults to https.
 .TP
 .IR UPSTREAM-URL
 URL of the upstream repository to scan.
@@ -129,11 +129,9 @@ mirror-dedupe-scan --name docker --dest docker \\
 The scanner automatically detects:
 .TP
 .B Sync method
-Attempts to discover a suitable rsync daemon/module for the upstream host
-using IPv4-only probes, selecting rsync only when a working \fBdists/\fR
-tree is found; otherwise falls back to HTTPS. If
+Always uses HTTPS. If
 .B \-\-method
-is supplied, its value is used instead of auto-detection.
+is supplied, its value is used instead.
 .TP
 .B Architectures
 Parsed from the Release file

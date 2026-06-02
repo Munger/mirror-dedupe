@@ -210,15 +210,13 @@ class Repo(Node):
                 if rt_cls is not None:
                     break
         else:
-            # Fixed type: only probe the matching RepoType across all
-            # candidate URLs.
+            # Fixed type: use the explicitly requested type directly
+            # without calling is_this_yours(), since the user is telling
+            # us what it is.
             for t in types:
                 if getattr(t, "REPO_TYPE", None) == repo_type_name:
-                    for url in ordered_urls:
-                        if t.is_this_yours(url, http_client):
-                            rt_cls = t
-                            used_url = url
-                            break
+                    rt_cls = t
+                    used_url = ordered_urls[0] if ordered_urls else None
                     break
 
         return rt_cls, used_url

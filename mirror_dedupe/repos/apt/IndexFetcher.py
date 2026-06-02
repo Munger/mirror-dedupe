@@ -13,7 +13,7 @@ class IndexFetcher:
 
     def __init__(self, http_client) -> None:
         self.http = http_client
-        cfg = Config.get()
+        cfg = Config.load()
         self.repo_root = Path(cfg.repo_root)
         # Build a pool Fetcher using configured roots (uses Inventory singleton internally).
         self.pool_fetcher = pool.Fetcher(pool_root=cfg.pool_root, repos_root=cfg.repo_root)

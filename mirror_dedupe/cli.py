@@ -63,7 +63,7 @@ def main():
     
     # Configuration directory (allow default)
     config_dir = args.config_dir or DEFAULT_CONFIG_DIR
-    cfg_main = Config.get(config_dir)
+    cfg_main = Config.load(config_dir)
 
     # Management operations (mutually exclusive)
     management_ops = [
@@ -288,7 +288,7 @@ def main():
     
     # Load configuration via singleton (defaulting to /etc/mirror-dedupe)
     config_dir = args.config_dir or DEFAULT_CONFIG_DIR
-    config = Config.get(config_dir)
+    config = Config.load(config_dir)
     mirrors = config.get('mirrors', [])
     
     if not mirrors:

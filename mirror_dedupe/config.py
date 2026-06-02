@@ -26,7 +26,7 @@ class Config:
     _config_dir: str | None = None
 
     @classmethod
-    def get(cls, config_dir: str = DEFAULT_CONFIG_DIR) -> "Config":
+    def load(cls, config_dir: str = DEFAULT_CONFIG_DIR) -> "Config":
         config_dir_resolved = str(Path(config_dir or DEFAULT_CONFIG_DIR).resolve())
         if cls._instance is not None and cls._config_dir == config_dir_resolved:
             return cls._instance

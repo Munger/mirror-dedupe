@@ -57,8 +57,7 @@ Each repository config file should contain:
 name: repository-name
 upstream: http://upstream.example.com/repo
 dest: relative/path/from/repo_root
-sync_method: rsync  # or https
-rsync_upstream: rsync://upstream.example.com/module  # optional, when rsync is used
+sync_method: https
 gpg_key_url: http://upstream.example.com/gpg.key
 gpg_key_path: relative/path/to/key
 architectures:
@@ -79,10 +78,9 @@ storage_filters:
     - "pool/*/debug/*"
 ```
 
-## Sync Methods
+## Sync Method
 
-- **rsync**: Uses rsync protocol (faster, recommended for official Ubuntu mirrors)
-- **https**: Uses HTTPS with curl (for repositories that don't support rsync)
+- **https**: Uses HTTPS with curl
 
 ## Distribution Expansion
 
@@ -127,14 +125,11 @@ enabled by adding a symlink under `repos-enabled/`.
 
 ```bash
 # Scan the Ubuntu archive (noble)
-# Note: uses rsync.archive.ubuntu.com (not archive.ubuntu.com) to reach the
-# rsync daemon directly — the canonical hostname sits behind Cloudflare which
-# does not proxy port 873.
 mirror-dedupe-scan \
   --name ubuntu \
   --dest ubuntu \
   --dist noble \
-  http://rsync.archive.ubuntu.com/ubuntu
+  http://archive.ubuntu.com/ubuntu
 
 # Scan the Debian archive (bookworm)
 mirror-dedupe-scan \
@@ -207,8 +202,7 @@ mirror-dedupe-scan \
   `keys/vendor-archive.gpg`). Must be used together with `-G`.
 
 - **`--method METHOD`**  
-  Force the sync method to `rsync` or `https`. When omitted, the tool tests a
-  few rsync candidates and falls back to HTTPS.
+  Force the sync method to `https`. When omitted, the tool defaults to HTTPS.
 
 - **`UPSTREAM-URL`**  
   The upstream repository URL to scan, such as
@@ -218,8 +212,7 @@ mirror-dedupe-scan \
 
 `mirror-dedupe-scan` infers several fields when you do not override them:
 
-- **Sync method** – tries rsync (daemon/module and `rsync://` forms) and
-  falls back to HTTPS if none succeed, or if `rsync` is not installed.
+- **Sync method** – always uses HTTPS.
 
 - **Distributions** – lists the `/dists/` directory.  
   * If you pass any `--dist/--release/--releases` flags, those values are
@@ -247,14 +240,14 @@ mirror-dedupe-scan \
   --name ubuntu \
   --dest ubuntu \
   --release noble \
-  http://rsync.archive.ubuntu.com/ubuntu
+  http://archive.ubuntu.com/ubuntu
 
 # Ubuntu ports (noble)
 mirror-dedupe-scan \
   --name ubuntu-ports \
   --dest ubuntu-ports \
   --release noble \
-  http://rsync.ports.ubuntu.com/ubuntu-ports
+  http://ports.ubuntu.com/ubuntu-ports
 
 # Ubuntu Cloud Archive (UCA) – OpenStack tracks
 mirror-dedupe-scan \
