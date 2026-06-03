@@ -18,6 +18,7 @@ from typing import Any, Dict, List
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.html_helpers import build_url
 from .distributions import DistributionsParser
+from .IndexFetcher import IndexFetcher
 from .release import Release
 from .utils import discover_distribution_paths
 
@@ -163,10 +164,32 @@ class Apt(Schema.Repo):
 
     def sync(self, pool_path: str) -> None:
         ## @brief Synchronise this Apt repo into the shared pool.
-        ## @param pool_path  Filesystem path to the content-addressable pool.
-        ## @raise NotImplementedError  Not yet implemented.
+        ##
+        ## Parses the repo if not already parsed, then iterates all
+        ## discovered releases and fetches their indices (Packages.gz,
+        ## Sources.gz, etc.) via IndexFetcher.  Each index is routed
+        ## through PoolFile for content-addressed storage — identical
+        ## content across releases is stored once by hash in the pool
+        ## and hardlinked into each repo path that needs it.
+        ##
+        ## The *pool_path* parameter is accepted for API compatibility but
+        ## the actual pool location is read from Config; all storage
+        ## operations go through PoolFile which resolves the pool root
+        ## internally.
+        ##
+        ## @param pool_path  Ignored; pool path is read from Config.
 
-        raise NotImplementedError("Apt.sync() not implemented yet.")
+        if not self.releases:
+            self.parse()
+        fetcher = IndexFetcher()
+        for release in self.releases:
+            upstream_base = getattr(release, "upstream", None)
+            if not upstream_base:
+                continue
+            indices = getattr(release, "indices", None)
+            if not indices:
+                continue
+            fetcher.fetch_all(release, upstream_base)
 
 
 Schema.Repo.register(Apt)

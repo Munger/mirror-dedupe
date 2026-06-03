@@ -1,11 +1,14 @@
 ## @file IndexFetcher.py
 ##
-## @brief Fetch APT index files (Packages/Sources) using the shared pool
-##        Fetcher.
+## @brief Fetch APT index files (Packages/Sources) using the shared pool.
 ##
 ## ``IndexFetcher`` downloads all indices referenced by a parsed Release
-## file, routing each through the content-addressable pool so identical
-## content is stored once and hardlinked into the repo tree.
+## file, routing each through ``PoolFile`` so identical content is stored
+## once by hash in the content-addressable pool and hardlinked into the
+## repo tree.
+##
+## Callers never touch the pool directly — ``PoolFile`` handles fetch,
+## verify, and link internally.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -14,25 +17,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import List, Optional
 
-from mirror_dedupe import pool, schema as Schema
+from mirror_dedupe import schema as Schema
 from mirror_dedupe.config import Config
 from mirror_dedupe.lib.html_helpers import build_url
+from mirror_dedupe.pool.poolfile import PoolFile
 
 
 class IndexFetcher:
-    ## @brief Fetch APT index files using the shared pool Fetcher.
+    ## @brief Fetch APT index files using PoolFile for content-addressed storage.
 
-    def __init__(self, http_client) -> None:
-        ## @param http_client  HTTPClient for fetching index content.
-
-        self.http = http_client
+    def __init__(self) -> None:
         cfg = Config.load()
         self.repo_root = Path(cfg.repo_root)
-        self.pool_fetcher = pool.Fetcher()
 
-    def fetch_all(self, release: Schema.Node, upstream_base: str) -> list[Path]:
+    def fetch_all(self, release: Schema.Node, upstream_base: str) -> List[Path]:
         ## @brief Download all indices referenced by a Release, yielding repo paths.
         ##
         ## @param release        A Schema.Release (or compatible Node) with
@@ -44,7 +44,7 @@ class IndexFetcher:
         if not indices:
             return []
 
-        downloaded_paths: list[Path] = []
+        downloaded_paths: List[Path] = []
         for index in indices:
             repo_path = self.fetch_index(upstream_base, index)
             if repo_path:
@@ -52,11 +52,11 @@ class IndexFetcher:
         return downloaded_paths
 
     def fetch_index(self, upstream_base: str, index: Schema.Index) -> Optional[Path]:
-        ## @brief Download a single index file via the pool fetcher.
+        ## @brief Download a single index file into the pool and hardlink to the repo.
         ##
         ## Validates that the hash algorithm is ``sha256`` (the only
-        ## supported algorithm for pool addressing).  Builds an items
-        ## dict and delegates to ``pool.Fetcher.fetch_and_link``.
+        ## supported algorithm for pool addressing).  Delegates fetch,
+        ## verify, and link to ``PoolFile``.
         ##
         ## @param upstream_base  Base upstream URL.
         ## @param index          Schema.Index with metadata containing
@@ -81,22 +81,6 @@ class IndexFetcher:
         url = build_url(upstream_base, path)
         repo_path = self.repo_root / path
 
-        def download_fn(expected_hash: str, size: Optional[int], _url: str) -> bytes:
-            resp = self.http.get(_url)
-            data = resp.content if hasattr(resp, "content") else resp
-            if size is not None and len(data) != size:
-                raise ValueError(f"Size mismatch for {_url}: expected {size}, got {len(data)}")
-            return data
-
-        self.pool_fetcher.fetch_and_link(
-            [
-                {
-                    "hash": checksum,
-                    "repo_path": str(repo_path),
-                    "url": url,
-                    "size": metadata.get("size"),
-                }
-            ],
-            download_fn=download_fn,
-        )
+        pf = PoolFile(uri=url, hash=checksum, size=metadata.get("size"))
+        pf.store(str(repo_path))
         return repo_path
