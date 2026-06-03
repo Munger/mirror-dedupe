@@ -37,6 +37,15 @@ class Distribution(Node):
         release_path: str,
         metadata: "Distribution.Metadata" | None = None,
     ) -> None:
+        ## @brief Initialise a Distribution descriptor.
+        ##
+        ## @param name           The distribution label (suite/pocket).
+        ## @param has_release    Whether a Release file was found.
+        ## @param components     Discovered components.
+        ## @param architectures  Discovered architectures.
+        ## @param release_path   Relative path to the Release file.
+        ## @param metadata       Optional distribution metadata.
+        ## @return None
         data: Dict[str, Any] = {
             "name": name,
             "has_release": has_release,
@@ -56,6 +65,10 @@ class Distribution(Node):
         ## while keeping the outer Distribution envelope generic.
 
         def __init__(self, **fields: Any) -> None:
+            ## @brief Initialise distribution metadata from keyword fields.
+            ##
+            ## @param fields  Arbitrary keyword fields for the metadata envelope.
+            ## @return None
             super().__init__(dict(fields))
 
 

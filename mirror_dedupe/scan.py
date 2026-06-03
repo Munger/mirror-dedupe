@@ -16,6 +16,7 @@ import argparse
 from typing import List, Optional
 import os
 import json
+import yaml
 
 from mirror_dedupe.schema.repo import Repo
 from mirror_dedupe.config import Config
@@ -26,22 +27,34 @@ import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 def scan(name: str, upstreams: List[str],
          ipv6_ok: Optional[bool] = None,
          repo_type: Optional[str] = None,
-         dist_overrides: Optional[List[str]] = None) -> Repo:
+         dist_overrides: Optional[List[str]] = None,
+         config_dir: Optional[str] = None) -> Repo:
     ## @brief Perform HTTP discovery and return a populated Repo.
     ##
     ## Creates a Repo via ``Repo.from_url``, optionally primes explicit
     ## distribution candidates, and runs the concrete parser to populate
     ## distributions, architectures, components, and releases.
     ##
+    ## If ``config_dir`` is provided and a previous scan result exists at
+    ## ``<config_dir>/repos-available/<name>.conf``, cached discovery params
+    ## are loaded into the Repo before parsing to accelerate re-scans.
+    ##
     ## @param name            Repository name.
     ## @param upstreams       Ordered list of upstream URLs (first is primary).
     ## @param ipv6_ok         Whether IPv6 is considered usable.
     ## @param repo_type       Force a specific Repo type (e.g. ``"apt"``).
     ## @param dist_overrides  Explicit distribution names to probe.
+    ## @param config_dir      Config directory for loading cached params.
     ## @return A fully parsed Repo instance.
 
     primary_upstream = upstreams[0]
     print(f"Scanning {primary_upstream}...", file=sys.stderr)
+
+    # --release/--dist/--releases are APT-specific concepts, so if the user
+    # supplies explicit distribution names without also specifying a repo
+    # type, assume APT rather than failing type detection.
+    if repo_type is None and dist_overrides:
+        repo_type = "apt"
 
     repo = Repo.from_url(
         primary_upstream,
@@ -54,6 +67,19 @@ def scan(name: str, upstreams: List[str],
 
     if dist_overrides:
         repo.dist_candidates = dist_overrides
+
+    # Load cached discovery params from a previous scan, if available
+    if config_dir:
+        existing = os.path.join(config_dir, "repos-available", f"{name}.conf")
+        if os.path.exists(existing):
+            try:
+                with open(existing) as f:
+                    data = yaml.safe_load(f) or {}
+                cached = data.get("params")
+                if cached:
+                    repo.setdefault("params", {}).update(cached)
+            except Exception:
+                pass
 
     repo = repo.parse()
 
@@ -106,7 +132,6 @@ def generate_config(repo: Repo, dest: str,
     upstream_node = repo.upstreams[upstream_index] if repo.upstreams else None
 
     sync_method = upstream_node.sync_method if upstream_node else None
-    ipv6_ok = upstream_node.ipv6_ok if upstream_node else True
 
     discovered: List[str] = []
     if repo.distributions:
@@ -228,8 +253,6 @@ def generate_config(repo: Repo, dest: str,
         entry = {"url": u.url}
         if u.sync_method is not None:
             entry["sync_method"] = u.sync_method
-        if u.ipv6_ok is not None:
-            entry["ipv6_ok"] = u.ipv6_ok
         upstream_entries.append(entry)
 
     config_lines = [
@@ -245,8 +268,6 @@ def generate_config(repo: Repo, dest: str,
             config_lines.append("  - url: " + upstream["url"])
             if "sync_method" in upstream:
                 config_lines.append(f"    sync_method: {upstream['sync_method']}")
-            if "ipv6_ok" in upstream:
-                config_lines.append(f"    ipv6_ok: {'true' if upstream['ipv6_ok'] else 'false'}")
         config_lines.append(f"upstream_idx: {upstream_index}")
 
     if gpg_key_url:
@@ -273,6 +294,15 @@ def generate_config(repo: Repo, dest: str,
 
     if (all_dists_mode and not collapse_dists) or (len(distributions) == 1 and distributions[0] == 'stable'):
         config_lines.append("expand_distributions: false")
+
+    params = repo.get("params")
+    if params:
+        config_lines.append("params:")
+        method = params.get("discovery_method", "html_bfs")
+        config_lines.append(f"  discovery_method: {method}")
+        nobrowse = params.get("nobrowse", False)
+        if nobrowse:
+            config_lines.append("  nobrowse: true")
 
     config_lines.append("")
 
@@ -422,6 +452,7 @@ def main() -> None:
             ipv6_ok=ipv6_ok,
             repo_type=args.repo_type,
             dist_overrides=dist_overrides,
+            config_dir=args.config_dir,
         )
     except NotImplementedError:
         print(

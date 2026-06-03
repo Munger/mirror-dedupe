@@ -14,9 +14,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .node import Node, NodeList
+from .package import Package, Packages
 
 
 class Index(Node):
@@ -38,15 +39,66 @@ class Index(Node):
         *,
         path: str,
         kind: str,
-        metadata: "Index.Metadata" | None = None,
+        metadata: "Index.Metadata | None" = None,
+        uri: str = "",
     ) -> None:
+        ## @brief Initialise an Index descriptor.
+        ##
+        ## @param path      Relative path under the repo root.
+        ## @param kind      Logical kind (e.g. ``"packages"``).
+        ## @param metadata  Optional index metadata.
+        ## @param uri       Index URI for fetching.
+        ## @return None
         data: Dict[str, Any] = {
             "path": path,
             "kind": kind,
         }
+        if uri:
+            data["uri"] = uri
         if metadata is not None:
             data["metadata"] = metadata
         super().__init__(data)
+
+    @property
+    def checksum(self) -> str:
+        ## @brief SHA-256 checksum from attached metadata (if any).
+        ## @return The checksum string, or ``""`` if absent.
+        md = self.get("metadata")
+        if md:
+            return md.get("checksum", "")
+        return ""
+
+    def _parse_packages(self, text: str, uri: str = "") -> "Packages":
+        ## @brief Virtual: parse *text* into ``Package`` children.
+        ##
+        ## Subclasses override this with format-specific index parsing.
+        ## The base implementation returns an empty ``Packages`` so that
+        ## non-package indices (e.g. Sources) are harmless.
+        ##
+        ## @param text  Decompressed index text.
+        ## @param uri   The URI of this index (for building package URIs).
+        ## @return A ``Packages`` NodeList.
+        return Packages()
+
+    def parse(self) -> "Index":
+        ## @brief Decompress raw bytes and parse into child Package nodes.
+        ## @return This Index (with ``packages`` populated).
+        data = self._raw_bytes
+        if not data:
+            return self
+        path = self.get("path", "")
+        if path.endswith(".gz"):
+            import gzip
+            text = gzip.decompress(data).decode("utf-8", errors="replace")
+        elif path.endswith(".xz"):
+            import lzma
+            text = lzma.decompress(data).decode("utf-8", errors="replace")
+        else:
+            text = data.decode("utf-8", errors="replace")
+        uri = self.get("uri", "")
+        self.packages = self._parse_packages(text, uri=uri)
+        self._raw_bytes = None
+        return self
 
     class Metadata(Node):
         ## @brief Base class for parser-specific index payloads.
@@ -56,6 +108,10 @@ class Index(Node):
         ## envelope generic.
 
         def __init__(self, **fields: Any) -> None:
+            ## @brief Initialise index metadata from keyword fields.
+            ##
+            ## @param fields  Arbitrary keyword fields for the metadata envelope.
+            ## @return None
             super().__init__(dict(fields))
 
 

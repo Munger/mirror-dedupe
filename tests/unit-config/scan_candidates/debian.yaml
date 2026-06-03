@@ -1,0 +1,9 @@
+# debian repository
+# Auto-generated from candidates.conf
+---
+name: debian
+dest: debian
+upstreams:
+- https://ftp.debian.org/debian
+- https://mirror.yandex.ru/debian/
+gpg_key_url: https://ftp-master.debian.org/keys/archive-key-12.asc

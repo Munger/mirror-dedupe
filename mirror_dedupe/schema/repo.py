@@ -16,10 +16,10 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Type, TypeVar
+from pathlib import Path
+from typing import Any, ClassVar, Dict, List, Optional, Type, TypeVar
 
 from .node import Node, NodeList
-from mirror_dedupe.lib.http_client import HTTPClient
 from ..schema.architecture import Architecture, Architectures
 from ..schema.component import Component, Components
 from ..schema.suite import Suite, Suites
@@ -36,14 +36,11 @@ class Repo(Node):
     ## @brief Root Node for repo-type-specific ecosystems (APT, Yum, etc.).
     ##
     ## Each concrete subclass registers itself via the ``_registry``
-    ## mechanism and provides ``is_this_yours()``, ``make_parser()``, and
-    ## ``sync()`` implementations.
+    ## mechanism and provides ``is_this_yours()`` and ``make_parser()``.
 
     REPO_TYPE: ClassVar[str] = "abstract"
 
     _registry: ClassVar[List[Type["Repo"]]] = []
-
-    http: Any
 
     _list_fields: ClassVar[Dict[str, tuple[Type[NodeList], Type[Node]]]] = {
         "distributions": (Distributions, Distribution),
@@ -64,20 +61,18 @@ class Repo(Node):
         self,
         *,
         upstream_idx: int = 0,
-        http_client: Any,
         name: str = "",
         repo_type: str = "unknown",
         gpg_key_url: str | None = None,
         upstreams: Upstreams | None = None,
     ) -> None:
-        ## @brief Initialise a Repo root node and bind an HTTP client.
+        ## @brief Initialise a Repo root node.
         ##
         ## The Repo itself is a Node whose payload contains all scalar
         ## repo metadata (upstream, repo_type, IPv6 flags, etc.) plus any
         ## child nodes (Distributions, Vars, etc.) attached by parsers.
         ##
         ## @param upstream_idx  Index into the Upstreams collection.
-        ## @param http_client   HTTPClient bound to this repo.
         ## @param name          Human-friendly repo name.
         ## @param repo_type     Repo type string (e.g. ``"apt"``).
         ## @param gpg_key_url   Optional GPG key URL for verification.
@@ -93,9 +88,8 @@ class Repo(Node):
 
         super().__init__(data)
 
-        self.http = http_client
-
         self.network = NetworkConfig(ipv6_ok=True)
+        self["params"] = {}
 
         self.distributions = Distributions()
         self.architectures = Architectures()
@@ -110,6 +104,7 @@ class Repo(Node):
     def register(cls, repo_cls: Type["Repo"]) -> None:
         ## @brief Register a concrete Repo subclass for later discovery.
         ## @param repo_cls  The Repo subclass to register.
+        ## @return None
 
         cls._registry.append(repo_cls)
 
@@ -124,12 +119,23 @@ class Repo(Node):
 
     @classmethod
     @abstractmethod
-    def is_this_yours(cls, upstream: str, http_client: Any) -> bool:
+    def is_this_yours(cls, upstream: str) -> bool:
         ## @brief Lightweight probe: does this upstream look like this repo type?
-        ## @param upstream    Upstream URL to probe.
-        ## @param http_client  HTTPClient to use for probing.
+        ## @param upstream  Upstream URL to probe.
         ## @return True if the upstream matches this repo type.
         raise NotImplementedError
+
+    @classmethod
+    def probe_known_labels(cls, upstream: str) -> List[str]:
+        ## @brief Probe well-known labels for this repo type.
+        ##
+        ## Returns labels that exist at *upstream*.  Base returns empty.
+        ## Subclasses implement with type-specific probes
+        ## (e.g. probing ``dists/{name}/Release`` for APT).
+        ##
+        ## @param upstream  Upstream URL to probe.
+        ## @return List of label strings that were confirmed to exist.
+        return []
 
     # --- parser factory ---------------------------------------------------
 
@@ -142,26 +148,33 @@ class Repo(Node):
 
     class Parser(ABC):
         ## @brief Base parser bound to a Repo instance.
-        ##
-        ## Subclasses get convenient access to ``self.repo`` and
-        ## ``self.http``.
 
         def __init__(self, rt: "Repo") -> None:
+            ## @brief Initialise the base Parser.
+            ##
             ## @param rt  The concrete Repo instance this parser operates on.
+            ## @return None
             self.repo = rt
 
         @abstractmethod
         def parse(self) -> Any:
             ## @brief Inspect the upstream and populate the bound repo data object.
+            ## @return Populated data (structure depends on concrete parser).
             raise NotImplementedError
 
-    # --- sync contract ----------------------------------------------------
+    # --- content operations ------------------------------------------------
 
-    @abstractmethod
-    def sync(self, pool_path: str) -> None:
-        ## @brief Synchronise this repository against its upstream into the shared pool.
-        ## @param pool_path  Filesystem path to the content-addressable pool.
-        raise NotImplementedError
+    def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
+        ## @brief Sync all releases under this Repo to the pool.
+        ##
+        ## @param config  Optional sync configuration dict.
+        ## @return List of paths written during sync.
+        if not Node._sync_enabled:
+            return []
+        results: List[Path] = []
+        for release in self.releases:
+            results.extend(release.sync(config=config or self.get("network")))
+        return results
 
     # --- selection helpers ------------------------------------------------
 
@@ -170,7 +183,6 @@ class Repo(Node):
         cls,
         repo: Any,
         urls: list[str],
-        http_client: Any,
     ) -> tuple["Type[Repo] | None", str | None]:
         ## @brief Select an appropriate Repo class for this repo/URL set.
         ##
@@ -183,9 +195,8 @@ class Repo(Node):
         ## * If ``repo["repo_type"]`` is set, only probe the matching
         ##   RepoType across all URLs.
         ##
-        ## @param repo         A dict-like object with an optional ``repo_type`` key.
-        ## @param urls         List of candidate upstream URLs.
-        ## @param http_client  HTTPClient for probing.
+        ## @param repo  A dict-like object with an optional ``repo_type`` key.
+        ## @param urls  List of candidate upstream URLs.
         ## @return Tuple of ``(RepoClass | None, url_used | None)``.
 
         rt_cls: Type[Repo] | None = None
@@ -206,7 +217,7 @@ class Repo(Node):
         if not repo_type_name or repo_type_name == "unknown":
             for t in types:
                 for url in ordered_urls:
-                    if t.is_this_yours(url, http_client):
+                    if t.is_this_yours(url):
                         rt_cls = t
                         used_url = url
                         repo["repo_type"] = getattr(t, "REPO_TYPE", "unknown")
@@ -233,13 +244,12 @@ class Repo(Node):
         repo_type: str | None = None,
         upstream_urls: list[str] | None = None,
     ) -> "Repo":
-        ## @brief Construct a Repo instance bound to a URL and HTTP client.
+        ## @brief Construct a Repo instance from a URL.
         ##
         ## This is the primary entry point for HTTP-based discovery.  It
-        ## initialises an HTTPClient honouring any ``ipv6_ok`` hint,
         ## selects an appropriate concrete Repo subclass via the
-        ## ``get_type_for_url`` registry helper, and returns an instance
-        ## bound to both the upstream and HTTP client.
+        ## ``get_type_for_url`` registry helper and returns an instance
+        ## bound to the upstream tree.
         ##
         ## @param upstream      Primary upstream URL.
         ## @param ipv6_ok       Whether IPv6 is supported.
@@ -257,10 +267,8 @@ class Repo(Node):
         elif upstream.startswith("http://"):
             sync_hint = "http"
 
-        http = HTTPClient(ipv6_ok=bool(ipv6_ok if ipv6_ok is not None else True))
-
         urls: list[str] = [upstream, *(upstream_urls or [])]
-        rt_cls, _used_url = cls.get_type_for_urls(data, urls, http)
+        rt_cls, _used_url = cls.get_type_for_urls(data, urls)
         if rt_cls is None:
             rt_cls = cls
 
@@ -280,11 +288,12 @@ class Repo(Node):
                     sync_method=sync_hint
                     if url.split(":", 1)[0] == upstream.split(":", 1)[0]
                     else None,
-                    ipv6_ok=ipv6_ok,
                 )
             )
 
-        repo = rt_cls(http_client=http, upstreams=upstreams, **data)
+        repo = rt_cls(upstreams=upstreams, **data)
+        if ipv6_ok is not None:
+            repo.network = NetworkConfig(ipv6_ok=ipv6_ok)
 
         return repo
 
@@ -309,19 +318,13 @@ class Repo(Node):
     def from_snapshot(
         cls,
         snapshot: Dict[str, Any],
-        http_client: HTTPClient | None = None,
     ) -> "Repo":
         ## @brief Rebuild a Repo (and its children) from a plain snapshot.
         ##
         ## Expects *snapshot* to be the result of ``repo.snapshot()`` or
         ## an equivalent plain-data structure (e.g. loaded from JSON).
-        ## Runtime helpers such as the HTTP client are supplied explicitly
-        ## via the ``http_client`` argument so that callers remain in
-        ## control of networking policy.
         ##
-        ## @param snapshot     Plain dict from an earlier ``snapshot()`` call.
-        ## @param http_client  Optional HTTPClient override; created from
-        ##                     network config if omitted.
+        ## @param snapshot  Plain dict from an earlier ``snapshot()`` call.
         ## @return A reconstructed Repo instance.
 
         if not isinstance(snapshot, dict):
@@ -333,17 +336,7 @@ class Repo(Node):
         repo = cls._from_payload(snapshot)
 
         if "network" not in snapshot:
-            ipv6_ok = snapshot.get("ipv6_ok", True)
-            repo.network = NetworkConfig(ipv6_ok=ipv6_ok)
-
-        if http_client is None:
-            cfg = getattr(repo, "network", None)
-            ipv6_ok = bool(cfg.get("ipv6_ok", True)) if cfg is not None else bool(
-                snapshot.get("ipv6_ok", True)
-            )
-            http_client = HTTPClient(ipv6_ok=ipv6_ok)
-
-        repo.http = http_client
+            repo.network = NetworkConfig(ipv6_ok=True)
 
         cls._restore_children(repo, snapshot)
 

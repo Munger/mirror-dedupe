@@ -1,0 +1,8 @@
+# brave repository
+# Auto-generated from candidates.conf
+---
+name: brave
+dest: brave
+upstreams:
+- https://brave-browser-apt-release.s3.brave.com
+gpg_key_url: https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg

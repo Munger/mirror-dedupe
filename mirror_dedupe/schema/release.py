@@ -13,7 +13,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 import hashlib
 
 from .node import Node, NodeList
@@ -53,7 +54,20 @@ class Release(Node):
         kind: str,
         signature_extension: str | None = None,
         digest: "Release.Digest | None" = None,
+        uri: str = "",
     ) -> None:
+        ## @brief Initialise a Release descriptor.
+        ##
+        ## @param suite                Logical suite name.
+        ## @param pocket               Logical pocket name (or ``None``).
+        ## @param relative_dir         Relative directory under ``dists/``.
+        ## @param path                 Full path to the Release file.
+        ## @param repo_type            Type of repository (e.g. ``"apt"``).
+        ## @param kind                 Release kind (e.g. ``"Release"``).
+        ## @param signature_extension  Extension for the signature file (or ``None``).
+        ## @param digest               Digest describing the Release body.
+        ## @param uri                  Release URI for fetching.
+        ## @return None
         data: Dict[str, Any] = {
             "suite": suite,
             "pocket": pocket,
@@ -62,11 +76,27 @@ class Release(Node):
             "repo_type": repo_type,
             "kind": kind,
         }
+        if uri:
+            data["uri"] = uri
         if signature_extension is not None:
             data["signature_extension"] = signature_extension
         if digest is not None:
             data["digest"] = digest
         super().__init__(data)
+
+    def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
+        ## @brief Sync this Release and its child indices to the pool.
+        ##
+        ## @param config  Optional sync configuration dict.
+        ## @return List of paths written during sync.
+        if not Node._sync_enabled:
+            return []
+        results: List[Path] = []
+        if self._raw_bytes is not None:
+            results.extend(self.store(config=config))
+        for index in getattr(self, "indices", []):
+            results.extend(index.sync(config=config))
+        return results
 
     class Digest(Node):
         ## @brief Digest describing this Release's body.
@@ -77,6 +107,12 @@ class Release(Node):
         ## scan outputs lean.
 
         def __init__(self, *, text: str) -> None:
+            ## @brief Initialise a Digest from raw Release text.
+            ##
+            ## Computes the SHA-256 hash and byte length of the text.
+            ##
+            ## @param text  Raw Release file text.
+            ## @return None
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             data: Dict[str, Any] = {
                 "sha256": digest,

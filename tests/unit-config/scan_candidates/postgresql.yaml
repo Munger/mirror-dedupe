@@ -1,0 +1,10 @@
+# postgresql repository
+# Auto-generated from candidates.conf
+---
+name: postgresql
+dest: postgresql
+upstreams:
+- http://apt.postgresql.org/pub/repos/apt
+components:
+- main
+gpg_key_url: https://www.postgresql.org/media/keys/ACCC4CF8.asc

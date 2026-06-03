@@ -21,8 +21,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
-from typing import Any, ClassVar, Dict, List, Generic, Iterable, Tuple, Type, TypeVar, Callable
+import os
+import subprocess
+from pathlib import Path
+from typing import Any, ClassVar, Dict, List, Generic, Iterable, Optional, Tuple, Type, TypeVar, Callable
 
 
 class Node(dict):
@@ -37,12 +41,16 @@ class Node(dict):
     _restore_via_payload: ClassVar[bool] = False
     _node_fields: ClassVar[Dict[str, Type["Node"]]] = {}
     _list_fields: ClassVar[Dict[str, Tuple[Type["NodeList"], Type["Node"]]]] = {}
+    _sync_enabled: ClassVar[bool] = True
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         ## @brief Collect reserved attribute names for each subclass.
         ##
         ## Methods, class attributes, properties, and annotated fields
         ## are treated as real attributes rather than schema payload keys.
+        ##
+        ## @param kwargs  Keyword arguments forwarded to ``super().__init_subclass__``.
+        ## @return None
 
         super().__init_subclass__(**kwargs)
         reserved: set[str] = set()
@@ -64,6 +72,9 @@ class Node(dict):
         ##
         ## Allows ``node.foo`` to behave like ``node["foo"]`` for schema
         ## data, while still supporting normal attributes for internals.
+        ##
+        ## @param name  The attribute name to look up.
+        ## @return The value mapped to *name*, or raises ``AttributeError``.
 
         try:
             return self[name]
@@ -77,6 +88,10 @@ class Node(dict):
         ## per-class ``_reserved`` set are treated as true attributes on the
         ## instance. All other names are stored in the dict payload under the
         ## same key, after honouring the frozen check.
+        ##
+        ## @param name   The attribute name.
+        ## @param value  The value to store.
+        ## @return None
 
         if name.startswith("_") or name in type(self)._reserved:
             object.__setattr__(self, name, value)
@@ -95,6 +110,7 @@ class Node(dict):
         ## @param kwargs  Keyword arguments stored as schema fields.
 
         super().__init__()
+        object.__setattr__(self, "_raw_bytes", None)
 
         if args:
             if len(args) > 1:
@@ -381,6 +397,9 @@ class Node(dict):
 
     def __setitem__(self, key: Any, value: Any) -> None:
         ## @brief Prevent payload keys from colliding with reserved attribute names.
+        ## @param key    The key to set in the payload.
+        ## @param value  The value to associate with *key*.
+        ## @return None
 
         if key in type(self)._reserved:
             raise KeyError(f"Cannot set reserved attribute {key!r} in Node payload")
@@ -388,24 +407,199 @@ class Node(dict):
         super().__setitem__(key, value)
 
     def __delitem__(self, key: Any) -> None:
+        ## @brief Delete a key from the payload after checking frozen state.
+        ## @param key  The key to delete.
+        ## @return None
+
         self._check_frozen()
         super().__delitem__(key)
 
     def clear(self) -> None:
+        ## @brief Remove all items from the payload after checking frozen state.
+        ## @return None
+
         self._check_frozen()
         super().clear()
 
     def pop(self, key: Any, *args: Any) -> Any:
+        ## @brief Remove and return a payload item, with optional default.
+        ## @param key    The key to pop from the payload.
+        ## @param args   Optional default value if *key* is not found.
+        ## @return The value for *key*, or the default if provided.
+
         self._check_frozen()
         return super().pop(key, *args)
 
     def popitem(self) -> Any:
+        ## @brief Remove and return the last inserted payload item.
+        ## @return A ``(key, value)`` tuple from the payload.
+
         self._check_frozen()
         return super().popitem()
 
     def update(self, *args: Any, **kwargs: Any) -> None:
+        ## @brief Update the payload with key/value pairs from another mapping.
+        ## @param args    Optional single mapping or iterable of ``(key, value)`` pairs.
+        ## @param kwargs  Additional key/value pairs.
+        ## @return None
+
         self._check_frozen()
         super().update(*args, **kwargs)
+
+    # --- content operations -----------------------------------------------
+
+    @classmethod
+    def probe_url(cls, uri: str, config: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
+        ## @brief Check whether a URL is reachable and return its content.
+        ## @param uri     The URL to probe.
+        ## @param config  Optional configuration dict (e.g. timeout values).
+        ## @return The raw response bytes, or ``None`` if the URL is empty or unreachable.
+
+        if not uri:
+            return None
+        try:
+            return cls._fetch_url(uri, config)
+        except RuntimeError:
+            return None
+
+    @staticmethod
+    def _fetch_url(uri: str, config=None, output_path=None) -> Optional[bytes]:
+        timeout = config.get("timeout", 300) if config else 300
+        base = ["curl", "-s", "-f", "-L", "--max-time", str(timeout)]
+        if output_path:
+            base += ["-o", str(output_path)]
+        args = base + [uri]
+        capture = output_path is None
+        proc = subprocess.run(args, capture_output=capture)
+        # IPv6 fallback: if curl fails and IPv6 is enabled, retry with --ipv4
+        if proc.returncode != 0 and config and config.get("ipv6_ok", True):
+            proc = subprocess.run(base + ["--ipv4", uri], capture_output=capture)
+            if proc.returncode == 0:
+                config["ipv6_ok"] = False  # Mark failed so subsequent calls skip IPv6
+        if proc.returncode != 0:
+            msg = proc.stderr.decode("utf-8", errors="replace").strip() if proc.stderr else ""
+            raise RuntimeError(
+                f"Failed to fetch {uri}: curl exit {proc.returncode} {msg}"
+            )
+        return proc.stdout if capture else None
+
+    @staticmethod
+    def _pool_path(hash_val: str) -> Path:
+        from mirror_dedupe.config import Config
+        cfg = Config.load()
+        return Path(cfg.pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
+
+    @property
+    def checksum(self) -> str:
+        ## @brief Return the SHA-256 checksum for this node.
+        ## @return The hex digest string, or an empty string when not applicable.
+
+        return ""
+
+    def fetch(self, *, config: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
+        ## @brief Download content from ``self.uri``, caching in ``_raw_bytes``.
+        ##
+        ## Checks the content-addressable pool first via ``self.checksum``.
+        ## Falls back to HTTP fetch and verifies the hash if available.
+        ##
+        ## @param config  Optional configuration dict for fetch parameters.
+        ## @return The raw bytes, or ``None`` if no URI is set.
+
+        if self._raw_bytes is not None:
+            return self._raw_bytes
+        uri = self.get("uri")
+        if not uri:
+            return None
+        hash_val = self.checksum
+        if hash_val:
+            pool_path = self._pool_path(hash_val)
+            if pool_path.exists():
+                data = pool_path.read_bytes()
+                actual = hashlib.sha256(data).hexdigest()
+                if actual == hash_val:
+                    self._raw_bytes = data
+                    return data
+        data = self._fetch_url(uri, config)
+        if hash_val:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual != hash_val:
+                raise ValueError(
+                    f"Hash mismatch for {uri}: "
+                    f"expected {hash_val[:16]}..., got {actual[:16]}..."
+                )
+        self._raw_bytes = data
+        return data
+
+    def store(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
+        ## @brief Write cached ``_raw_bytes`` to the repo destination and pool.
+        ##
+        ## Writes to ``cfg.repo_root / path``, then writes to the pool when
+        ## ``self.checksum`` is set.
+        ##
+        ## @param config  Optional configuration dict (unused, reserved for future use).
+        ## @return A list containing the destination ``Path``, or an empty list if no data is cached.
+
+        if self._raw_bytes is None:
+            return []
+        path = self.get("path")
+        if not path:
+            return []
+        from mirror_dedupe.config import Config
+        cfg = Config.load()
+        dest = Path(cfg.repo_root) / path
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(self._raw_bytes)
+        hash_val = self.checksum
+        if hash_val:
+            pool_path = self._pool_path(hash_val)
+            if not pool_path.exists():
+                pool_path.parent.mkdir(parents=True, exist_ok=True)
+                pool_path.write_bytes(self._raw_bytes)
+        return [dest]
+
+    def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
+        ## @brief Synchronise this node's file from upstream into the pool and repo.
+        ##
+        ## Downloads via ``_fetch_url`` if the file is not already in the pool,
+        ## verifies the SHA-256 checksum, and registers a hardlink via
+        ## ``Inventory``.
+        ##
+        ## @param config  Optional configuration dict for fetch parameters.
+        ## @return A list containing the destination ``Path``, or an empty list if sync is disabled or prerequisites are missing.
+
+        if not Node._sync_enabled:
+            return []
+        uri = self.get("uri")
+        hash_val = self.checksum
+        path_val = self.get("path")
+        if not uri or not hash_val or not path_val:
+            return []
+        from mirror_dedupe.config import Config
+        from mirror_dedupe.pool.inventory import Inventory
+        cfg = Config.load()
+        pool_path = self._pool_path(hash_val)
+        dest = Path(cfg.repo_root) / path_val
+        if not pool_path.exists():
+            pool_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = pool_path.with_suffix(".tmp")
+            self._fetch_url(uri, config, output_path=tmp)
+            h = hashlib.sha256()
+            with open(tmp, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+            if h.hexdigest() != hash_val:
+                tmp.unlink()
+                raise ValueError(
+                    f"Hash mismatch for {uri}: "
+                    f"expected {hash_val[:16]}..., got {h.hexdigest()[:16]}..."
+                )
+            os.replace(tmp, pool_path)
+        inventory = Inventory.get()
+        inventory.link_repo_path(hash_val, str(dest))
+        return [dest]
 
 
 T = TypeVar("T", bound="Node")
@@ -447,38 +641,75 @@ class NodeList(List[T], Generic[T]):
                     item.thaw(deep=True)
 
     def append(self, __object: T) -> None:
+        ## @brief Append a node to this collection after checking frozen state.
+        ## @param __object  The Node instance to append.
+        ## @return None
+
         self._check_frozen()
         super().append(__object)
 
     def extend(self, __iterable: Iterable[T]) -> None:
+        ## @brief Extend this collection with nodes from an iterable.
+        ## @param __iterable  Iterable of Node instances to add.
+        ## @return None
+
         self._check_frozen()
         super().extend(__iterable)
 
     def insert(self, __index: int, __object: T) -> None:
+        ## @brief Insert a node at a given position.
+        ## @param __index   The index at which to insert.
+        ## @param __object  The Node instance to insert.
+        ## @return None
+
         self._check_frozen()
         super().insert(__index, __object)
 
     def pop(self, __index: int = -1) -> T:
+        ## @brief Remove and return the node at the given index.
+        ## @param __index  The index to pop from (default -1, the last element).
+        ## @return The removed Node instance.
+
         self._check_frozen()
         return super().pop(__index)
 
     def remove(self, __value: T) -> None:
+        ## @brief Remove the first occurrence of a value from this collection.
+        ## @param __value  The value to remove.
+        ## @return None
+
         self._check_frozen()
         super().remove(__value)
 
     def reverse(self) -> None:
+        ## @brief Reverse the order of nodes in this collection in place.
+        ## @return None
+
         self._check_frozen()
         super().reverse()
 
     def sort(self, **kwargs) -> None:
+        ## @brief Sort this collection in place.
+        ## @param kwargs  Keyword arguments forwarded to ``list.sort()``.
+        ## @return None
+
         self._check_frozen()
         super().sort(**kwargs)
 
     def __setitem__(self, __key: int | slice, __value: T | Iterable[T]) -> None:
+        ## @brief Set an item at a given index or slice.
+        ## @param __key    The index or slice to set.
+        ## @param __value  The value (or iterable for slices) to assign.
+        ## @return None
+
         self._check_frozen()
         super().__setitem__(__key, __value)
 
     def __delitem__(self, __key: int | slice) -> None:
+        ## @brief Delete an item at a given index or slice.
+        ## @param __key  The index or slice to delete.
+        ## @return None
+
         self._check_frozen()
         super().__delitem__(__key)
 
