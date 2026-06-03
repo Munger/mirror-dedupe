@@ -2,9 +2,9 @@
 ##
 ## @brief APT-specific Distribution node with Release parsing.
 ##
-## ``Distribution`` extends ``Loadable`` and ``Schema.Distribution``,
-## adding the ability to fetch and parse a Release file to populate
-## components, architectures, fields, and hash sections.
+## ``Distribution`` extends ``Schema.Distribution``, adding the ability
+## to fetch and parse a Release file to populate components,
+## architectures, fields, and hash sections.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -15,15 +15,12 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from mirror_dedupe import schema as Schema
-from mirror_dedupe.lib.loadable import Loadable
 
 
-class Distribution(Loadable, Schema.Distribution):
-    ## @brief APT-specific Distribution node that can parse its own Release.
-    ##
-    ## Construct with ``url=`` (pointing at the Release file), an HTTP
-    ## client, and the usual Distribution fields; then call ``parse()`` to
-    ## populate its metadata from the Release body.
+class Distribution(Schema.Distribution):
+    ## @brief APT-specific Distribution node that fetches Release files, parses
+    ##        release headers (components, architectures, fields) and hash sections
+    ##        (MD5Sum, SHA1, SHA256), and populates metadata.
 
     class Metadata(Schema.Distribution.Metadata):
         ## @brief APT-specific metadata for a distribution derived from a Release.
@@ -49,20 +46,17 @@ class Distribution(Loadable, Schema.Distribution):
         self,
         *,
         url: str,
-        http_client: Any,
         upstream: str,
         name: str,
     ) -> None:
-        ## @brief Construct an APT Distribution bound to a Release URL and HTTP client.
+        ## @brief Construct an APT Distribution bound to a Release URL.
         ##
         ## Initialises the underlying ``Schema.Distribution`` with empty
-        ## Components/Architectures and wires an internal loader for the
-        ## provided URL.
+        ## Components/Architectures.
         ##
-        ## @param url          URL pointing at the Release file.
-        ## @param http_client  HTTPClient for fetching.
-        ## @param upstream     Base upstream URL.
-        ## @param name         Distribution name (e.g. ``"noble"``).
+        ## @param url      URL pointing at the Release file.
+        ## @param upstream Base upstream URL.
+        ## @param name     Distribution name (e.g. ``"noble"``).
 
         components = Schema.Components()
         architectures = Schema.Architectures()
@@ -77,12 +71,9 @@ class Distribution(Loadable, Schema.Distribution):
             metadata=None,
         )
 
-        def load(_url: str) -> str:
-            return http_client.fetch_text(_url)
-
-        self._load_text = load
         self.url = url
         self.upstream = upstream
+        self["uri"] = url
 
     def _parse_release_headers(self, data: str) -> Dict[str, Any]:
         ## @brief Extract top-level fields, components, and architectures
@@ -172,19 +163,32 @@ class Distribution(Loadable, Schema.Distribution):
 
         return sections
 
-    def parse(self) -> "Distribution":
-        ## @brief Fetch and parse this distribution's Release, populating metadata.
+    def parse(self, config: Any = None, text: str | None = None) -> "Distribution":
+        ## @brief Populate this distribution from a Release file.
+        ##
+        ## If *text* is provided (e.g. from the BFS cache), parse from it
+        ## directly instead of fetching the Release URL over HTTP.
+        ##
+        ## @param config  Optional network config dict (ipv6_ok, timeout).
+        ## @param text    Optional pre-fetched Release body text.
         ## @return This Distribution (for chaining).
 
-        text = self._load_text(self.url)
-        if not text:
-            return self
+        if text is None:
+            try:
+                text_bytes = self.fetch(config=config)
+            except RuntimeError:
+                return self  # Silently skip distributions whose Release is unreachable
+            if text_bytes is None:
+                return self
+            text = text_bytes.decode("utf-8", errors="replace")
 
+        # Parse Release file headers to extract components, architectures, fields
         parsed = self._parse_release_headers(text)
         components = parsed.get("components", Schema.Components())
         architectures = parsed.get("architectures", Schema.Architectures())
         release_fields = parsed.get("fields", {})
 
+        # Parse hash sections (MD5Sum, SHA1, SHA256) for index integrity
         hash_sections = self._parse_hash_sections(text)
 
         release_metadata = self.Metadata(
@@ -195,6 +199,7 @@ class Distribution(Loadable, Schema.Distribution):
             body=Schema.Release.Digest(text=text),
         )
 
+        # Store parsed results back into the Distribution node
         self["has_release"] = True
         self["components"] = components
         self["architectures"] = architectures

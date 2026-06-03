@@ -31,6 +31,11 @@ class Component(Node):
         name: str,
         metadata: Dict[str, Any] | None = None,
     ) -> None:
+        ## @brief Initialise a Component descriptor.
+        ##
+        ## @param name      The component label (e.g. ``"main"``).
+        ## @param metadata  Optional metadata dict.
+        ## @return None
         data: Dict[str, Any] = {"name": name}
         if metadata is not None:
             data["metadata"] = metadata

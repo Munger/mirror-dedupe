@@ -25,10 +25,12 @@ class Upstream(Node):
     ##
     ## * ``url``         — base HTTP/HTTPS URL for discovery and sync
     ## * ``sync_method`` — preferred sync method (e.g. ``"https"``, ``"http"``)
-    ## * ``ipv6_ok``     — whether IPv6 is known to work for this upstream
     ##
     ## An open-ended metadata mapping is also provided so callers can
     ## attach additional per-upstream details without changing the schema.
+    ##
+    ## IPv6 is controlled by ``NetworkConfig`` on the parent Repo, not
+    ## per-upstream.
 
     class Metadata(Node):
         ## @brief Opaque per-upstream metadata container.
@@ -38,6 +40,10 @@ class Upstream(Node):
         ## an arbitrary mapping.
 
         def __init__(self, **values: Any) -> None:  # type: ignore[override]
+            ## @brief Initialise upstream metadata from keyword values.
+            ##
+            ## @param values  Arbitrary keyword values for the metadata container.
+            ## @return None
             super().__init__(dict(values))
 
     def __init__(
@@ -45,16 +51,19 @@ class Upstream(Node):
         *,
         url: str,
         sync_method: str | None = "https",
-        ipv6_ok: bool | None = True,
         metadata: "Upstream.Metadata" | None = None,
     ) -> None:
+        ## @brief Initialise an Upstream endpoint descriptor.
+        ##
+        ## @param url          Base HTTP/HTTPS URL for discovery and sync.
+        ## @param sync_method  Preferred sync method (default ``"https"``).
+        ## @param metadata     Optional per-upstream metadata.
+        ## @return None
         data: Dict[str, Any] = {
             "url": url,
         }
         if sync_method is not None:
             data["sync_method"] = sync_method
-        if ipv6_ok is not None:
-            data["ipv6_ok"] = ipv6_ok
         if metadata is not None:
             data["metadata"] = metadata
         super().__init__(data)

@@ -34,6 +34,12 @@ class NetworkConfig(Node):
         timeout: float | None = None,
         user_agent: str | None = None,
     ) -> None:
+        ## @brief Initialise a NetworkConfig descriptor.
+        ##
+        ## @param ipv6_ok    Whether IPv6 is enabled (default ``True``).
+        ## @param timeout    Optional connection timeout in seconds.
+        ## @param user_agent Optional HTTP User-Agent string.
+        ## @return None
         data: Dict[str, Any] = {"ipv6_ok": ipv6_ok}
         if timeout is not None:
             data["timeout"] = timeout

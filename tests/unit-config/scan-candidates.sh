@@ -3,113 +3,152 @@
 # scan-candidates.sh : Local-only scanner tests for mirror-dedupe
 #
 # This script is NOT installed or shipped. It is intended for interactive
-# experimentation only. It uses the tests/unit-config tree as its
-# configuration directory and writes configs into:
-#   tests/unit-config/repos-available/
-#
-# No data is synced by this script; it only runs mirror-dedupe-scan.
-# You can then run mirror-dedupe --config tests/unit-config --test NAME
-# to validate each generated config.
-#
-# Many repositories will auto-detect their GPG key. For those that do not,
-# you can update the commands below to add:
-#   --gpg-key-url  ...
-#   --gpg-key-path ...
-# once you have identified the correct locations.
+# experimentation only.
 #
 # Usage:
-#   From the repo root:
-#     bash tests/unit-config/scan-candidates.sh
+#   bash tests/unit-config/scan-candidates.sh --root <path>
 #
-
+# The --root argument specifies a test filesystem root. The script creates
+# the following tree under <root>:
+#   <root>/etc/mirror-dedupe/mirror-dedupe.conf
+#   <root>/etc/mirror-dedupe/repos-available/
+#   <root>/etc/mirror-dedupe/repos-enabled/
+#   <root>/mirror/repos/
+#   <root>/mirror/pool/
+#
+# Candidate definitions are read from scan_candidates/*.yaml adjacent to
+# this script. No data is synced by this script; it only runs
+# mirror-dedupe-scan.
+#
 set -uo pipefail
 
-CONFIG_DIR="tests/unit-config"
-CANDIDATES_FILE="${CONFIG_DIR}/candidates.conf"
+ROOT=""
 
-# Scanner command (can be overridden). By default we invoke the scan
-# module via the current Python, which is typically the project's venv.
-SCAN_CMD="${SCAN_CMD:-python -m mirror_dedupe.scan}"
+usage() {
+  cat <<EOF >&2
+Usage: $(basename "$0") --root <path>
 
-scan_line() {
-  local line="$1"
+Required:
+  --root <path>   Test filesystem root (created if it does not exist)
 
-  # Strip leading/trailing whitespace
-  line="${line##+([[:space:]])}"
-  line="${line%%+([[:space:]])}"
-
-  # Skip empty or comment lines
-  [[ -z "${line}" ]] && return 0
-  [[ "${line}" =~ ^[[:space:]]*# ]] && return 0
-
-  # Split into fields
-  local -a fields=()
-  read -r -a fields <<<"${line}"
-  local count=${#fields[@]}
-  if (( count < 3 )); then
-    echo "Skipping malformed line (need at least name dest upstream): ${line}" >&2
-    return 0
-  fi
-
-  local name dest
-  name=${fields[0]}
-  dest=${fields[1]}
-
-  # All remaining fields are passed through as scanner flags. Upstreams
-  # are expected to be supplied explicitly via -U/--upstream/--upstreams
-  # in this flags portion rather than as a positional argument.
-  local -a extras=()
-  if (( count > 2 )); then
-    extras=(${fields[@]:2})
-  fi
-
-  # The new scanner no longer supports --gpg-key-path; strip any
-  # occurrences from the extras list while preserving order of the
-  # remaining arguments.
-  if (( ${#extras[@]} > 0 )); then
-    local -a filtered=()
-    local skip_next=0
-    for arg in "${extras[@]}"; do
-      if (( skip_next )); then
-        skip_next=0
-        continue
-      fi
-      if [[ "${arg}" == "--gpg-key-path" ]]; then
-        skip_next=1
-        continue
-      fi
-      filtered+=("${arg}")
-    done
-    extras=("${filtered[@]}")
-  fi
-
-  echo "=== Scanning ${name} ===" >&2
-  if ! ${SCAN_CMD} \
-    --config "${CONFIG_DIR}" \
-    --name "${name}" \
-    --dest "${dest}" \
-    "${extras[@]}"; then
-    echo "ERROR: scan for ${name} failed (see above); continuing with next candidate" >&2
-  fi
-  echo "" >&2
+Candidate definitions are loaded from scan_candidates/*.yaml relative
+to the script's location.
+EOF
+  exit 1
 }
 
-if [[ ! -f "${CANDIDATES_FILE}" ]]; then
-  echo "ERROR: Candidates file not found: ${CANDIDATES_FILE}" >&2
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --root)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --root requires an argument" >&2
+        usage
+      fi
+      ROOT="$2"
+      shift 2
+      ;;
+    *)
+      echo "ERROR: Unknown option: $1" >&2
+      usage
+      ;;
+  esac
+done
+
+if [[ -z "${ROOT}" ]]; then
+  echo "ERROR: --root is required" >&2
+  usage
+fi
+
+ROOT="$(cd "$ROOT" 2>/dev/null && pwd -P || echo "${ROOT}")"
+
+CONFIG_DIR="${ROOT}/etc/mirror-dedupe"
+REPOS_DIR="${ROOT}/mirror/repos"
+POOL_DIR="${ROOT}/mirror/pool"
+REPOS_AVAILABLE="${CONFIG_DIR}/repos-available"
+REPOS_ENABLED="${CONFIG_DIR}/repos-enabled"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+CANDIDATES_DIR="${SCRIPT_DIR}/scan_candidates"
+
+mkdir -p "${CONFIG_DIR}" "${REPOS_DIR}" "${POOL_DIR}" "${REPOS_AVAILABLE}" "${REPOS_ENABLED}"
+
+if [[ ! -f "${CONFIG_DIR}/mirror-dedupe.conf" ]]; then
+  cat > "${CONFIG_DIR}/mirror-dedupe.conf" <<CONF
+repo_root: ${REPOS_DIR}
+
+pool_root: ${POOL_DIR}
+
+architectures: ['amd64']
+
+collapse_distributions: false
+
+buffer_size: 1048576
+
+parallel_downloads: 10
+
+curl_timeout: 900
+
+max_retries: 3
+
+progress_interval: 1000
+CONF
+  echo "Created ${CONFIG_DIR}/mirror-dedupe.conf" >&2
+fi
+
+SCAN_CMD="${SCAN_CMD:-python3 -m mirror_dedupe.scan}"
+
+yaml_to_args() {
+  local file="$1"
+  python3 -c "
+import sys, yaml
+with open('${file}') as f:
+    data = yaml.safe_load(f)
+if not data:
+    sys.exit(0)
+args = ['--name', data['name'], '--dest', data['dest']]
+for u in data.get('upstreams', []):
+    args.extend(['-U', u])
+for r in data.get('releases', []):
+    args.extend(['--release', r])
+comps = data.get('components')
+if comps:
+    args.extend(['--components', ' '.join(comps)])
+gpg = data.get('gpg_key_url')
+if gpg:
+    args.extend(['--gpg-key-url', gpg])
+print(' '.join(args))
+"
+}
+
+if [[ ! -d "${CANDIDATES_DIR}" ]]; then
+  echo "ERROR: Candidates directory not found: ${CANDIDATES_DIR}" >&2
   exit 1
 fi
 
-while IFS= read -r line; do
-  scan_line "${line}"
-done < "${CANDIDATES_FILE}"
+shopt -s nullglob
+for yaml_file in "${CANDIDATES_DIR}"/*.yaml; do
+  name="$(basename "${yaml_file}" .yaml)"
+  echo "=== Scanning ${name} ===" >&2
+
+  extra_args="$(yaml_to_args "${yaml_file}")"
+  if [[ -z "${extra_args}" ]]; then
+    echo "WARNING: ${yaml_file} produced no args; skipping" >&2
+    continue
+  fi
+
+  if ! ${SCAN_CMD} --config "${CONFIG_DIR}" ${extra_args}; then
+    echo "ERROR: scan for ${name} failed (see above); continuing with next candidate" >&2
+  fi
+  echo "" >&2
+done
 
 cat <<EOF >&2
 All candidate scans completed.
 
-Next steps for each NAME above:
-  mirror-dedupe --config tests/unit-config --test NAME
+Config directory: ${CONFIG_DIR}
+Output:          ${REPOS_AVAILABLE}/
+Link:            ${REPOS_ENABLED}/  (create symlinks here to activate)
 
-If a repository is missing a GPG key in the generated config, identify the
-correct key URL/path and re-run mirror-dedupe-scan for that NAME with
-  --gpg-key-url / --gpg-key-path, then re-test.
+Next steps for each NAME above:
+  mirror-dedupe --config ${CONFIG_DIR} --test NAME
 EOF

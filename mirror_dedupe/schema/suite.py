@@ -22,6 +22,10 @@ class Suite(Node):
     _restore_via_payload = True
 
     def __init__(self, *, name: str) -> None:
+        ## @brief Initialise a Suite descriptor.
+        ##
+        ## @param name  The suite label (e.g. ``"noble"``).
+        ## @return None
         data: Dict[str, Any] = {"name": name}
         super().__init__(data)
 

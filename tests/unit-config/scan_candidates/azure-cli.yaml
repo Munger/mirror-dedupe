@@ -1,0 +1,8 @@
+# azure-cli repository
+# Auto-generated from candidates.conf
+---
+name: azure-cli
+dest: azure-cli
+upstreams:
+- https://packages.microsoft.com/repos/azure-cli/
+gpg_key_url: https://packages.microsoft.com/keys/microsoft.asc

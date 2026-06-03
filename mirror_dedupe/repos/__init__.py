@@ -14,6 +14,5 @@ from __future__ import annotations
 
 from mirror_dedupe.schema import Repo
 from mirror_dedupe.repos.apt.apt import Apt  # noqa: F401  # register Apt
-from mirror_dedupe.repos.apt_vendor import AptVendor  # noqa: F401  # register AptVendor
 
-__all__ = ["Repo", "Apt", "AptVendor"]
+__all__ = ["Repo", "Apt"]

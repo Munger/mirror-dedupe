@@ -1,0 +1,8 @@
+# gitlab-ce repository
+# Auto-generated from candidates.conf
+---
+name: gitlab-ce
+dest: gitlab-ce
+upstreams:
+- https://packages.gitlab.com/gitlab/gitlab-ce/debian/
+gpg_key_url: https://packages.gitlab.com/gitlab/gitlab-ce/gpgkey

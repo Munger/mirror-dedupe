@@ -73,6 +73,7 @@ class Inventory:
         ## @param h      SHA-256 hash string.
         ## @param inode  Filesystem inode of the pool file.
         ## @param links  Hardlink count (optional; read from stat if omitted).
+        ## @return None
 
         entry = self.inodes.setdefault(inode, {"hash": h, "links": links or 0})
         entry["hash"] = h
@@ -84,6 +85,7 @@ class Inventory:
         ## @brief Record that a repo path links (or should link) to a hash.
         ## @param h          SHA-256 hash.
         ## @param repo_path  Absolute path of the repo file.
+        ## @return None
 
         repo_inode = self.pool_files.get(h)
         if repo_inode is None:
@@ -93,6 +95,7 @@ class Inventory:
     def remove_repo_path(self, repo_path: str) -> None:
         ## @brief Remove a repo path from bookkeeping (e.g., deletion).
         ## @param repo_path  Absolute path to remove.
+        ## @return None
 
         self.repo_files.pop(repo_path, None)
 
@@ -123,6 +126,7 @@ class Inventory:
         ##
         ## @param h          SHA-256 hash.
         ## @param repo_path  Target path for the hardlink.
+        ## @return None
         ## @raise FileNotFoundError  If the pool hash file is missing.
         ## @raise FileExistsError    If *repo_path* exists with different content.
 
@@ -153,6 +157,7 @@ class Inventory:
         ## itself), the pool file is also removed.
         ##
         ## @param repo_path  Target path to unlink.
+        ## @return None
 
         repo_p = Path(repo_path)
         repo_inode = self.repo_files.get(str(repo_p))
@@ -190,6 +195,7 @@ class Inventory:
         ## @param h          SHA-256 hash.
         ## @param repo_path  Source file to link into the pool.
         ## @param verify     Whether to verify the hash before linking (default True).
+        ## @return None
         ## @raise FileNotFoundError  If the source file is missing.
         ## @raise ValueError        If the hash does not match (when *verify* is True).
 

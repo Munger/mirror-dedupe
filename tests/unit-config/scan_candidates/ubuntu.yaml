@@ -1,0 +1,10 @@
+# ubuntu repository
+# Auto-generated from candidates.conf
+---
+name: ubuntu
+dest: ubuntu
+upstreams:
+- https://archive.ubuntu.com/ubuntu
+releases:
+- noble
+gpg_key_url: http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg

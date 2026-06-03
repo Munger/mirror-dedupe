@@ -1,0 +1,9 @@
+# grafana repository
+# Auto-generated from candidates.conf
+---
+name: grafana
+dest: grafana
+upstreams:
+- https://apt.grafana.com
+- https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/
+gpg_key_url: https://apt.grafana.com/gpg.key

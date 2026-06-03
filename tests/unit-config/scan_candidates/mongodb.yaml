@@ -1,0 +1,9 @@
+# mongodb repository
+# Auto-generated from candidates.conf
+---
+name: mongodb
+dest: mongodb
+upstreams:
+- https://repo.mongodb.org/apt/ubuntu
+- https://mirror.hi.no/mongodb/apt/ubuntu/
+gpg_key_url: https://pgp.mongodb.com/server-7.0.asc

@@ -32,6 +32,11 @@ class Architecture(Node):
         name: str,
         metadata: Dict[str, Any] | None = None,
     ) -> None:
+        ## @brief Initialise an Architecture descriptor.
+        ##
+        ## @param name      The architecture label (e.g. ``"amd64"``).
+        ## @param metadata  Optional metadata dict.
+        ## @return None
         data: Dict[str, Any] = {"name": name}
         if metadata is not None:
             data["metadata"] = metadata

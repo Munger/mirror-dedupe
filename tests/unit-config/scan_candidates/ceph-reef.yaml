@@ -1,0 +1,8 @@
+# ceph-reef repository
+# Auto-generated from candidates.conf
+---
+name: ceph-reef
+dest: ceph/reef
+upstreams:
+- https://download.ceph.com/debian-reef/
+gpg_key_url: https://download.ceph.com/keys/release.asc

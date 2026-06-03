@@ -1,0 +1,8 @@
+# corretto repository
+# Auto-generated from candidates.conf
+---
+name: corretto
+dest: corretto
+upstreams:
+- https://apt.corretto.aws
+gpg_key_url: https://apt.corretto.aws/corretto.key

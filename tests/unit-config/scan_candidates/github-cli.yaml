@@ -1,0 +1,8 @@
+# github-cli repository
+# Auto-generated from candidates.conf
+---
+name: github-cli
+dest: github-cli
+upstreams:
+- https://cli.github.com/packages
+gpg_key_url: https://cli.github.com/packages/githubcli-archive-keyring.gpg

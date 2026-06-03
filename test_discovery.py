@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""End-to-end HTTP discovery test using the library HTTPDiscovery.
-
-This script exercises the mirror_dedupe.lib HTTP discovery stack against a
-handful of real upstream URLs and prints the discovered distributions,
-components, and architectures, followed by a full JSON dump of the
-RepoInfo. It is intentionally simple and is not part of the live scanner
-codebase.
-"""
+## @file test_discovery.py
+##
+## @brief Integration tests for HTTP-based repository discovery.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
 from typing import List
 import json
@@ -16,12 +15,13 @@ from typing import List
 from urllib.parse import urlparse
 
 from mirror_dedupe import schema as Schema
-from mirror_dedupe.lib.network_client import NetworkClient
+from mirror_dedupe.schema.node import Node
 from mirror_dedupe.schema.repo import Repo, Repos
 from mirror_dedupe.repos.apt.apt import Apt
 
 def test_http_discovery() -> None:
-    """Test HTTP discovery using HTTPDiscovery + Repo.Content."""
+    ## @brief Test HTTP discovery using schema-backed Repo parsing.
+    ## @return None
 
     test_urls: List[str] = [
         "http://archive.ubuntu.com/ubuntu",
@@ -31,14 +31,9 @@ def test_http_discovery() -> None:
         "https://repo.zabbix.com/zabbix/8.0/release/ubuntu",
     ]
 
-    # Global IPv6/IPv4 connectivity probe against a known dual-stack host.
-    ipv6_probe, ipv4_probe = NetworkClient.test_remote("one.one.one.one", 53)
-    print(
-        "Global connectivity probe one.one.one.one:53 -> "
-        f"ipv6_ok={ipv6_probe}, ipv4_ok={ipv4_probe}",
-        file=sys.stderr,
-    )
-    global_ipv6_ok = ipv6_probe
+    # IPv6 is handled transparently by Node._fetch_url() with automatic
+    # --ipv4 retry on failure. No global probe needed.
+    global_ipv6_ok = True
 
     # Collect all Repo objects in case we still want an aggregate view.
     repos = Repos()
@@ -55,17 +50,13 @@ def test_http_discovery() -> None:
         snapshot_path = output_dir / f"{host}.json"
 
         if snapshot_path.exists():
-            # Fast path: restore an Apt Repo (including HTTP client wiring)
-            # from the existing JSON snapshot.
+            # Fast path: restore an Apt Repo from the existing JSON snapshot.
             with snapshot_path.open("r", encoding="utf-8") as f:
                 snapshot = json.load(f)
             repo = Apt.restore(snapshot)
         else:
-            # Slow path: construct a Repo bound to this URL, seeding ipv6_ok
-            # from the global connectivity probe and pinning repo_type to
-            # "apt" so that the Apt repo-type implementation is always used
-            # while we stabilise the data model. Repo.from_url() owns the
-            # HTTP client and parser wiring.
+            # Slow path: construct a Repo bound to this URL, pinning
+            # repo_type to "apt" so the Apt implementation is always used.
             repo_obj = Repo.from_url(
                 url,
                 ipv6_ok=global_ipv6_ok,

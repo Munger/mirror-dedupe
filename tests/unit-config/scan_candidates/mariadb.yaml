@@ -1,0 +1,8 @@
+# mariadb repository
+# Auto-generated from candidates.conf
+---
+name: mariadb
+dest: mariadb
+upstreams:
+- https://mirror.mariadb.org/repo/10.11/ubuntu
+gpg_key_url: https://mirror.mariadb.org/PublicKey

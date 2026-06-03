@@ -1,0 +1,8 @@
+# dovecot repository
+# Auto-generated from candidates.conf
+---
+name: dovecot
+dest: dovecot
+upstreams:
+- https://repo.dovecot.org/ce-2.4-latest/ubuntu/
+gpg_key_url: https://repo.dovecot.org/DOVECOT-REPO-GPG

@@ -4,8 +4,11 @@
 ## @brief CLI entry point and management operations for mirror-dedupe.
 ##
 ## Provides the ``main()`` entry point with subcommands for listing,
-## activating, deactivating, testing, and deleting mirrors, plus the
-## core mirror-sync + deduplication orchestration pipeline.
+## activating, deactivating, testing, and deleting mirrors.
+##
+## Sync operations (``--mirror``, ``--dedupe-only``, default mode) are
+## defined here for interface documentation but are not yet wired — they
+## will be connected to the schema-based sync pipeline in a future version.
 ##
 ## @copyright Copyright (c) 2025-2026 Tim Hosking
 ## @see https://github.com/munger
@@ -14,24 +17,14 @@
 import os
 import sys
 import subprocess
-import atexit
-import signal
 import argparse
 import random
 import shutil
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from collections import defaultdict
 
 import yaml
 
 from .config import Config, DEFAULT_CONFIG_DIR
-from .utils import (acquire_lock, release_lock, signal_handler,
-                    get_disk_usage, format_bytes)
-from .dedupe import expand_distributions
-from .orchestrate import (run_orchestrator_mode, sync_mirrors, collect_files,
-                          analyse_deduplication, check_existing_files,
-                          process_files, cleanup_mirrors, print_final_summary)
 
 
 def main():
@@ -149,6 +142,10 @@ def main():
             mirror_cfg = yaml.safe_load(f) or {}
 
         upstream = mirror_cfg.get('upstream')
+        if not upstream:
+            upstreams = mirror_cfg.get('upstreams', [])
+            if upstreams:
+                upstream = upstreams[0].get('url', '') if isinstance(upstreams[0], dict) else ''
         dest = mirror_cfg.get('dest')
         architectures = mirror_cfg.get('architectures', [])
         distributions = mirror_cfg.get('distributions', [])
@@ -271,86 +268,14 @@ def main():
         print("Mirror delete completed.")
         sys.exit(0)
 
-    if args.dedupe_only:
-        if not acquire_lock('dedupe'):
-            sys.exit(1)
-        atexit.register(release_lock)
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-    elif args.mirror:
-        if not acquire_lock(args.mirror):
-            sys.exit(1)
-        atexit.register(release_lock)
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-
-    config_dir = args.config_dir or DEFAULT_CONFIG_DIR
-    config = Config.load(config_dir)
-    mirrors = config.get('mirrors', [])
-
-    if not mirrors:
-        print("No mirrors defined in configuration")
-        sys.exit(1)
-
-    print(f"\n{'='*60}")
-    print(f"Loaded {len(mirrors)} mirror(s) from configuration")
-    print(f"{'='*60}")
-
-    if not args.mirror and not args.dedupe_only:
-        run_orchestrator_mode(mirrors, config_dir, args.dry_run)
-
-    if args.mirror:
-        filtered_mirrors = [m for m in mirrors if m['name'] == args.mirror]
-        if not filtered_mirrors:
-            print(f"ERROR: Mirror '{args.mirror}' not found in configuration")
-            sys.exit(1)
-        mirrors = filtered_mirrors
-        print(f"\n{'='*60}")
-        print(f"SINGLE MIRROR MODE: Processing '{args.mirror}'")
-        print(f"{'='*60}")
-
-    if args.dedupe_only:
-        print(f"\n{'='*60}")
-        print("DEDUPE-ONLY MODE: Skipping mirror sync")
-        print(f"{'='*60}")
-    else:
-        sync_mirrors(mirrors, args.dry_run)
-
-    if cfg_main.no_hardlinks:
-        print(f"\n{'='*60}")
-        print("NO_HARDLINKS enabled in configuration - skipping deduplication phase")
-        print("mirror-dedupe will behave as a plain mirror (no global hardlinking)")
-        print(f"{'='*60}")
-        print("Mirror sync completed.")
-        sys.exit(0)
-
-    global_files = collect_files(mirrors)
-
-    hash_to_files, unique_files = analyse_deduplication(global_files)
-
-    check_existing_files(hash_to_files)
-
-    print(f"\n{'='*60}")
-    print("Initial disk usage")
-    print(f"{'='*60}")
-    first_dest = mirrors[0]['dest']
-    total, initial_used, free = get_disk_usage(first_dest)
-    print(f"Overall mirror filesystem: Used: {format_bytes(initial_used)}, Free: {format_bytes(free)}")
-
-    if args.mirror:
-        print(f"\n{'='*60}")
-        print(f"Single mirror mode: Deduplication will be handled separately")
-        print(f"{'='*60}")
-
-    downloaded, hardlinked, skipped = process_files(hash_to_files, unique_files, config, args.dry_run)
-
-    if args.mirror:
-        print(f"\nMirror '{args.mirror}' sync completed successfully!")
-        sys.exit(0)
-
-    cleanup_mirrors(mirrors, global_files, args.dry_run)
-
-    print_final_summary(mirrors, downloaded, hardlinked, skipped, initial_used)
+    # Sync operations (--mirror, --dedupe-only, default mode) are not yet
+    # wired — they will be connected to the schema-based sync pipeline
+    # (Repo.sync() / Apt.sync()) in a future version.
+    print("Mirror sync is not yet implemented in this version.", file=sys.stderr)
+    print("Use `mirror-dedupe-scan` to discover repositories and", file=sys.stderr)
+    print("run `--list`/`--activate`/`--deactivate`/`--test`/`--delete`", file=sys.stderr)
+    print("to manage existing configurations.", file=sys.stderr)
+    sys.exit(0)
 
 
 if __name__ == '__main__':

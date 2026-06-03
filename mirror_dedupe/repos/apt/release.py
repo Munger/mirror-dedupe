@@ -2,9 +2,10 @@
 ##
 ## @brief APT-specific Release node with index parsing.
 ##
-## ``Release`` extends ``Loadable`` and ``Schema.Release``, adding the
-## ability to fetch a Release file and parse its hash sections into
-## ``Schema.Index`` entries for Packages and Sources.
+## ``Release`` extends ``Schema.Release``, adding the ability to fetch a
+## Release file and parse its hash sections into ``Schema.Index`` entries
+## for Packages and Sources.  URI and content operations are inherited
+## from ``Node``.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -15,10 +16,11 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from mirror_dedupe import schema as Schema
-from mirror_dedupe.lib.loadable import Loadable
+from mirror_dedupe.lib.html_helpers import build_url
+from .index import AptIndex
 
 
-class Release(Loadable, Schema.Release):
+class Release(Schema.Release):
     ## @brief APT-specific Release node that can parse its own indices.
 
     class IndexMetadata(Schema.Index.Metadata):
@@ -43,20 +45,17 @@ class Release(Loadable, Schema.Release):
         self,
         *,
         url: str,
-        http_client: Any,
         upstream: str,
         suite: str,
     ) -> None:
-        ## @brief Construct an APT Release bound to a URL and HTTP client.
+        ## @brief Construct an APT Release bound to a URL.
         ##
         ## Initialises the underlying ``Schema.Release`` with APT-specific
-        ## layout defaults and wires an internal loader so callers can
-        ## simply use ``Release(url=..., http_client=..., ...).parse()``.
+        ## layout defaults.
         ##
-        ## @param url          URL of the Release file.
-        ## @param http_client  HTTPClient for fetching.
-        ## @param upstream     Base upstream URL.
-        ## @param suite        Logical suite name (e.g. ``"noble"``).
+        ## @param url      URL of the Release file.
+        ## @param upstream Base upstream URL.
+        ## @param suite    Logical suite name (e.g. ``"noble"``).
 
         pocket: str | None = None
         relative_dir = f"dists/{suite}"
@@ -73,22 +72,12 @@ class Release(Loadable, Schema.Release):
             kind=kind,
             signature_extension=None,
             digest=None,
+            uri=url,
         )
 
-        def load(_url: str) -> str:
-            return http_client.fetch_text(_url)
-
-        self._load_text = load
         self.url = url
         self.upstream = upstream
         self.suite = suite
-
-    @classmethod
-    def _make_url_loader(cls, url: str, http_client: Any, **_: Any):
-        def load(_url: str) -> str:
-            return http_client.fetch_text(_url)
-
-        return load
 
     def _parse_hash_section(self, data: str, section: str) -> List[Dict[str, Any]]:
         ## @brief Parse a single hash section (``MD5Sum``, ``SHA1``, ``SHA256``)
@@ -136,19 +125,29 @@ class Release(Loadable, Schema.Release):
 
         return entries
 
-    def parse(self) -> "Release":
+    def parse(self, config: Any = None, text: str | None = None) -> "Release":
         ## @brief Populate indices for this Release from its hash sections.
+        ##
+        ## If *text* is provided (e.g. from Distribution metadata), skip the
+        ## HTTP fetch and parse directly from the cached body.
+        ##
+        ## @param config  Optional network config dict (ipv6_ok, timeout).
+        ## @param text    Optional pre-fetched Release body text.
         ## @return This Release (for chaining).
 
-        text = self._load_text(self.url)
-        if not text:
-            return self
+        if text is None:
+            text_bytes = self.fetch(config=config)
+            if text_bytes is None:
+                raise RuntimeError(f"No content for Release at {self.get('uri', 'unknown')}")
+            text = text_bytes.decode("utf-8", errors="replace")
 
         indices = Schema.Indices()
 
+        # Iterate all three hash sections to maximise cross-repo compatibility
         for section in ("MD5Sum", "SHA1", "SHA256"):
             for entry in self._parse_hash_section(text, section):
                 path = entry["path"]
+                # Classify index by path pattern for downstream processing
                 if "Packages" in path:
                     kind = "packages"
                 elif "Sources" in path:
@@ -163,13 +162,18 @@ class Release(Loadable, Schema.Release):
                     size=entry["size"],
                 )
 
+                index_uri = build_url(self.upstream, self.relative_dir, path)
+
                 indices.append(
-                    Schema.Index(
+                    AptIndex(
                         path=path,
                         kind=kind,
                         metadata=metadata,
+                        uri=index_uri,
                     )
                 )
 
         self.indices = indices
         return self
+
+

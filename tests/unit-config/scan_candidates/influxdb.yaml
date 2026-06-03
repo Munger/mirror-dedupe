@@ -1,0 +1,8 @@
+# influxdb repository
+# Auto-generated from candidates.conf
+---
+name: influxdb
+dest: influxdb
+upstreams:
+- https://repos.influxdata.com/debian
+gpg_key_url: https://repos.influxdata.com/influxdata-archive_compat.key
