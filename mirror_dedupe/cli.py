@@ -893,19 +893,15 @@ def main():
         if not _pin_confirm(desc, args.force):
             sys.exit(1)
 
-        # Snapshot current data
+        # Atomic rename: mv repo -> Snapshots/<name>/<ts>/
         snap_base = Path(cfg_main.repo_root) / "Snapshots"
         snap_dir = snap_base / name
         ts = _timestamp()
         target = snap_dir / ts
         os.makedirs(str(snap_dir), exist_ok=True)
-        log(f"Snapshotting '{name}' from {data_path} -> {target}", level="INFO")
-        subprocess.run(["cp", "-al", data_path, str(target)], check=True)
-        print(f"Created snapshot: {target}")
-
-        # Remove data directory
-        shutil.rmtree(data_path)
-        print(f"Removed data directory: {data_path}")
+        log(f"Reinitialising '{name}': {data_path} -> {target}", level="INFO")
+        os.rename(data_path, str(target))
+        print(f"Moved data to snapshot: {target}")
 
         # Leave activation status untouched
         enabled_link = repos_enabled / f"{name}.conf"
