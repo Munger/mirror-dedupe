@@ -76,31 +76,31 @@ class Index(Node):
             return md.get("checksum", "")
         return ""
 
-    def _parse_packages(self, text: str, uri: str = "") -> "Packages":
-        ## @brief Virtual: parse *text* into ``Package`` children.
+    def stream(self, data: Optional[bytes] = None):
+        ## @brief Yield Package children from this Index's content.
         ##
-        ## Subclasses override this with format-specific index parsing.
-        ## The base implementation returns an empty ``Packages`` so that
-        ## non-package indices (e.g. Sources) are harmless.
+        ## The base implementation returns an empty iterator (no child
+        ## Package nodes).  Subclasses that parse Package stanzas
+        ## override this method.
         ##
-        ## @param text  Decompressed index text.
-        ## @param uri   The URI of this index (for building package URIs).
-        ## @return A ``Packages`` NodeList.
-        return Packages()
+        ## @param data  Optional bytes to parse (scan mode).
+        ## @yield Package child nodes.
+
+        self.packages = Packages()
+        return iter([])
 
     def parse(self, **kwargs: Any) -> "Index":  # type: ignore[override]
-        ## @brief Fetch index content, decompress, and parse into child Package nodes.
+        ## @brief Fetch index content, stream-parse into child Package nodes.
         ##
         ## Only processes indices whose ``kind`` is ``"packages"`` or
         ## ``"sources"`` — Contents, Translation, and other metadata files
         ## are skipped (they are already enumeratively downloaded by the
         ## Release's hash-section entries and do not need stanza parsing).
         ##
-        ## In scan mode, ``fetch()`` performs an in-memory HTTP download.
+        ## In scan mode, ``fetch()`` performs an in-memory HTTP download
+        ## and passes the bytes to ``stream(data=data)``.
         ## In sync mode, ``fetch()`` synchronises through the pool via
-        ## ``self.read()``.  Fetch failures (e.g. upstream 404 for an
-        ## uncompressed variant) are logged and the node is returned
-        ## without children.
+        ## ``self.read()`` and then reads from disk.
         ##
         ## @param config  Optional configuration dict passed to ``fetch()``.
         ## @return This Index (with ``packages`` populated).
@@ -116,17 +116,7 @@ class Index(Node):
             return self
         if not data:
             return self
-        path = self.get("path", "")
-        if path.endswith(".gz"):
-            import gzip
-            text = gzip.decompress(data).decode("utf-8", errors="replace")
-        elif path.endswith(".xz"):
-            import lzma
-            text = lzma.decompress(data).decode("utf-8", errors="replace")
-        else:
-            text = data.decode("utf-8", errors="replace")
-        uri = self.get("uri", "")
-        self.packages = self._parse_packages(text, uri=uri)
+        list(self.stream(data=data))
         self._cache = None
         return self
 
@@ -143,6 +133,29 @@ class Index(Node):
             ## @param fields  Arbitrary keyword fields for the metadata envelope.
             ## @return None
             super().__init__(dict(fields))
+
+
+class VariantIndex(Index):
+    ## @brief Non-primary compression variant (e.g. ``.bz2``, secondary ``.gz``).
+    ##
+    ## A ``VariantIndex`` represents an alternative compression of a
+    ## primary index file (e.g. ``Packages.bz2`` when ``Packages.xz`` is
+    ## the primary).  It has ``_children = []`` so ``_tree_iter()`` does
+    ## not descend into Package children — only the primary variant holds
+    ## them.
+    ##
+    ## ``stream()`` is a no-op — variant indices are downloaded but not
+    ## parsed for child packages.
+
+    _children: list[str] = []
+
+    def stream(self, data: Optional[bytes] = None):
+        ## @brief No-op stream for non-primary variants.
+        ## @param data  Ignored.
+        ## @return Empty iterator.
+
+        self.packages = Packages()
+        return iter([])
 
 
 class Indices(NodeList[Index]):

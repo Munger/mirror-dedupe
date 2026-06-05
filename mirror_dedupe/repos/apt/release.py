@@ -134,18 +134,142 @@ class Release(Schema.Release):
 
         return entries
 
+    def stream(self, data: Optional[bytes] = None):
+        ## @brief Yield Index children by parsing the Release file.
+        ##
+        ## Reads the Release body (from *data* bytes or disk), parses hash
+        ## sections, groups by base path, creates one ``AptIndex`` per
+        ## primary compression variant and ``VariantIndex`` for the rest.
+        ##
+        ## Sets ``self.indices`` to the full ``Indices`` NodeList.
+        ##
+        ## @param data  Optional bytes to parse (scan mode).
+        ## @yield Index child nodes.
+
+        raw = self._open_binary(data)
+        try:
+            text = raw.read().decode("utf-8", errors="replace")
+        finally:
+            raw.close()
+
+        arch_filter: Optional[List[str]] = getattr(self, "_arch_filter", None)
+        comp_filter: Optional[List[str]] = getattr(self, "_comp_filter", None)
+        dest = self._dest
+
+        # Collect all hash-section entries, excluding non-Packages/Sources
+        entries: List[Dict[str, Any]] = []
+        for section in ("MD5Sum", "SHA1", "SHA256"):
+            for entry in self._parse_hash_section(text, section):
+                entry_path = entry["path"]
+                if "Packages" not in entry_path and "Sources" not in entry_path:
+                    continue
+                entry["_kind"] = "packages" if "Packages" in entry_path else "sources"
+
+                if arch_filter is not None or comp_filter is not None:
+                    parts = entry_path.split("/")
+                    if len(parts) >= 2:
+                        comp = parts[0]
+                        arch_part = parts[1]
+                        arch = arch_part[7:] if arch_part.startswith("binary-") else arch_part
+                        if arch_filter is not None and arch not in arch_filter:
+                            continue
+                        if comp_filter is not None and comp not in comp_filter:
+                            continue
+                entries.append(entry)
+
+        # Deduplicate by path — later sections (SHA256) overwrite MD5/SHA1
+        seen_by_path: Dict[str, Dict[str, Any]] = {}
+        for entry in entries:
+            seen_by_path[entry["path"]] = entry
+        entries = list(seen_by_path.values())
+
+        # Group by base path (strip compression extensions), pick primary variant
+        by_base: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in entries:
+            ep = entry["path"]
+            base = ep
+            for ext in (".gz", ".bz2", ".xz", ".lzma", ".lz4", ".zst"):
+                if base.endswith(ext):
+                    base = base[: -len(ext)]
+                    break
+            by_base.setdefault(base, []).append(entry)
+
+        indices = Schema.Indices()
+        seen_paths: set = set()
+
+        for base, group in by_base.items():
+            # Prefer better compression: xz > bz2 > gz > uncompressed
+            def _rank(entry: Dict[str, Any]) -> int:
+                p = entry["path"]
+                if p.endswith(".xz"):
+                    return 0
+                if p.endswith(".bz2"):
+                    return 1
+                if p.endswith(".gz"):
+                    return 2
+                return 3
+            group.sort(key=_rank)
+            primary = group[0]
+            variants = group[1:]
+
+            kind = primary["_kind"]
+            entry_path = primary["path"]
+            if entry_path in seen_paths:
+                continue
+            seen_paths.add(entry_path)
+
+            metadata = self.IndexMetadata(
+                suite=self.suite,
+                algorithm=primary["algorithm"],
+                checksum=primary["checksum"],
+                size=primary["size"],
+            )
+            index_uri = build_url(self.upstream, self.relative_dir, entry_path)
+            index_path = f"{dest}/dists/{self.suite}/{entry_path}" if dest else f"dists/{self.suite}/{entry_path}"
+
+            primary_index = AptIndex(
+                path=index_path,
+                kind=kind,
+                metadata=metadata,
+                uri=index_uri,
+                dest=dest,
+                size=primary["size"],
+            )
+            indices.append(primary_index)
+            yield primary_index
+
+            # Variants get VariantIndex — downloaded but not parsed for children
+            for variant in variants:
+                v_path = variant["path"]
+                if v_path in seen_paths:
+                    continue
+                seen_paths.add(v_path)
+                v_metadata = self.IndexMetadata(
+                    suite=self.suite,
+                    algorithm=variant["algorithm"],
+                    checksum=variant["checksum"],
+                    size=variant["size"],
+                )
+                v_uri = build_url(self.upstream, self.relative_dir, v_path)
+                v_index_path = f"{dest}/dists/{self.suite}/{v_path}" if dest else f"dists/{self.suite}/{v_path}"
+                v_index = Schema.VariantIndex(
+                    path=v_index_path,
+                    kind=kind,
+                    metadata=v_metadata,
+                    uri=v_uri,
+                    size=variant["size"],
+                )
+                indices.append(v_index)
+                yield v_index
+
+        self.indices = indices
+
     def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
-        ## @brief Parse the Release body into child Index nodes.
+        ## @brief Fetch the Release body and stream-parse into Index children.
         ##
-        ## The Release body is fetched via ``fetch()`` (returned from
-        ## ``_cache`` pre-cached by the parent Distribution).
-        ## Hash sections are parsed into ``self.indices``.  Index nodes
-        ## are created in memory only — sync to disk happens later via
-        ## the sync pipeline.
-        ##
-        ## Architecture/component filters are read from
-        ## ``self._arch_filter`` / ``self._comp_filter``, set by the
-        ## parent Distribution during its own ``on_parse()``.
+        ## Calls ``fetch()`` to retrieve the Release body (from cache,
+        ## HTTP, or disk depending on mode), then ``list(self.stream(data))``
+        ## to materialise the Index tree.
         ##
         ## @param config  Optional network config dict (ipv6_ok, timeout).
         ## @return None
@@ -153,62 +277,6 @@ class Release(Schema.Release):
         text_bytes = self.fetch(uri=self.get("uri"), config=config)
         if text_bytes is None:
             raise RuntimeError(f"No content for Release at {self.get('uri', 'unknown')}")
-        text = text_bytes.decode("utf-8", errors="replace")
-
-        arch_filter: Optional[List[str]] = getattr(self, "_arch_filter", None)
-        comp_filter: Optional[List[str]] = getattr(self, "_comp_filter", None)
-
-        indices = Schema.Indices()
-        seen: Dict[str, Any] = {}
-        dest = self._dest
-
-        # Iterate all three hash sections to maximise cross-repo compatibility.
-        # Deduplicate by path — SHA256 entries (iterated last) overwrite MD5/SHA1.
-        for section in ("MD5Sum", "SHA1", "SHA256"):
-            for entry in self._parse_hash_section(text, section):
-                entry_path = entry["path"]
-                # Classify index by path pattern for downstream processing
-                if "Packages" in entry_path:
-                    kind = "packages"
-                elif "Sources" in entry_path:
-                    kind = "sources"
-                else:
-                    kind = "other"
-
-                # Apply architecture/component filters when provided
-                if arch_filter is not None or comp_filter is not None:
-                    parts = entry_path.split("/")
-                    if len(parts) >= 2:
-                        comp = parts[0]
-                        arch_part = parts[1]
-                        if arch_part.startswith("binary-"):
-                            arch = arch_part[7:]
-                        else:
-                            arch = arch_part
-                        if arch_filter is not None and arch not in arch_filter:
-                            continue
-                        if comp_filter is not None and comp not in comp_filter:
-                            continue
-
-                metadata = self.IndexMetadata(
-                    suite=self.suite,
-                    algorithm=entry["algorithm"],
-                    checksum=entry["checksum"],
-                    size=entry["size"],
-                )
-
-                index_uri = build_url(self.upstream, self.relative_dir, entry_path)
-                index_path = f"{dest}/dists/{self.suite}/{entry_path}" if dest else f"dists/{self.suite}/{entry_path}"
-
-                seen[entry_path] = AptIndex(
-                    path=index_path,
-                    kind=kind,
-                    metadata=metadata,
-                    uri=index_uri,
-                    dest=dest,
-                    size=entry["size"],
-                )
-
-        self.indices = Schema.Indices(seen.values())
+        list(self.stream(data=text_bytes))
 
 

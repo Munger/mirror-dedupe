@@ -20,6 +20,7 @@ import json
 import os
 import platform
 import signal
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -355,9 +356,11 @@ class Repo(Node):
         ## @brief Build the schema tree from config and download content.
         ##
         ## Constructs the distribution tree from known config (no upstream
-        ## probing), recurses to populate Release/Index metadata (each
-        ## node fetching content through the pool when ``_sync_mode`` is
-        ## active), and downloads all files via ``_sync_content()``.
+        ## probing), then drives ``_sync_content()`` as a dynamic work
+        ## queue: known nodes are submitted to *pool* first; when one
+        ## completes, ``stream()`` is called to materialise children,
+        ## which are submitted in turn.  This lets the download and
+        ## discovery phases overlap.
         ##
         ## All nodes know their full repo-root-relative ``path`` from
         ## construction time — no deferred path patching is needed.
@@ -380,7 +383,6 @@ class Repo(Node):
         cfg._sync_mode = True
         try:
             self._build_sync_tree(config=config)
-            self.recurse(config=config)
             if pool is not None:
                 self._top_stats: Dict[str, Any] = {}
                 t0 = time.monotonic()
@@ -399,13 +401,17 @@ class Repo(Node):
         pool: concurrent.futures.ThreadPoolExecutor,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        ## @brief Submit all syncable nodes to the repo's download pool.
+        ## @brief Dynamic work queue: download, stream-discover, repeat.
         ##
-        ## Iterates ``_tree_iter()`` and submits every node that has both
-        ## ``uri`` and ``path`` to *pool* for parallel download via
-        ## ``Node.sync()``.  Each leaf node pushes ``node["stats"]``
-        ## (hit/miss/bytes_tx).  Errors are totalled and stored as
-        ## ``self._top_stats["errors"]``.
+        ## Submits the known syncable nodes from the initial tree
+        ## (populated by ``_build_sync_tree()``) to *pool* for parallel
+        ## download.  As each future completes, ``stream()`` is called on
+        ## the node to materialise its children (e.g. Release → Indices,
+        ## Index → Packages).  Newly discovered children are submitted
+        ## to *pool* in turn, allowing download and discovery to overlap.
+        ##
+        ## Each leaf node pushes ``node["stats"]`` (hit/miss/bytes_tx).
+        ## Errors are totalled and stored as ``self._top_stats["errors"]``.
         ##
         ## @param pool    Shared ``ThreadPoolExecutor`` for parallel downloads.
         ## @param config  Optional configuration dict forwarded to each
@@ -419,17 +425,25 @@ class Repo(Node):
                 futures[future] = node
 
         errors = 0
-        for future in concurrent.futures.as_completed(futures):
-            node = futures[future]
-            try:
-                future.result()
-            except Exception as e:
-                errors += 1
-                if "stats" not in node:
-                    node["stats"] = {"hit": 0, "miss": 0, "bytes_tx": 0}
-                node["stats"]["error"] = str(e)
-                from ..lib.log import log
-                log(f"  {e}")
+        while futures:
+            done, _ = concurrent.futures.wait(
+                futures, return_when=concurrent.futures.FIRST_COMPLETED
+            )
+            for future in done:
+                node = futures.pop(future)
+                try:
+                    future.result()
+                    for child in node.stream():
+                        if child.get("uri") and child.get("path"):
+                            child_future = pool.submit(child.sync, config=config)
+                            futures[child_future] = child
+                except Exception as e:
+                    errors += 1
+                    if "stats" not in node:
+                        node["stats"] = {"hit": 0, "miss": 0, "bytes_tx": 0}
+                    node["stats"]["error"] = str(e)
+                    from ..lib.log import log
+                    log(f"  {e}")
 
         self._top_stats["errors"] = errors
 
@@ -878,6 +892,15 @@ class Repos(NodeList[Repo]):
         finally:
             signal.signal(signal.SIGINT, original_sigint)
 
+    @staticmethod
+    def _make_worker_init(name: str):
+        _data: Dict[str, Any] = {"counter": 0, "lock": threading.Lock()}
+        def _init() -> None:
+            with _data["lock"]:
+                _data["counter"] += 1
+                threading.current_thread().name = f"{name} {_data['counter']}"
+        return _init
+
     def _sync_one(self, repo: Repo, cfg: "Config") -> None:
         ## @brief Sync a single repo: metadata, packages, stats.
         ##
@@ -895,7 +918,10 @@ class Repos(NodeList[Repo]):
             if config is None:
                 config = {"ipv6_ok": True}
                 repo["params"] = config
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=workers,
+                initializer=self._make_worker_init(name),
+            ) as pool:
                 repo.sync(pool=pool, config=config)
 
     def _write_ndjson(self, repo: Repo) -> None:

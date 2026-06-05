@@ -236,15 +236,22 @@ class Config:
     def list_repo_names(self) -> List[str]:
         ## @brief Return sorted list of all known repo names.
         ##
-        ## Combines entries from ``repos-enabled/*.conf`` (by filename stem)
-        ## and the ``additional_repos`` section in ``mirror-dedupe.conf``.
+        ## Combines entries from ``repos-available/*.conf``,
+        ## ``repos-enabled/*.conf`` (by filename stem) and the
+        ## ``additional_repos`` section in ``mirror-dedupe.conf``.
         ##
         ## @return Sorted list of repo names.
 
         names: set[str] = set()
 
+        # Repos-available config files
+        repa = Path(self._config_dir) / "repos-available"
+        if repa.exists():
+            for f in repa.glob("*.conf"):
+                names.add(f.stem)
+
         # Repos-enabled config files
-        repd = Path(self._config_dir) / "repos-enabled"  # type: ignore[arg-type]
+        repd = Path(self._config_dir) / "repos-enabled"
         if repd.exists():
             for f in repd.glob("*.conf"):
                 names.add(f.stem)

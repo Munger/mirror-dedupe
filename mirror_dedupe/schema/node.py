@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import threading
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Generic, Iterable, Optional, Tuple, Type, TypeVar, Callable
 
 from ..lib.http_download import HTTPFetch, HTTPDownload, kill_active_subprocesses
+from ..lib.log import log
 
 _staging_locks: dict[str, threading.Lock] = {}
 _staging_locks_lock = threading.Lock()
@@ -588,6 +590,82 @@ class Node(dict):
         ## @return The hex digest string, or an empty string when not available.
 
         return self.get("hash", "")
+
+    def _open_binary(self, data: Optional[bytes] = None):
+        ## @brief Return a binary file-like object for this node's content.
+        ##
+        ## If *data* is provided, wraps it in ``BytesIO`` (scan mode).
+        ## Otherwise opens ``repo_root / path`` in ``rb`` mode (sync mode).
+        ##
+        ## Callers are responsible for closing the returned handle.
+        ##
+        ## @param data  Optional bytes to read from (scan mode).
+        ## @return A binary file-like object.
+
+        if data is not None:
+            return io.BytesIO(data)
+        from mirror_dedupe.config import Config
+        cfg = Config.load()
+        return open(Path(cfg.repo_root) / self["path"], "rb")
+
+    def _iter_lines(self, data: Optional[bytes] = None):
+        ## @brief Yield decoded text lines from this node's content.
+        ##
+        ## Handles ``.gz``, ``.xz``, and plain text transparently via
+        ## the file extension in ``self["path"]``.  Each yielded line
+        ## has trailing ``\\n`` and ``\\r`` stripped.
+        ##
+        ## @param data  Optional bytes to read from (scan mode).
+        ## @yield Decoded text lines.
+
+        raw = self._open_binary(data)
+        path: str = self.get("path", "")
+        try:
+            if path.endswith(".gz"):
+                import gzip
+                f = gzip.GzipFile(fileobj=raw)
+                for line in f:
+                    yield line.decode("utf-8", errors="replace").rstrip("\n\r")
+            elif path.endswith(".xz"):
+                import lzma
+                decomp = lzma.LZMADecompressor()
+                buf = b""
+                while True:
+                    chunk = raw.read(65536)
+                    if not chunk:
+                        break
+                    buf += decomp.decompress(chunk)
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        yield line.decode("utf-8", errors="replace").rstrip("\r")
+                if buf:
+                    yield buf.decode("utf-8", errors="replace").rstrip("\n\r")
+            elif path.endswith(".bz2"):
+                import bz2
+                text = bz2.decompress(raw.read()).decode("utf-8", errors="replace")
+                for line in text.splitlines():
+                    yield line.rstrip("\n\r")
+            else:
+                for line in raw:
+                    yield line.decode("utf-8", errors="replace").rstrip("\n\r")
+        finally:
+            raw.close()
+
+    def stream(self, data: Optional[bytes] = None):
+        ## @brief Yield child nodes discovered by reading this node's content.
+        ##
+        ## The default implementation is a no-op (empty iterator).
+        ## Subclasses override to parse their file format and yield child
+        ## nodes as a side effect of materialising the subtree.
+        ##
+        ## *stream()* is always a local read — never touches the network.
+        ## In scan mode *data* receives bytes from an HTTP fetch.
+        ## In sync mode *data* is ``None`` and the method reads from disk.
+        ##
+        ## @param data  Optional bytes to parse (scan mode).
+        ## @yield Child Node instances.
+
+        return iter([])
 
     def fetch(self, uri: str, *, config: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
         ## @brief Fetch *uri* content into memory.

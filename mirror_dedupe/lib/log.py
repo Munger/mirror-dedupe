@@ -56,15 +56,16 @@ class _CustomFormatter(logging.Formatter):
         if not msg:
             return ""
         lvl = record.levelname
+        tag = f"{record.threadName}: ".ljust(16) if record.threadName and record.threadName != "MainThread" else ""
         if lvl == "INFO":
-            return f"  {msg}"
+            return f"  {tag}{msg}"
         if lvl == "WARNING":
-            return f"  [WARN] {msg}"
+            return f"  [WARN] {tag}{msg}"
         if lvl == "ERROR":
-            return f"  [ERROR] {msg}"
+            return f"  [ERROR] {tag}{msg}"
         if lvl == "DEBUG":
-            return f"  [DEBUG] {msg}"
-        return f"  [{lvl}] {msg}"
+            return f"  [DEBUG] {tag}{msg}"
+        return f"  [{lvl}] {tag}{msg}"
 
 
 def get_logger(name: str | None = None) -> logging.Logger:

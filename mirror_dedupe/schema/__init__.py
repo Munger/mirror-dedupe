@@ -14,7 +14,7 @@ from .architecture import Architecture, Architectures
 from .component import Component, Components
 from .suite import Suite, Suites
 from .distribution import Distribution, Distributions
-from .index import Index, Indices
+from .index import Index, VariantIndex, Indices
 from .package import Package, Packages
 from .release import Release, Releases
 from .vars import Vars
