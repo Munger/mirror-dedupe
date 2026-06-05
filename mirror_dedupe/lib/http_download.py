@@ -161,6 +161,8 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
             f"Failed to hash {output_str}: neither sha256sum nor shasum available"
         )
 
+    _range_retried = False
+
     for attempt in range(1 + retries):
         rc, out, err = _run_subprocess(
             ["curl", "-s", "-L", "-C", "-", "-w", "%{http_code}", "-o", output_str, uri],
@@ -174,6 +176,11 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
                             os.unlink(output_str)
                         except OSError:
                             pass
+                        if http_code == 416 and not _range_retried and attempt < retries:
+                            _range_retried = True
+                            delay = 2 ** attempt
+                            time.sleep(delay)
+                            continue
                         reason = _HTTP_REASONS.get(http_code, "")
                         raise RuntimeError(
                             f"FAILED {uri} - {reason} ({http_code})" if reason

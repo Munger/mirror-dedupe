@@ -767,10 +767,9 @@ def main():
 
     if args.deactivate:
         name = args.deactivate
-        if repos_enabled.exists():
-            enabled_configs = sorted(f.stem for f in repos_enabled.glob("*.conf"))
-            if enabled_configs:
-                name = _resolve_name_or_index(name, enabled_configs, "mirror")
+        candidates = cfg_main.list_repo_names()
+        if candidates:
+            name = _resolve_name_or_index(name, candidates, "mirror")
         dst = repos_enabled / f"{name}.conf"
 
         if not dst.exists():

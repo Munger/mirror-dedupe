@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.schema.package import Package, Packages
@@ -30,55 +30,87 @@ class AptIndex(Schema.Index):
         super().__init__(**kwargs, size=size)
         self._dest = dest
 
-    def _parse_packages(self, text: str, uri: str = "") -> Packages:
-        ## @brief Parse RFC822 stanzas into Package children.
+    def stream(self, data: Optional[bytes] = None):
+        ## @brief Yield Package children by parsing RFC822 stanzas.
         ##
-        ## Skips non-package/sources indices, parses ``Filename``,
-        ## ``SHA256``, and ``Size`` from each stanza, and constructs
-        ## ``Package`` nodes with a full download URI and repo-root-relative
-        ## path (prefixed with ``self._dest``).
+        ## Reads this Index file (from *data* bytes or disk) and yields
+        ## ``Package`` nodes for each stanza that contains a valid
+        ## ``Filename``, ``SHA256``, and ``Size`` field.
         ##
-        ## @param text  Decompressed Packages text.
-        ## @param uri   The URI of this index.
-        ## @return A ``Packages`` NodeList.
+        ## ``self.packages`` is set to the full ``Packages`` NodeList so
+        ## that ``_tree_iter()`` can walk the children for stats/sweep.
+        ##
+        ## @param data  Optional bytes to parse (scan mode).
+        ## @yield Package child nodes.
 
         kind = self.get("kind")
         if kind not in ("packages", "sources"):
-            return Packages()
+            self.packages = Packages()
+            return iter([])
 
         dest = self._dest
+        uri = self.get("uri", "")
         base = uri.split("/dists/", 1)[0] if "/dists/" in uri else ""
         packages = Packages()
 
-        for stanza_text in text.split("\n\n"):
-            stanza_text = stanza_text.strip()
-            if not stanza_text:
-                continue
+        stanza_lines: List[str] = []
+        for line in self._iter_lines(data):
+            if not line and stanza_lines:
+                stanza: Dict[str, str] = {}
+                for sl in stanza_lines:
+                    if sl and sl[0] in (" ", "\t"):
+                        continue
+                    if ":" in sl:
+                        k, v = sl.split(":", 1)
+                        stanza[k.strip()] = v.strip()
 
-            stanza: Dict[str, str] = {}
-            for line in stanza_text.split("\n"):
-                if line and line[0] in (" ", "\t"):
+                filename = stanza.get("Filename")
+                sha256_val = stanza.get("SHA256")
+                size_str = stanza.get("Size")
+
+                if filename and sha256_val and size_str:
+                    try:
+                        size_int = int(size_str)
+                    except ValueError:
+                        stanza_lines = []
+                        continue
+                    pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
+                    pkg_path = f"{dest}/{filename}" if dest else filename
+                    packages.append(Package(
+                        path=pkg_path,
+                        hash=sha256_val,
+                        size=size_int,
+                        uri=pkg_uri,
+                    ))
+                stanza_lines = []
+            elif line:
+                stanza_lines.append(line)
+
+        if stanza_lines:
+            stanza = {}
+            for sl in stanza_lines:
+                if sl and sl[0] in (" ", "\t"):
                     continue
-                if ":" in line:
-                    k, v = line.split(":", 1)
+                if ":" in sl:
+                    k, v = sl.split(":", 1)
                     stanza[k.strip()] = v.strip()
-
             filename = stanza.get("Filename")
-            sha256 = stanza.get("SHA256")
-            size = stanza.get("Size")
-
-            if filename and sha256 and size:
+            sha256_val = stanza.get("SHA256")
+            size_str = stanza.get("Size")
+            if filename and sha256_val and size_str:
                 try:
-                    size_int = int(size)
+                    size_int = int(size_str)
                 except ValueError:
-                    continue
-                pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
-                pkg_path = f"{dest}/{filename}" if dest else filename
-                packages.append(Package(
-                    path=pkg_path,
-                    hash=sha256,
-                    size=size_int,
-                    uri=pkg_uri,
-                ))
+                    pass
+                else:
+                    pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
+                    pkg_path = f"{dest}/{filename}" if dest else filename
+                    packages.append(Package(
+                        path=pkg_path,
+                        hash=sha256_val,
+                        size=size_int,
+                        uri=pkg_uri,
+                    ))
 
-        return packages
+        self.packages = packages
+        return iter(packages)

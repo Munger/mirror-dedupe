@@ -100,9 +100,10 @@ class Apt(Schema.Repo):
     def _build_sync_tree(self, *, config: Optional[Dict[str, Any]] = None) -> None:
         ## @brief Construct the distribution tree from ``self.params``.
         ##
-        ## Reads suite names from ``self.params["suites"]``, creates shallow
-        ## ``Distribution`` nodes for each.  Architecture and component
-        ## filters are stored for child nodes to consume during parse.
+        ## Reads suite names from ``self.params["suites"]``, creates
+        ## ``Distribution`` nodes with their child ``Release`` nodes
+        ## directly (no upstream probing — the Release will stream-parse
+        ## into Index children after its download completes).
         ##
         ## @param config  Optional configuration dict (unused, read from
         ##                ``self.params`` instead).
@@ -124,12 +125,25 @@ class Apt(Schema.Repo):
         self.distributions = Schema.Distributions()
         self.suites = Schema.Suites()
         from .distribution import Distribution
+        from .release import Release as AptRelease
+        dest = self.get("dest", "")
         for suite_name in suites:
             url = build_url(self.get("uri") or "", "dists", suite_name, "Release")
             dist = Distribution(
                 url=url, upstream=self.get("uri") or "", name=suite_name,
             )
             dist._repo = self
+
+            release = AptRelease(
+                url=url,
+                upstream=self.get("uri") or "",
+                suite=suite_name,
+                dest=dest,
+            )
+            release._arch_filter = self._arch_filter
+            release._comp_filter = self._comp_filter
+            dist.release = release
+
             self.distributions.append(dist)
             self.suites.append(Schema.Suite(name=suite_name))
 
