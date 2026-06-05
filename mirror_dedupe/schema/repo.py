@@ -15,10 +15,19 @@
 from __future__ import annotations
 
 import concurrent.futures
+import fcntl
+import json
 import os
+import platform
+import signal
+import time
+import traceback
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, ClassVar, Dict, List, Optional, Type, TypeVar
+from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, TypeVar
+from datetime import datetime, timezone
+
+import yaml
 
 from .node import Node, NodeList
 from ..schema.architecture import Architecture, Architectures
@@ -29,6 +38,8 @@ from ..schema.index import Index, Indices
 from ..schema.release import Release, Releases
 from ..schema.vars import Vars
 from ..schema.upstream import Upstream, Upstreams
+from ..lib.log import log
+from ..lib.http_download import kill_active_subprocesses
 
 
 @dataclass
@@ -141,8 +152,17 @@ class Repo(Node):
     @classmethod
     def all_types(cls) -> List[Type["Repo"]]:
         ## @brief Return the list of registered Repo classes.
+        ##
+        ## Lazily imports known repo-type submodules so they register
+        ## themselves via ``Repo.register()``.
+        ##
         ## @return A copy of the registered types list.
 
+        if not cls._registry:
+            try:
+                from ..repos.apt import Apt as _  # noqa: F401
+            except ImportError:
+                pass
         return list(cls._registry)
 
     # --- detection --------------------------------------------------------
@@ -345,6 +365,11 @@ class Repo(Node):
         ## When *pool* is None the tree is built but no content is
         ## transferred — useful for testing or dry-run.
         ##
+        ## When *pool* is set, every leaf node pushes its own stats to
+        ## ``node["stats"]`` during ``sync()``.  ``Repo.stats()``
+        ## aggregates these on demand.  Per-repo NDJSON and summary
+        ## output are produced by the parent ``Repos`` container.
+        ##
         ## @param config  Optional configuration dict (suites, filters, etc.).
         ## @param pool    Shared ``ThreadPoolExecutor`` for parallel downloads.
         ##                When ``None``, content sync and stale sweep are
@@ -357,7 +382,14 @@ class Repo(Node):
             self._build_sync_tree(config=config)
             self.recurse(config=config)
             if pool is not None:
+                self._top_stats: Dict[str, Any] = {}
+                t0 = time.monotonic()
+                ipv6_before = config.get("ipv6_ok", True) if config else True
                 self._sync_content(pool, config=config)
+                self._top_stats["elapsed"] = time.monotonic() - t0
+                self._top_stats["ipv6_fallback"] = (
+                    config.get("ipv6_ok") is False and ipv6_before is not False
+                ) if config else False
                 self._sweep_stale()
         finally:
             cfg._sync_mode = False
@@ -366,17 +398,19 @@ class Repo(Node):
         self,
         pool: concurrent.futures.ThreadPoolExecutor,
         config: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, int]:
+    ) -> None:
         ## @brief Submit all syncable nodes to the repo's download pool.
         ##
         ## Iterates ``_tree_iter()`` and submits every node that has both
         ## ``uri`` and ``path`` to *pool* for parallel download via
-        ## ``Node.sync()``.  Stores statistics in ``_sync_stats``.
+        ## ``Node.sync()``.  Each leaf node pushes ``node["stats"]``
+        ## (hit/miss/bytes_tx).  Errors are totalled and stored as
+        ## ``self._top_stats["errors"]``.
         ##
         ## @param pool    Shared ``ThreadPoolExecutor`` for parallel downloads.
         ## @param config  Optional configuration dict forwarded to each
         ##                ``Node.sync()`` call (e.g. ``ipv6_ok``, ``timeout``).
-        ## @return Dict with keys ``ok``, ``skipped``, ``errors``.
+        ## @return None
 
         futures: Dict[concurrent.futures.Future, Node] = {}
         for node in self._tree_iter():
@@ -384,25 +418,20 @@ class Repo(Node):
                 future = pool.submit(node.sync, config=config)
                 futures[future] = node
 
-        stats: Dict[str, int] = {"ok": 0, "skipped": 0, "errors": 0}
+        errors = 0
         for future in concurrent.futures.as_completed(futures):
             node = futures[future]
             try:
-                result = future.result()
-                if result:
-                    stats["ok"] += 1
-                else:
-                    stats["skipped"] += 1
+                future.result()
             except Exception as e:
-                stats["errors"] += 1
+                errors += 1
+                if "stats" not in node:
+                    node["stats"] = {"hit": 0, "miss": 0, "bytes_tx": 0}
+                node["stats"]["error"] = str(e)
                 from ..lib.log import log
-                log(
-                    f"  Sync failed for {node.get('uri', 'unknown')}: {e}",
-                    level="ERROR",
-                )
+                log(f"  {e}")
 
-        self._sync_stats = stats
-        return stats
+        self._top_stats["errors"] = errors
 
     def _sweep_stale(self) -> None:
         ## @brief Remove files in the repo destination not in the tree.
@@ -450,6 +479,129 @@ class Repo(Node):
             from ..lib.log import log
             log(f"Repo sweep: removed {removed} stale files from '{dest}'", level="INFO")
 
+    def stats(self) -> Dict[str, Any]:
+        ## @brief Aggregate per-node stats from the full tree into a single dict.
+        ##
+        ## Walks ``_tree_iter()`` summing leaf counter stats (hit, miss,
+        ## bytes_tx), counting files, computing total/deduped bytes from
+        ## node metadata, and merging top-level values from
+        ## ``_top_stats`` (errors, elapsed, ipv6_fallback).
+        ##
+        ## @return Stats dict with keys: file_count, total_bytes,
+        ##         deduped_bytes, bytes_transferred, pool_hits,
+        ##         pool_misses, errors, elapsed, ipv6_fallback.
+
+        file_count = 0
+        total_bytes = 0
+        deduped_bytes = 0
+        bytes_transferred = 0
+        pool_hits = 0
+        pool_misses = 0
+        seen_hashes: set[str] = set()
+
+        for node in self._tree_iter():
+            s = node.get("stats")
+            if s is not None:
+                pool_hits += s.get("hit", 0)
+                pool_misses += s.get("miss", 0)
+                bytes_transferred += s.get("bytes_tx", 0)
+
+            if node.get("uri") and node.get("path"):
+                sz = node.get("size", 0) or 0
+                h = node.get("hash", "") or ""
+                file_count += 1
+                total_bytes += sz
+                if h and h not in seen_hashes:
+                    seen_hashes.add(h)
+                    deduped_bytes += sz
+
+        top = getattr(self, "_top_stats", {}) or {}
+        return {
+            "file_count": file_count,
+            "total_bytes": total_bytes,
+            "deduped_bytes": deduped_bytes,
+            "bytes_transferred": bytes_transferred,
+            "pool_hits": pool_hits,
+            "pool_misses": pool_misses,
+            "errors": top.get("errors", 0),
+            "elapsed": top.get("elapsed", 0.0),
+            "ipv6_fallback": top.get("ipv6_fallback", False),
+        }
+
+    @classmethod
+    def from_config(cls, mirror_cfg: Dict[str, Any], cfg: "Config") -> "Repo":
+        ## @brief Build a Repo from a YAML config dict.
+        ##
+        ## Resolves the concrete Repo subclass, attaches upstreams,
+        ## suites, architectures, components, and network settings
+        ## from *mirror_cfg* to the returned instance.
+        ##
+        ## @param mirror_cfg  Parsed YAML config for one enabled repo.
+        ## @param cfg         Global ``Config`` singleton (for defaults).
+        ## @return A ``Repo`` instance ready for ``sync()``.
+
+        from .upstream import Upstream, Upstreams
+
+        name = mirror_cfg.get("name", "unknown")
+        upstreams_raw = mirror_cfg.get("upstreams") or []
+        if not upstreams_raw:
+            upstream = mirror_cfg.get("upstream", "")
+            upstreams_raw = [upstream] if upstream else []
+
+        ordered: List[str] = []
+        seen: set[str] = set()
+        upstream_objs = Upstreams()
+        for u in upstreams_raw:
+            if isinstance(u, dict):
+                url = u.get("url", "")
+                sync_method = u.get("sync_method")
+            else:
+                url = str(u) if u else ""
+                sync_method = None
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            ordered.append(url)
+            upstream_objs.append(Upstream(url=url, sync_method=sync_method))
+
+        releases = mirror_cfg.get("releases") or mirror_cfg.get("distributions") or []
+
+        rt_cls, _ = cls.get_type_for_urls(
+            {"repo_type": mirror_cfg.get("repo_type", "unknown")}, ordered
+        )
+        if rt_cls is None:
+            rt_cls = cls
+
+        repo = rt_cls(
+            name=name,
+            upstreams=upstream_objs,
+            upstream_idx=0,
+            repo_type=getattr(rt_cls, "REPO_TYPE", "unknown"),
+        )
+        repo["dest"] = mirror_cfg.get("dest", name)
+        if upstream_objs:
+            repo["uri"] = upstream_objs[0].url
+
+        params: Dict[str, Any] = {}
+        if releases:
+            params["suites"] = releases
+        arches = mirror_cfg.get("architectures")
+        if arches:
+            params["architectures"] = arches if isinstance(arches, list) else [arches]
+        comps = mirror_cfg.get("components")
+        if comps:
+            params["components"] = comps if isinstance(comps, list) else [comps]
+
+        mirror_params = mirror_cfg.get("params") or {}
+        ipv6_enabled = mirror_params.get("ipv6_enabled")
+        if ipv6_enabled is not None:
+            params["ipv6_ok"] = ipv6_enabled
+
+        if params:
+            repo["params"] = params
+
+        return repo
+
     def _build_sync_tree(self, *, config: Optional[Dict[str, Any]] = None) -> None:
         ## @brief Construct the distribution tree from known config.
         ##
@@ -495,10 +647,505 @@ class Repo(Node):
         return repo
 
 
-class Repos(NodeList[Repo]):
-    ## @brief Container for Repo instances.
+class RepoLock:
+    ## @brief Per-repo file lock to prevent concurrent syncs.
+
+    FLOCK_DIR = ".mirror-dedupe"
+    LOCK_FILE = "sync.lock"
+
+    def __init__(self, repo_root: str, repo_name: str) -> None:
+        ## @brief Initialise a RepoLock for *repo_name* under *repo_root*.
+        ##
+        ## @param repo_root  Root directory for all repos.
+        ## @param repo_name  Name of the repo to lock.
+        ## @return None
+        self.path = Path(repo_root) / self.FLOCK_DIR / repo_name / self.LOCK_FILE
+        self.fd: int | None = None
+
+    def acquire(self, timeout: float = 600) -> None:
+        ## @brief Acquire an exclusive lock, waiting up to *timeout* seconds.
+        ##
+        ## @param timeout  Maximum seconds to wait for the lock.
+        ## @raises TimeoutError  If the lock cannot be acquired within *timeout*.
+        ## @return None
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(str(self.path), os.O_CREAT | os.O_RDWR)
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"Could not acquire lock for {self.path} "
+                        f"after {timeout}s"
+                    )
+                time.sleep(1)
+
+    def release(self) -> None:
+        ## @brief Release the lock and close the file descriptor.
+        ##
+        ## @return None
+        if self.fd is not None:
+            try:
+                fcntl.flock(self.fd, fcntl.LOCK_UN)
+            finally:
+                os.close(self.fd)
+                self.fd = None
+
+    def __enter__(self) -> "RepoLock":
+        ## @brief Context manager entry: acquire the lock.
+        ## @return This RepoLock instance.
+        self.acquire()
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        ## @brief Context manager exit: release the lock.
+        ## @param *args  Standard exception tuple (unused).
+        ## @return None
+        self.release()
+
+
+def _pool_sweep(pool_root: str) -> None:
+    ## @brief Remove pool files with no hardlinks (``st_nlink == 1``).
     ##
-    ## This is just a plain list of ``Repo`` nodes.  Any schema or
-    ## metadata about the collection itself lives either on the individual
-    ## ``Repo`` instances or on the owner of this list, not on this class.
-    pass
+    ## Purges orphaned content from the pool that isn't referenced by any
+    ## repo destination.  Designed to be called once after all repos have
+    ## completed their sync, so that in-progress downloads don't trigger
+    ## false sweeps.  Empty subdirectories within ``by-hash/SHA256/`` are
+    ## also removed.
+    ##
+    ## @param pool_root  Root path of the content-addressed pool.
+    ## @return None
+    by_hash = Path(pool_root) / "by-hash" / "SHA256"
+    if not by_hash.exists():
+        return
+
+    removed = 0
+    for dirpath, dirnames, filenames in os.walk(str(by_hash), topdown=False):
+        for name in filenames:
+            path = Path(dirpath) / name
+            try:
+                if path.stat().st_nlink == 1:
+                    path.unlink()
+                    removed += 1
+            except OSError:
+                continue
+
+    for dirpath, dirnames, filenames in os.walk(str(by_hash), topdown=False):
+        try:
+            dp = Path(dirpath)
+            if dp != by_hash and not any(dp.iterdir()):
+                dp.rmdir()
+        except OSError:
+            continue
+
+    if removed:
+        log(f"Pool sweep: removed {removed} orphaned files (st_nlink == 1)", level="INFO")
+
+
+class Repos(NodeList[Repo]):
+    ## @brief Container for Repo instances with high-level operations.
+    ##
+    ## Owns ``sync_all()``, ``analyse_all()``, NDJSON output, and the
+    ## cross-repo summary table.  ``session_ts`` is set once at the start
+    ## of each batch and stamped into every NDJSON record.
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        ## @brief Initialise Repos with per-object state.
+        ##
+        ## @param *args    Positional args for ``NodeList.__init__``.
+        ## @param **kwargs  Keyword args for ``NodeList.__init__``.
+        ## @return None
+        super().__init__(*args, **kwargs)
+        self._stats: Dict[str, Any] = {}
+
+    @property
+    def session_ts(self) -> str:
+        ## @brief Session timestamp for the current batch.
+        ##
+        ## Set once by ``sync_all()`` and used in every per-repo NDJSON
+        ## record so all repos in the same run share the same timestamp.
+        ##
+        ## @return ISO-8601 timestamp string.
+        return self._stats.get("session_ts", "")
+
+    @session_ts.setter
+    def session_ts(self, value: str) -> None:
+        ## @brief Set the session timestamp.
+        ## @param value  ISO-8601 timestamp string.
+        ## @return None
+        self._stats["session_ts"] = value
+
+    @classmethod
+    def from_names(
+        cls,
+        repo_names: List[str],
+        config_dir: Optional[str] = None,
+    ) -> "Repos":
+        ## @brief Build a ``Repos`` instance from a list of enabled repo names.
+        ##
+        ## Loads ``{config_dir}/repos-enabled/{name}.conf`` for each name,
+        ## parses with ``yaml.safe_load``, and delegates to
+        ## ``Repo.from_config()``.
+        ##
+        ## @param repo_names  List of repo names (``*.conf`` filenames without
+        ##                    the extension).
+        ## @param config_dir  Override path to the configuration directory.
+        ## @return A ``Repos`` instance containing the resolved repos.
+
+        from ..config import Config, DEFAULT_CONFIG_DIR
+
+        cfg = Config.load(config_dir)
+        repos_dir = Path(config_dir or cfg._config_dir or DEFAULT_CONFIG_DIR) / "repos-enabled"
+
+        instances = cls()
+        for name in repo_names:
+            path = repos_dir / f"{name}.conf"
+            if not path.exists():
+                log(f"Repo config not found: {path}", level="WARN")
+                continue
+            with open(path) as f:
+                mirror_cfg = yaml.safe_load(f) or {}
+                mirror_cfg["name"] = name
+                instances.append(Repo.from_config(mirror_cfg, cfg))
+
+        return instances
+
+    def sync_all(self, config_dir: Optional[str] = None) -> None:
+        ## @brief Sync all repos in this collection.
+        ##
+        ## Sets ``session_ts``, registers a SIGINT handler that kills
+        ## tracked subprocesses, dispatches each repo to its own per-repo
+        ## ``ThreadPoolExecutor`` via ``_sync_one()``, runs
+        ## ``_pool_sweep()`` after all repos complete, writes per-repo
+        ## NDJSON, and prints a cross-repo summary table.
+        ##
+        ## @param config_dir  Override path to the configuration directory
+        ##                    (passed to ``from_names`` if used externally).
+        ## @return None
+
+        from ..config import Config
+
+        cfg = Config.load(config_dir)
+
+        if not self:
+            log("No repos to sync", level="WARN")
+            return
+
+        max_concurrent = cfg.max_concurrent_syncs
+
+        def _sigint_handler(signum: int, frame: Any) -> None:
+            ## @brief SIGINT handler: kill tracked subprocesses and restore default.
+            ## @param signum  Signal number.
+            ## @param frame   Current stack frame.
+            ## @return None
+            kill_active_subprocesses()
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+
+        self.session_ts = datetime.now(timezone.utc).isoformat()
+        t0 = time.monotonic()
+        original_sigint = signal.signal(signal.SIGINT, _sigint_handler)
+
+        try:
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=min(max_concurrent, len(self))
+            ) as repo_pool:
+                futures = {}
+                for repo in self:
+                    name = repo.get("name", "unknown")
+                    future = repo_pool.submit(self._sync_one, repo, cfg)
+                    futures[future] = name
+
+                for future in concurrent.futures.as_completed(futures):
+                    name = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        log(
+                            f"Repo '{name}' sync failed: {e}\n{traceback.format_exc()}",
+                            level="ERROR",
+                        )
+
+            _pool_sweep(cfg.pool_root)
+
+            for repo in self:
+                self._write_ndjson(repo)
+
+            self._print_summary()
+            self._print_rss()
+        finally:
+            signal.signal(signal.SIGINT, original_sigint)
+
+    def _sync_one(self, repo: Repo, cfg: "Config") -> None:
+        ## @brief Sync a single repo: metadata, packages, stats.
+        ##
+        ## @param repo  The ``Repo`` instance to sync.
+        ## @param cfg   Global ``Config`` singleton.
+        ## @return None
+        name = repo.get("name", "unknown")
+        dest = repo.get("dest", "")
+        params = repo.get("params") or {}
+        workers = params.get("parallel_downloads", cfg.parallel_downloads)
+
+        with RepoLock(cfg.repo_root, name):
+            log(f"Syncing repo '{name}' to '{dest}'", level="INFO")
+            config = repo.get("params")
+            if config is None:
+                config = {"ipv6_ok": True}
+                repo["params"] = config
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+                repo.sync(pool=pool, config=config)
+
+    def _write_ndjson(self, repo: Repo) -> None:
+        ## @brief Append a stats NDJSON record for *repo* to its per-repo file.
+        ##
+        ## Writes to ``<repo_root>/.mirror-dedupe/<name>/stats.ndjson``.
+        ## Computes delta_files and delta_bytes against the previous
+        ## record for trend analysis.
+        ##
+        ## @param repo  The ``Repo`` instance whose stats to record.
+        ## @return None
+        name = repo.get("name", "")
+        if not name:
+            return
+
+        from ..config import Config
+        cfg = Config.load()
+        stats_dir = Path(cfg.repo_root) / ".mirror-dedupe" / name
+        stats_dir.mkdir(parents=True, exist_ok=True)
+        stats_file = stats_dir / "stats.ndjson"
+
+        s = repo.stats()
+        record = {
+            "session_ts": self.session_ts,
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "elapsed": round(s["elapsed"], 2),
+            "file_count": s["file_count"],
+            "total_bytes": s["total_bytes"],
+            "deduped_bytes": s["deduped_bytes"],
+            "bytes_transferred": s["bytes_transferred"],
+            "errors": s["errors"],
+            "pool_hits": s["pool_hits"],
+            "pool_misses": s["pool_misses"],
+            "ipv6_fallback": s["ipv6_fallback"],
+        }
+
+        # Deltas from previous record
+        try:
+            with open(stats_file) as f:
+                for line in f:
+                    pass
+                prev = json.loads(line) if line else {}
+            curr_file_count = record["file_count"]
+            prev_file_count = prev.get("file_count", 0)
+            curr_bytes = record["total_bytes"]
+            prev_bytes = prev.get("total_bytes", 0)
+            record["delta_files"] = curr_file_count - prev_file_count
+            record["delta_bytes"] = curr_bytes - prev_bytes
+        except (OSError, json.JSONDecodeError):
+            record["delta_files"] = 0
+            record["delta_bytes"] = 0
+
+        with open(stats_file, "a") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _print_summary(self) -> None:
+        ## @brief Print a cross-repo sync summary table to stdout.
+        ##
+        ## Columns: Repo, Files, Total, Deduped, TX, Hit, Miss, Err, Time, IPv6.
+        ## A ``Total`` row at the bottom aggregates all repos.
+        ##
+        ## @return None
+
+        rows: List[Dict[str, str]] = []
+        for repo in self:
+            s = repo.stats()
+            rows.append(self._aggregate_stats(s, repo.get("name", "?")))
+
+        if not rows:
+            return
+
+        total_files = sum(int(r["files"].replace(",", "")) for r in rows)
+        total_bytes = sum(
+            self._parse_fmt(r["total"]) for r in rows
+        )
+        total_deduped = sum(
+            self._parse_fmt(r["deduped"]) for r in rows
+        )
+        total_tx = sum(
+            self._parse_fmt(r["tx"]) for r in rows
+        )
+        total_hits = sum(int(r["hit"].replace(",", "")) for r in rows)
+        total_misses = sum(int(r["miss"].replace(",", "")) for r in rows)
+        total_errors = sum(int(r["errors"]) for r in rows)
+        max_time = max(
+            (float(r["time"].rstrip("s")) for r in rows), default=0.0
+        )
+
+        def _fmt(b: int) -> str:
+            ## @brief Format byte count as human-readable string.
+            ## @param b  Byte count.
+            ## @return Formatted string (e.g. ``"450MB"``).
+            if b >= 1073741824:
+                return f"{b/1073741824:.1f}GB"
+            if b >= 1048576:
+                return f"{b/1048576:.0f}MB"
+            if b >= 1024:
+                return f"{b/1024:.0f}KB"
+            return f"{b}B"
+
+        def _fmt_int(n: int) -> str:
+            ## @brief Format integer with thousands separator.
+            ## @param n  Integer to format.
+            ## @return Formatted string (e.g. ``"1,234"``).
+            return f"{n:,}" if n >= 1000 else str(n)
+
+        def _pad(s: str, width: int) -> str:
+            ## @brief Left-pad a string to *width*.
+            ## @param s      Input string.
+            ## @param width  Minimum width.
+            ## @return Left-justified string.
+            return s.ljust(width) if len(s) < width else s
+
+        cw = self._col_widths(rows)
+        # Ensure idx column is wide enough for the row count
+        cw["idx"] = max(cw.get("idx", 3), len(str(len(rows) - 1)) if rows else 1)
+
+        sep = "  ".join("-" * w for w in cw.values())
+
+        print("")
+        print("sync summary")
+        print(sep)
+        header = _pad("#", cw["idx"]).rjust(cw["idx"]) + "  "
+        header += _pad("Repo", cw["name"]) + "  "
+        header += _pad("Files", cw["files"]).rjust(cw["files"]) + "  "
+        header += _pad("Total", cw["total"]).rjust(cw["total"]) + "  "
+        header += _pad("Deduped", cw["deduped"]).rjust(cw["deduped"]) + "  "
+        header += _pad("TX", cw["tx"]).rjust(cw["tx"]) + "  "
+        header += _pad("Hit", cw["hit"]).rjust(cw["hit"]) + "  "
+        header += _pad("Miss", cw["miss"]).rjust(cw["miss"]) + "  "
+        header += _pad("Err", cw["errors"]).rjust(cw["errors"]) + "  "
+        header += _pad("Time", cw["time"]).rjust(cw["time"]) + "  "
+        header += _pad("IPv6", cw["ipv6"]).rjust(cw["ipv6"])
+        print(header)
+        print(sep)
+
+        for ri, r in enumerate(rows):
+            line = str(ri).rjust(cw["idx"]) + "  "
+            line += _pad(r["name"], cw["name"]) + "  "
+            line += r["files"].rjust(cw["files"]) + "  "
+            line += r["total"].rjust(cw["total"]) + "  "
+            line += r["deduped"].rjust(cw["deduped"]) + "  "
+            line += r["tx"].rjust(cw["tx"]) + "  "
+            line += r["hit"].rjust(cw["hit"]) + "  "
+            line += r["miss"].rjust(cw["miss"]) + "  "
+            line += r["errors"].rjust(cw["errors"]) + "  "
+            line += r["time"].rjust(cw["time"]) + "  "
+            line += r["ipv6"].rjust(cw["ipv6"])
+            print(line)
+
+        print(sep)
+        total_line = "".rjust(cw["idx"]) + "  "
+        total_line += _pad("Total", cw["name"]) + "  "
+        total_line += _fmt_int(total_files).rjust(cw["files"]) + "  "
+        total_line += _fmt(total_bytes).rjust(cw["total"]) + "  "
+        total_line += _fmt(total_deduped).rjust(cw["deduped"]) + "  "
+        total_line += _fmt(total_tx).rjust(cw["tx"]) + "  "
+        total_line += _fmt_int(total_hits).rjust(cw["hit"]) + "  "
+        total_line += _fmt_int(total_misses).rjust(cw["miss"]) + "  "
+        total_line += str(total_errors).rjust(cw["errors"]) + "  "
+        total_line += f"{max_time:.1f}s".rjust(cw["time"]) + "  "
+        total_line += "".rjust(cw["ipv6"])
+        print(total_line)
+        print("")
+
+    def _aggregate_stats(
+        self, s: Dict[str, Any], name: str
+    ) -> Dict[str, str]:
+        ## @brief Convert a raw stats dict into a display row for the summary table.
+        ##
+        ## @param s     Stats dict from ``Repo.stats()``.
+        ## @param name  Repo name.
+        ## @return Dict with formatted string values for each column.
+
+        def _fmt(b: int) -> str:
+            ## @brief Format byte count as human-readable string.
+            ## @param b  Byte count.
+            ## @return Formatted string (e.g. ``"450MB"``).
+            if b >= 1073741824:
+                return f"{b/1073741824:.1f}GB"
+            if b >= 1048576:
+                return f"{b/1048576:.0f}MB"
+            if b >= 1024:
+                return f"{b/1024:.0f}KB"
+            return f"{b}B"
+
+        def _fmt_int(n: int) -> str:
+            ## @brief Format integer with thousands separator.
+            ## @param n  Integer to format.
+            ## @return Formatted string (e.g. ``"1,234"``).
+            return f"{n:,}" if n >= 1000 else str(n)
+
+        return {
+            "name": name,
+            "files": _fmt_int(s.get("file_count", 0)),
+            "total": _fmt(s.get("total_bytes", 0)),
+            "deduped": _fmt(s.get("deduped_bytes", 0)),
+            "tx": _fmt(s.get("bytes_transferred", 0)),
+            "hit": _fmt_int(s.get("pool_hits", 0)),
+            "miss": _fmt_int(s.get("pool_misses", 0)),
+            "errors": str(s.get("errors", 0)),
+            "time": f"{s.get('elapsed', 0):.1f}s",
+            "ipv6": "v4" if s.get("ipv6_fallback") else "",
+        }
+
+    @staticmethod
+    def _parse_fmt(s: str) -> int:
+        ## @brief Parse a human-readable byte string back to an integer.
+        ##
+        ## @param s  Formatted byte string (e.g. ``"450MB"``, ``"1.2GB"``).
+        ## @return Byte count as integer.
+        s = s.strip()
+        if s.endswith("GB"):
+            return int(float(s[:-2]) * 1073741824)
+        if s.endswith("MB"):
+            return int(float(s[:-2]) * 1048576)
+        if s.endswith("KB"):
+            return int(float(s[:-2]) * 1024)
+        if s.endswith("B") and not any(c in s for c in "GMK"):
+            return int(s[:-1])
+        return 0
+
+    @staticmethod
+    def _col_widths(rows: List[Dict[str, str]]) -> Dict[str, int]:
+        ## @brief Compute column widths for the summary table.
+        ##
+        ## @param rows  List of formatted row dicts.
+        ## @return Dict mapping column name to minimum pixel width.
+        widths = {"idx": 1, "name": 20, "files": 8, "total": 10, "deduped": 10,
+                  "tx": 12, "hit": 8, "miss": 8, "errors": 6, "time": 10, "ipv6": 4}
+        for r in rows:
+            for k, v in r.items():
+                widths[k] = max(widths[k], len(v))
+        return widths
+
+    @staticmethod
+    def _print_rss() -> None:
+        ## @brief Print peak RSS to stdout.
+        ##
+        ## macOS returns bytes, Linux returns KB.  Both are converted to MB.
+        ##
+        ## @return None
+        try:
+            import resource
+            rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+            if platform.system() == "Darwin":
+                peak_rss = rss_raw // (1024 * 1024)
+            else:
+                peak_rss = rss_raw // 1024
+        except (ImportError, AttributeError):
+            return
+        if peak_rss:
+            print(f"Peak RSS: {peak_rss}MB")

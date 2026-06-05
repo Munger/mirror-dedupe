@@ -45,6 +45,7 @@ class Index(Node):
         kind: str,
         metadata: "Index.Metadata | None" = None,
         uri: str = "",
+        size: int = 0,
     ) -> None:
         ## @brief Initialise an Index descriptor.
         ##
@@ -52,6 +53,7 @@ class Index(Node):
         ## @param kind      Logical kind (e.g. ``"packages"``).
         ## @param metadata  Optional index metadata.
         ## @param uri       Index URI for fetching.
+        ## @param size      File size in bytes (0 if unknown).
         ## @return None
         data: Dict[str, Any] = {
             "path": path,
@@ -61,6 +63,8 @@ class Index(Node):
             data["uri"] = uri
         if metadata is not None:
             data["metadata"] = metadata
+        if size:
+            data["size"] = size
         super().__init__(data)
 
     @property
@@ -108,7 +112,7 @@ class Index(Node):
             data = self.fetch(uri=self.get("uri"), config=config)
         except RuntimeError:
             from ..lib.log import log
-            log(f"  Failed to fetch index {self.get('uri', 'unknown')}", level="ERROR")
+            log(f"  FAILED index {self.get('uri', 'unknown')}")
             return self
         if not data:
             return self

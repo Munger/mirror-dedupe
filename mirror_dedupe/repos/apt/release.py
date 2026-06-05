@@ -206,6 +206,7 @@ class Release(Schema.Release):
                     metadata=metadata,
                     uri=index_uri,
                     dest=dest,
+                    size=entry["size"],
                 )
 
         self.indices = Schema.Indices(seen.values())

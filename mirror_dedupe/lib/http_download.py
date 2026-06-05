@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+import os
+import platform
 import subprocess
 import threading
-from typing import List, Optional, Tuple
+import time
+from typing import Dict, List, Optional, Tuple, Type
 
 # -- subprocess tracking (Ctrl-C support) ------------------------------------
 
@@ -86,6 +89,25 @@ def _run_subprocess(args: List[str]) -> Tuple[int, Optional[bytes], bytes]:
 # -- public API ---------------------------------------------------------------
 
 
+_HTTP_REASONS: Dict[int, str] = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    405: "Method Not Allowed",
+    408: "Request Timeout",
+    429: "Too Many Requests",
+    500: "Internal Server Error",
+    502: "Bad Gateway",
+    503: "Service Unavailable",
+    504: "Gateway Timeout",
+}
+
+
+def _http_reason(code: int) -> str:
+    return _HTTP_REASONS.get(code, f"HTTP {code}")
+
+
 def HTTPFetch(uri: str) -> bytes:
     ## @brief Fetch a URI into memory via ``curl -sL``.
     ##
@@ -101,44 +123,85 @@ def HTTPFetch(uri: str) -> bytes:
     rc, out, err = _run_subprocess(["curl", "-s", "-L", uri])
     if rc != 0:
         msg = err.decode("utf-8", errors="replace").strip() if err else ""
-        raise RuntimeError(f"Failed to fetch {uri}: curl exit {rc} {msg}")
+        raise RuntimeError(f"FAILED {uri} - curl exit {rc} {msg}".strip())
     return out  # type: ignore[return-value]
 
 
-def HTTPDownload(uri: str, output_path: str) -> str:
+def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
     ## @brief Download a URI to a local file and return its SHA-256 hash.
     ##
-    ## Uses ``curl -sL`` with ``-w %{http_code}`` to detect HTTP-level
-    ## errors (4xx/5xx) even on macOS where ``-f`` exits 56 for 4xx.
-    ## After a successful download, computes the hash via ``sha256sum``
-    ## (Linux) or ``shasum -a 256`` (macOS fallback).
+    ## Uses ``curl -sL`` with ``-C -`` to auto-resume partial downloads,
+    ## and ``-w %{http_code}`` to detect HTTP-level errors (4xx/5xx) even
+    ## on macOS where ``-f`` exits 56 for 4xx.  After a successful
+    ## download, computes the hash via ``sha256sum`` (Linux) or
+    ## ``shasum -a 256`` (macOS fallback).
+    ##
+    ## On transient curl failures (exit codes 7, 18, 35, 52, 55, 56),
+    ## retries up to *retries* times with exponential backoff (2s, 4s).
+    ## The partial staging file is preserved for ``-C -`` resume across
+    ## retry attempts.
     ##
     ## @param uri          Fully-qualified URL to download.
     ## @param output_path  Path to write the downloaded content.
+    ## @param retries      Number of retry attempts for transient errors.
     ## @return The SHA-256 hex digest of *output_path*.
     ## @raises RuntimeError  On curl failure, HTTP error, or hash tool missing.
     output_str = str(output_path)
-    rc, out, err = _run_subprocess(
-        ["curl", "-s", "-L", "-w", "%{http_code}", "-o", output_str, uri],
-    )
-    if rc != 0:
+
+    _TRANSIENT_EXITS: Tuple[int, ...] = (7, 18, 35, 52, 55, 56)
+
+    def _compute_hash() -> str:
+        rc, out, _ = _run_subprocess(["sha256sum", output_str])
+        if rc == 0:
+            return out.decode("utf-8").split()[0]
+        rc, out, _ = _run_subprocess(["shasum", "-a", "256", output_str])
+        if rc == 0:
+            return out.decode("utf-8").split()[0]
+        raise RuntimeError(
+            f"Failed to hash {output_str}: neither sha256sum nor shasum available"
+        )
+
+    for attempt in range(1 + retries):
+        rc, out, err = _run_subprocess(
+            ["curl", "-s", "-L", "-C", "-", "-w", "%{http_code}", "-o", output_str, uri],
+        )
+        if rc == 0:
+            if out:
+                try:
+                    http_code = int(out.decode().strip())
+                    if http_code >= 400:
+                        try:
+                            os.unlink(output_str)
+                        except OSError:
+                            pass
+                        reason = _HTTP_REASONS.get(http_code, "")
+                        raise RuntimeError(
+                            f"FAILED {uri} - {reason} ({http_code})" if reason
+                            else f"FAILED {uri} - HTTP {http_code}"
+                        )
+                except ValueError:
+                    pass
+            return _compute_hash()
+
         msg = err.decode("utf-8", errors="replace").strip() if err else ""
-        raise RuntimeError(f"Failed to download {uri}: curl exit {rc} {msg}")
-    if out:
-        try:
-            http_code = int(out.decode().strip())
-            if http_code >= 400:
-                raise RuntimeError(
-                    f"Failed to download {uri}: HTTP {http_code}"
-                )
-        except ValueError:
-            pass
-    rc, out, _ = _run_subprocess(["sha256sum", output_str])
-    if rc == 0:
-        return out.decode("utf-8").split()[0]
-    rc, out, _ = _run_subprocess(["shasum", "-a", "256", output_str])
-    if rc == 0:
-        return out.decode("utf-8").split()[0]
-    raise RuntimeError(
-        f"Failed to hash {output_str}: neither sha256sum nor shasum available"
-    )
+        http_info = ""
+        if out:
+            try:
+                code = int(out.decode().strip())
+                if code >= 400:
+                    reason = _HTTP_REASONS.get(code, "")
+                    http_info = f"{reason} ({code})" if reason else f"HTTP {code}"
+            except ValueError:
+                pass
+        if rc in _TRANSIENT_EXITS and attempt < retries:
+            delay = 2 ** attempt
+            time.sleep(delay)
+            continue
+
+        if http_info:
+            raise RuntimeError(f"FAILED {uri} - {http_info}")
+        raise RuntimeError(
+            f"FAILED {uri} - curl exit {rc} {msg}".strip()
+        )
+
+    raise RuntimeError(f"FAILED {uri} - all {retries + 1} attempts failed")

@@ -6,9 +6,8 @@
 ## Provides the ``main()`` entry point with subcommands for listing,
 ## activating, deactivating, testing, and deleting mirrors.
 ##
-## Sync operations (``--mirror``, ``--dedupe-only``, default mode) are
-## defined here for interface documentation but are not yet wired — they
-## will be connected to the schema-based sync pipeline in a future version.
+## The ``--sync`` flag drives the schema-based sync pipeline via
+## ``Repos.from_names().sync_all()``.
 ##
 ## @copyright Copyright (c) 2025-2026 Tim Hosking
 ## @see https://github.com/munger
@@ -20,13 +19,170 @@ import subprocess
 import argparse
 import random
 import shutil
+import json
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import Any, Dict, List, Optional
 
 import yaml
 
 from .config import Config, DEFAULT_CONFIG_DIR
 from .lib.log import log
+
+
+def _resolve_dest(name: str, cfg: Config) -> Optional[str]:
+    ## @brief Resolve a repo *name* to its absolute ``dest`` path.
+    ##
+    ## Delegates to ``cfg.resolve_dest()``, then falls back to treating
+    ## *name* as a literal subdirectory name under ``repo_root``.
+    ##
+    ## @param name  Repo name or dest directory name.
+    ## @param cfg   Global ``Config`` singleton.
+    ## @return The absolute dest path, or ``None`` if unresolvable.
+
+    dest = cfg.resolve_dest(name)
+    if dest:
+        return dest
+    fallback = os.path.join(cfg.repo_root, name)
+    return fallback if os.path.isdir(fallback) else None
+
+
+def _list_dests(cfg: Config) -> List[str]:
+    ## @brief Return all dest directories under ``repo_root``.
+    ##
+    ## Iterates first-level subdirectories of ``repo_root``, excluding
+    ## ``Snapshots/`` and ``.mirror-dedupe/``, and adds any
+    ## ``additional_repos`` dests that may not yet exist on disk.
+    ##
+    ## @param cfg  Global ``Config`` singleton.
+    ## @return Sorted list of absolute dest paths.
+
+    dests: set[str] = set()
+    root = Path(cfg.repo_root)
+    if root.exists():
+        for entry in root.iterdir():
+            if not entry.is_dir():
+                continue
+            if entry.name.startswith(".") or entry.name == "Snapshots":
+                continue
+            dests.add(str(entry.resolve()))
+    for adest in cfg.additional_repos.values():
+        dests.add(adest)
+    return sorted(dests)
+
+
+def _timestamp() -> str:
+    ## @brief Return an ISO-8601 timestamp string safe for directory names.
+    ##
+    ## Format: ``20260605T120000`` (no colons, no timezone).
+    ##
+    ## @return A compact timestamp string.
+
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+
+
+def _pin_confirm(action_desc: str, force: bool) -> bool:
+    ## @brief Ask the user to confirm a destructive operation via a random PIN.
+    ##
+    ## If *force* is ``True``, the prompt is skipped and confirmation
+    ## is granted immediately.
+    ##
+    ## @param action_desc  Human-readable description of the action.
+    ## @param force        If ``True``, bypass the PIN prompt.
+    ## @return ``True`` if confirmed, ``False`` otherwise.
+
+    if force:
+        return True
+
+    pin = f"{random.randint(0, 9999):04d}"
+    print("")
+    print(f"This is a DESTRUCTIVE operation: {action_desc}")
+    print("")
+    print(f"To confirm, type the following PIN: {pin}")
+    entered = input("PIN: ").strip()
+    if entered != pin:
+        print("PIN mismatch - aborting")
+        return False
+    return True
+
+
+def _resolve_snapshot_ts(snapshot_dir: str) -> Optional[str]:
+    ## @brief Return the latest timestamp subdirectory under *snapshot_dir*.
+    ##
+    ## Timestamps are directory names matching ``YYYYMMDD*``.  The latest
+    ## (highest sort order) is returned, which coincides with "most recent"
+    ## for the ISO-compatible naming scheme used by ``_timestamp()``.
+    ##
+    ## @param snapshot_dir  Path to a snapshot repo directory.
+    ## @return The latest timestamp string, or ``None`` if no snapshots.
+
+    p = Path(snapshot_dir)
+    if not p.exists():
+        return None
+    ts_dirs = sorted(
+        (d.name for d in p.iterdir() if d.is_dir() and d.name[:8].isdigit()),
+        reverse=True,
+    )
+    return ts_dirs[0] if ts_dirs else None
+
+
+def _resolve_name_or_index(val: str, candidates: List[str], label: str = "name") -> str:
+    ## @brief Resolve a value that may be a name or a numeric index into *candidates*.
+    ##
+    ## If *val* is a non-negative integer string, it is treated as an index
+    ## into *candidates* (must be in range).  Otherwise it is returned as-is.
+    ##
+    ## @param val        Raw input from the user.
+    ## @param candidates Ordered list of valid names.
+    ## @param label      Human-readable label for error messages (e.g. "repo", "snapshot").
+    ## @return The resolved name (either the original string or the looked-up candidate).
+    ## @throws SystemExit if the index is out of range.
+
+    if val.isdigit():
+        idx = int(val)
+        if 0 <= idx < len(candidates):
+            return candidates[idx]
+        log(
+            f"ERROR: Index {idx} is out of range for {label} "
+            f"(valid indices: 0-{len(candidates) - 1})",
+            level="ERROR",
+        )
+        sys.exit(1)
+    return val
+
+
+def _fmt_ts(raw: str) -> str:
+    ## @brief Format a compact timestamp (``YYYYmmDDTHHMMSS``) as human-readable.
+    ##
+    ## @param raw  The raw timestamp string.
+    ## @return A formatted string like ``"2026-06-05 13:47:04"``, or the
+    ##         original string if it doesn't match the expected pattern.
+
+    if len(raw) >= 15 and raw[8] == "T":
+        return (
+            f"{raw[:4]}-{raw[4:6]}-{raw[6:8]} "
+            f"{raw[9:11]}:{raw[11:13]}:{raw[13:15]}"
+        )
+    return raw
+
+
+def _snapshot_size(snapshot_path: Path) -> str:
+    ## @brief Return a human-readable total size for a snapshot directory.
+    ##
+    ## Uses ``du -sh`` for a quick estimate.  Falls back to ``"(unknown)"``
+    ## if the directory doesn't exist or the subprocess fails.
+    ##
+    ## @param snapshot_path  Path to a snapshot (timestamp) directory.
+    ## @return A size string like ``"1.2G"`` or ``"(unknown)"``.
+
+    try:
+        result = subprocess.run(
+            ["du", "-sh", str(snapshot_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        return result.stdout.split(maxsplit=1)[0] if result.returncode == 0 else "(unknown)"
+    except Exception:
+        return "(unknown)"
 
 
 def main():
@@ -55,8 +211,34 @@ def main():
                         help='Deactivate a mirror by removing its symlink from repos-enabled')
     parser.add_argument('--test', metavar='MIRROR',
                         help='Test a mirror configuration and summarise what it will fetch')
-    parser.add_argument('--delete', metavar='MIRROR',
-                        help='Deactivate a mirror and delete all its data (requires PIN confirmation)')
+    parser.add_argument('--reinitialise', metavar='REPO',
+                        help='Snapshot a repo and remove its data directory, leaving activation status unchanged (requires PIN)')
+
+    # Modifiers
+    parser.add_argument('--force', action='store_true',
+                        help='Bypass PIN confirmation on destructive operations')
+    parser.add_argument('--no-backup', action='store_true',
+                        help='Skip current-state backup before restore')
+
+    # Management operations (new)
+    parser.add_argument('--list-repos', action='store_true',
+                        help='List all known repos (config-based and additional)')
+    parser.add_argument('--repair', metavar='NAME', nargs='?', const='ALL',
+                        help='Run sync-hashes.sh on a repo dest or ALL (reconstructs pool from repo tree)')
+    parser.add_argument('--snapshot', metavar='NAME', nargs='?', const='ALL',
+                        help='Create a hardlink snapshot of a repo dest or ALL')
+    parser.add_argument('--list-snapshots', metavar='NAME', nargs='?', const='ALL',
+                        help='List available snapshots for a repo or ALL')
+    parser.add_argument('--restore-snapshot', metavar='NAME',
+                        help='Restore a snapshot (NAME[:TS] format, defaults to latest)')
+    parser.add_argument('--delete-snapshot', metavar='NAME',
+                        help='Delete a snapshot directory under Snapshots/ (requires PIN)')
+    parser.add_argument('--stats', metavar='NAME', nargs='?', const='ALL',
+                        help='Print sync stats for a repo dest or ALL')
+    parser.add_argument('--stats-reset', metavar='NAME', nargs='?', const='ALL',
+                        help='Truncate stats.ndjson for a repo dest or ALL (requires PIN)')
+    parser.add_argument('--migrate', action='store_true',
+                        help='Migrate a legacy mirror-dedupe repo tree to the current layout (not yet implemented)')
 
     args = parser.parse_args()
 
@@ -65,17 +247,32 @@ def main():
 
     management_ops = [
         bool(args.list),
+        bool(args.list_repos),
         bool(args.activate),
         bool(args.deactivate),
         bool(args.test),
-        bool(args.delete),
+        bool(args.reinitialise),
+        bool(args.repair),
+        bool(args.snapshot),
+        bool(args.list_snapshots),
+        bool(args.restore_snapshot),
+        bool(args.delete_snapshot),
+        bool(args.stats),
+        bool(args.stats_reset),
+        bool(args.migrate),
     ]
     if sum(1 for x in management_ops if x) > 1:
-        log("ERROR: Only one of --list/--activate/--deactivate/--test/--delete may be used at a time", level="ERROR")
+        names = [
+            "--list", "--list-repos", "--activate", "--deactivate",
+            "--test", "--reinitialise", "--repair", "--snapshot",
+            "--list-snapshots", "--restore-snapshot", "--delete-snapshot",
+            "--stats", "--stats-reset", "--migrate",
+        ]
+        log(f"ERROR: Only one management flag may be used at a time. Choose one of: {', '.join(names)}", level="ERROR")
         sys.exit(1)
 
     if args.sync:
-        from .sync_orch import sync_repos
+        from .schema.repo import Repos
 
         repo_names: List[str] = []
         if args.mirror:
@@ -94,41 +291,448 @@ def main():
                 )
                 sys.exit(1)
 
-        sync_repos(repo_names, config_dir=args.config_dir)
+        repos = Repos.from_names(repo_names, config_dir=args.config_dir)
+        repos.sync_all(config_dir=args.config_dir)
         sys.exit(0)
 
     config_dir_path = Path(config_dir)
     repos_available = config_dir_path / 'repos-available'
     repos_enabled = config_dir_path / 'repos-enabled'
 
-    if args.list:
-        if not repos_available.exists():
-            print(f"No repos-available directory at {repos_available}")
+    # ------------------------------------------------------------------
+    # --list-repos : list all known repos (config + additional)
+    # ------------------------------------------------------------------
+    if args.list_repos:
+        names = cfg_main.list_repo_names()
+        if not names:
+            print("No repos found (no configs in repos-enabled/ and no additional_repos)")
+            sys.exit(0)
+        print(f"Known repos under {cfg_main.repo_root}:")
+        print("")
+        for i, n in enumerate(names):
+            dest = _resolve_dest(n, cfg_main)
+            tag = " [additional]" if n in cfg_main.additional_repos else ""
+            print(f"  [{i}] {n:30s} {dest or '(unresolved)'}{tag}")
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # --repair : shell out to sync-hashes.sh
+    # ------------------------------------------------------------------
+    if args.repair:
+        name = args.repair
+        if name != "ALL":
+            candidates = cfg_main.list_repo_names()
+            if candidates:
+                name = _resolve_name_or_index(name, candidates, "repo")
+        script = Path(__file__).resolve().parents[1] / "scripts" / "sync-hashes.sh"
+        if not script.exists():
+            log(f"ERROR: Repair script not found at {script}", level="ERROR")
             sys.exit(1)
 
-        available = {}
-        for f in sorted(repos_available.glob('*.conf')):
-            name = f.stem
-            available[name] = f
+        if name == "ALL":
+            log(f"Repairing entire repo tree: {cfg_main.repo_root}", level="INFO")
+            result = subprocess.run(
+                [str(script), cfg_main.repo_root, cfg_main.pool_root],
+            )
+            sys.exit(result.returncode)
 
-        enabled = set()
+        dest = _resolve_dest(name, cfg_main)
+        if not dest:
+            log(f"ERROR: Cannot resolve '{name}' to a dest directory", level="ERROR")
+            sys.exit(1)
+        log(f"Repairing: {dest}", level="INFO")
+        result = subprocess.run([str(script), dest, cfg_main.pool_root])
+        sys.exit(result.returncode)
+
+    # ------------------------------------------------------------------
+    # --snapshot : cp -al dest -> Snapshots/<name>/<ts>/
+    # ------------------------------------------------------------------
+    if args.snapshot:
+        name = args.snapshot
+        if name != "ALL":
+            candidates = cfg_main.list_repo_names()
+            if candidates:
+                name = _resolve_name_or_index(name, candidates, "repo")
+        snap_base = Path(cfg_main.repo_root) / "Snapshots"
+
+        def _do_snapshot(dest_path: str, label: str) -> None:
+            ## @brief Create a hardlink snapshot of *dest_path* under ``Snapshots/<label>/<ts>/``.
+            ## @param dest_path  Absolute path to the repo dest to snapshot.
+            ## @param label      Name for the snapshot group (typically the repo name).
+            ## @return None
+            snap_dir = snap_base / label
+            ts = _timestamp()
+            target = snap_dir / ts
+            os.makedirs(str(snap_dir), exist_ok=True)
+            log(f"Snapshotting '{label}' from {dest_path} -> {target}", level="INFO")
+            subprocess.run(
+                ["cp", "-al", dest_path, str(target)],
+                check=True,
+            )
+            print(f"Created snapshot: {target}")
+
+        if name == "ALL":
+            dests = _list_dests(cfg_main)
+            if not dests:
+                log("ERROR: No dest directories found under repo_root", level="ERROR")
+                sys.exit(1)
+            for d in dests:
+                label = Path(d).name
+                _do_snapshot(d, label)
+            sys.exit(0)
+
+        dest = _resolve_dest(name, cfg_main)
+        if not dest:
+            log(f"ERROR: Cannot resolve '{name}' to a dest directory", level="ERROR")
+            sys.exit(1)
+        _do_snapshot(dest, Path(dest).name)
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # --list-snapshots : show snapshot timestamps for a repo or ALL
+    # ------------------------------------------------------------------
+    if args.list_snapshots:
+        name = args.list_snapshots
+        if name != "ALL":
+            candidates = cfg_main.list_repo_names()
+            if candidates:
+                name = _resolve_name_or_index(name, candidates, "repo")
+        snap_base = Path(cfg_main.repo_root) / "Snapshots"
+        if not snap_base.exists():
+            print("No Snapshots directory")
+            sys.exit(0)
+
+        if name == "ALL":
+            repos = sorted(d.name for d in snap_base.iterdir() if d.is_dir())
+            if not repos:
+                print("No snapshots found")
+                sys.exit(0)
+            for ri, r in enumerate(repos):
+                ts_list = sorted(
+                    d.name for d in (snap_base / r).iterdir()
+                    if d.is_dir() and d.name[:8].isdigit()
+                )
+                if ts_list:
+                    print(f"  [{ri}] {r}:")
+                    for ti, t in enumerate(ts_list):
+                        sz = _snapshot_size(snap_base / r / t)
+                        print(f"        [{ti}] {_fmt_ts(t)}  ({t})  {sz}")
+                else:
+                    print(f"  [{ri}] {r}: (no snapshots)")
+            sys.exit(0)
+
+        repo_snap = snap_base / name
+        if not repo_snap.exists():
+            print(f"No snapshots for '{name}'")
+            sys.exit(0)
+        ts_list = sorted(
+            d.name for d in repo_snap.iterdir()
+            if d.is_dir() and d.name[:8].isdigit()
+        )
+        if not ts_list:
+            print(f"No snapshots for '{name}'")
+            sys.exit(0)
+        print(f"Snapshots for '{name}':")
+        for ti, t in enumerate(ts_list):
+            sz = _snapshot_size(repo_snap / t)
+            print(f"  [{ti}] {_fmt_ts(t)}  ({t})  {sz}")
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # --restore-snapshot : atomic swap from snapshot
+    # ------------------------------------------------------------------
+    if args.restore_snapshot:
+        raw = args.restore_snapshot
+        if ":" in raw:
+            snap_name, snap_ts = raw.split(":", 1)
+        else:
+            snap_name = raw
+            snap_ts = ""
+
+        # Resolve snapshot name by index if needed
+        all_repos = sorted(
+            d.name for d in Path(cfg_main.repo_root).glob("Snapshots/*")
+            if d.is_dir()
+        )
+        if all_repos:
+            snap_name = _resolve_name_or_index(snap_name, all_repos, "snapshot repo")
+
+        snap_base = Path(cfg_main.repo_root) / "Snapshots"
+        snap_repo_dir = snap_base / snap_name
+        if not snap_repo_dir.exists():
+            log(f"ERROR: Snapshot '{snap_name}' not found at {snap_repo_dir}", level="ERROR")
+            sys.exit(1)
+
+        if not snap_ts:
+            snap_ts = _resolve_snapshot_ts(str(snap_repo_dir))
+            if not snap_ts:
+                log(f"ERROR: No snapshots found under {snap_repo_dir}", level="ERROR")
+                sys.exit(1)
+        elif snap_ts.isdigit():
+            ts_candidates = sorted(
+                d.name for d in snap_repo_dir.iterdir()
+                if d.is_dir() and d.name[:8].isdigit()
+            )
+            snap_ts = _resolve_name_or_index(snap_ts, ts_candidates, "snapshot timestamp")
+
+        snapshot_path = snap_repo_dir / snap_ts
+        if not snapshot_path.exists():
+            log(f"ERROR: Snapshot timestamp '{snap_ts}' not found in {snap_repo_dir}",
+                level="ERROR")
+            sys.exit(1)
+
+        # Resolve target dest: try config/additional, then fallback to repo_root/<name>
+        dest = _resolve_dest(snap_name, cfg_main)
+        if not dest:
+            dest = os.path.join(cfg_main.repo_root, snap_name)
+        dest = os.path.abspath(dest)
+
+        if not dest.startswith(os.path.abspath(cfg_main.repo_root)):
+            log(f"ERROR: Refusing to restore outside repo_root: {dest}", level="ERROR")
+            sys.exit(1)
+
+        if not os.path.isdir(dest):
+            log(f"ERROR: Target dest does not exist: {dest}", level="ERROR")
+            sys.exit(1)
+
+        desc = f"Restore snapshot '{snap_name}:{snap_ts}' to {dest}"
+        if not _pin_confirm(desc, args.force):
+            sys.exit(1)
+
+        ts = _timestamp()
+        swap_old = dest + ".old-" + ts
+        tmp_restore = dest + ".tmp-" + ts
+
+        try:
+            # 1. Snapshot current state (like --reinitialise) unless --no-backup
+            if not args.no_backup:
+                snap_target = snap_repo_dir / f".pre-restore-{ts}"
+                log(
+                    f"Snapshotting current state: {dest} -> {snap_target}",
+                    level="INFO",
+                )
+                subprocess.run(
+                    ["cp", "-al", dest, str(snap_target)], check=True,
+                )
+                print(f"Created pre-restore snapshot: {snap_target}")
+
+            # 2. Hardlink snapshot to temp
+            log(f"Linking snapshot: {snapshot_path} -> {tmp_restore}", level="INFO")
+            subprocess.run(["cp", "-al", str(snapshot_path), tmp_restore], check=True)
+
+            # 3. Atomic swap
+            os.rename(dest, swap_old)
+            os.rename(tmp_restore, dest)
+
+            # 4. Cleanup swap_old
+            log(f"Cleaning up old state: {swap_old}", level="INFO")
+            shutil.rmtree(swap_old)
+
+            print(f"Restored snapshot '{snap_name}:{snap_ts}' to {dest}")
+            sys.exit(0)
+
+        except Exception as e:
+            log(f"ERROR during restore: {e}", level="ERROR")
+            if os.path.exists(tmp_restore):
+                shutil.rmtree(tmp_restore, ignore_errors=True)
+            if os.path.exists(dest + ".old-" + ts) and not os.path.exists(dest):
+                os.rename(dest + ".old-" + ts, dest)
+            sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # --delete-snapshot : rm -rf a snapshot directory
+    # ------------------------------------------------------------------
+    if args.delete_snapshot:
+        raw = args.delete_snapshot
+        if "/" in raw:
+            snap_name, snap_ts = raw.split("/", 1)
+        else:
+            snap_name = raw
+            snap_ts = ""
+
+        snap_base = Path(cfg_main.repo_root) / "Snapshots"
+
+        # Resolve repo name by index
+        all_snap_repos = sorted(
+            d.name for d in snap_base.iterdir()
+            if d.is_dir()
+        ) if snap_base.exists() else []
+        if all_snap_repos:
+            snap_name = _resolve_name_or_index(snap_name, all_snap_repos, "snapshot repo")
+
+        snap_repo_dir = snap_base / snap_name
+
+        if snap_ts:
+            if snap_ts.isdigit():
+                ts_candidates = sorted(
+                    d.name for d in snap_repo_dir.iterdir()
+                    if d.is_dir() and d.name[:8].isdigit()
+                )
+                snap_ts = _resolve_name_or_index(snap_ts, ts_candidates, "snapshot timestamp")
+            target = snap_repo_dir / snap_ts
+        else:
+            target = snap_repo_dir
+
+        if not target.exists():
+            log(f"ERROR: Snapshot '{snap_name}' not found at {target}", level="ERROR")
+            sys.exit(1)
+
+        desc = f"Delete snapshot '{snap_name}' ({target})"
+        if not _pin_confirm(desc, args.force):
+            sys.exit(1)
+
+        shutil.rmtree(str(target))
+        print(f"Deleted snapshot: {target}")
+
+        # Remove empty parent if this was the last snapshot
+        parent = target.parent
+        try:
+            next(parent.iterdir())
+        except StopIteration:
+            parent.rmdir()
+
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # --stats : print stats.ndjson for a repo or ALL
+    # ------------------------------------------------------------------
+    if args.stats:
+        name = args.stats
+        if name != "ALL":
+            candidates = cfg_main.list_repo_names()
+            if candidates:
+                name = _resolve_name_or_index(name, candidates, "repo")
+
+        def _print_stats(repo_name: str) -> None:
+            ## @brief Print all NDJSON sync stats for a repo.
+            ## @param repo_name  Name of the repo (subdirectory under ``.mirror-dedupe/``).
+            ## @return None
+            stats_file = (
+                Path(cfg_main.repo_root) / ".mirror-dedupe" / repo_name / "stats.ndjson"
+            )
+            if not stats_file.exists():
+                print(f"[{repo_name}] No stats.ndjson at {stats_file}")
+                return
+            with open(stats_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            formatted = json.dumps(json.loads(line), indent=2)
+                            print(f"[{repo_name}] {formatted}")
+                        except json.JSONDecodeError:
+                            print(f"[{repo_name}] (raw) {line}")
+
+        if name == "ALL":
+            names = cfg_main.list_repo_names()
+            if not names:
+                print("No repos found")
+                sys.exit(0)
+            for n in names:
+                _print_stats(n)
+            sys.exit(0)
+
+        _print_stats(name)
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # --stats-reset : truncate stats.ndjson for a repo or ALL
+    # ------------------------------------------------------------------
+    if args.stats_reset:
+        name = args.stats_reset
+        if name != "ALL":
+            candidates = cfg_main.list_repo_names()
+            if candidates:
+                name = _resolve_name_or_index(name, candidates, "repo")
+
+        def _reset_stats(repo_name: str) -> None:
+            ## @brief Truncate the NDJSON stats file for a repo.
+            ## @param repo_name  Name of the repo (subdirectory under ``.mirror-dedupe/``).
+            ## @return None
+            stats_file = (
+                Path(cfg_main.repo_root) / ".mirror-dedupe" / repo_name / "stats.ndjson"
+            )
+            if not stats_file.exists():
+                print(f"[{repo_name}] No stats.ndjson at {stats_file} (nothing to reset)")
+                return
+            stats_file.write_text("")
+            print(f"[{repo_name}] Reset stats.ndjson at {stats_file}")
+
+        if name == "ALL":
+            desc = "Reset stats for ALL repos"
+            if not _pin_confirm(desc, args.force):
+                sys.exit(1)
+            names = cfg_main.list_repo_names()
+            for n in names:
+                _reset_stats(n)
+            sys.exit(0)
+
+        desc = f"Reset stats for '{name}'"
+        if not _pin_confirm(desc, args.force):
+            sys.exit(1)
+        _reset_stats(name)
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # --migrate : placeholder for migration tool
+    # ------------------------------------------------------------------
+    if args.migrate:
+        print("--migrate is not yet implemented. It will migrate a legacy mirror-dedupe")
+        print("repo tree (pre-0.2.x layout without .mirror-dedupe/ structure) to the")
+        print("current layout. Coming in a future release.")
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # Legacy management ops
+    # ------------------------------------------------------------------
+
+    if args.list:
+        if not repos_available.exists() and not repos_enabled.exists():
+            print(f"No repos-available or repos-enabled at {config_dir}")
+            sys.exit(1)
+
+        available: Dict[str, Path] = {}
+        if repos_available.exists():
+            for f in sorted(repos_available.glob("*.conf")):
+                available[f.stem] = f
+
+        enabled_stems: set[str] = set()
+        enabled_orphans: set[str] = set()
         if repos_enabled.exists():
-            for f in sorted(repos_enabled.glob('*.conf')):
-                enabled.add(f.stem)
+            for f in repos_enabled.glob("*.conf"):
+                if f.is_symlink():
+                    enabled_stems.add(f.stem)
+                else:
+                    enabled_orphans.add(f.stem)
 
-        if not available:
-            print("No mirrors defined in repos-available")
+        all_repos = sorted(set(available.keys()) | enabled_orphans)
+        if not all_repos:
+            print("No mirrors defined")
             sys.exit(0)
 
         print(f"Mirrors in {config_dir}:")
         print("")
-        for name in sorted(available.keys()):
-            status = 'ACTIVE' if name in enabled else 'inactive'
-            print(f"  {name:30s} {status}")
+        for i, name in enumerate(all_repos):
+            if name in available:
+                has_symlink = name in enabled_stems
+                has_orphan = name in enabled_orphans
+                if has_symlink or has_orphan:
+                    status = "ACTIVE"
+                    if has_orphan:
+                        status += " [standalone]"
+                else:
+                    status = "inactive"
+            else:
+                status = "ACTIVE [enabled only]"
+            print(f"  [{i}] {name:30s} {status}")
         sys.exit(0)
 
     if args.activate:
         name = args.activate
+        if repos_available.exists():
+            available_configs = sorted(f.stem for f in repos_available.glob("*.conf"))
+            if available_configs:
+                name = _resolve_name_or_index(name, available_configs, "mirror")
         src = repos_available / f"{name}.conf"
         dst = repos_enabled / f"{name}.conf"
 
@@ -137,22 +741,49 @@ def main():
             sys.exit(1)
 
         os.makedirs(repos_enabled, exist_ok=True)
+        rel_src = os.path.relpath(src, repos_enabled)
 
         if dst.exists():
-            log(f"Mirror '{name}' is already active ({dst})", level="INFO")
-            sys.exit(0)
+            if dst.is_symlink():
+                if os.path.normpath(dst.resolve()) == os.path.normpath(src):
+                    log(f"Mirror '{name}' is already active ({dst})", level="INFO")
+                    sys.exit(0)
+                log(
+                    f"{dst} is a symlink but does not point to {src}. "
+                    f"It must be manually removed from {repos_enabled} first.",
+                    level="ERROR",
+                )
+                sys.exit(1)
+            log(
+                f"{dst} is not a symlink and cannot be activated over. "
+                f"It must be manually removed from {repos_enabled} first.",
+                level="ERROR",
+            )
+            sys.exit(1)
 
-        os.symlink(os.path.relpath(src, repos_enabled), dst)
+        os.symlink(rel_src, dst)
         log(f"Activated mirror '{name}' -> {dst}", level="INFO")
         sys.exit(0)
 
     if args.deactivate:
         name = args.deactivate
+        if repos_enabled.exists():
+            enabled_configs = sorted(f.stem for f in repos_enabled.glob("*.conf"))
+            if enabled_configs:
+                name = _resolve_name_or_index(name, enabled_configs, "mirror")
         dst = repos_enabled / f"{name}.conf"
 
         if not dst.exists():
             log(f"Mirror '{name}' is not active ({dst} not found)", level="INFO")
             sys.exit(0)
+
+        if not dst.is_symlink():
+            log(
+                f"{dst} is not a symlink and cannot be deactivated. "
+                f"It must be manually removed from {repos_enabled}.",
+                level="ERROR",
+            )
+            sys.exit(1)
 
         dst.unlink()
         log(f"Deactivated mirror '{name}'", level="INFO")
@@ -160,6 +791,10 @@ def main():
 
     if args.test:
         name = args.test
+        if repos_available.exists():
+            available_configs = sorted(f.stem for f in repos_available.glob("*.conf"))
+            if available_configs:
+                name = _resolve_name_or_index(name, available_configs, "mirror")
         src = repos_available / f"{name}.conf"
         if not src.exists():
             log(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", level="ERROR")
@@ -234,70 +869,57 @@ def main():
         print("         distributions/components/architectures if enabled.")
         sys.exit(0)
 
-    if args.delete:
-        name = args.delete
-        src = repos_available / f"{name}.conf"
-        if not src.exists():
-            log(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", level="ERROR")
+    if args.reinitialise:
+        name = args.reinitialise
+        if repos_available.exists():
+            available_configs = sorted(f.stem for f in repos_available.glob("*.conf"))
+            if available_configs:
+                name = _resolve_name_or_index(name, available_configs, "mirror")
+        data_path = _resolve_dest(name, cfg_main)
+        if not data_path:
+            log(f"ERROR: Cannot resolve '{name}' to a dest directory", level="ERROR")
             sys.exit(1)
 
-        repo_root = cfg_main.repo_root
-
-        with open(src, 'r') as f:
-            mirror_cfg = yaml.safe_load(f) or {}
-
-        dest = mirror_cfg.get('dest')
-        if not dest:
-            log(f"ERROR: Mirror '{name}' has no 'dest' defined in {src}", level="ERROR")
+        data_path = os.path.abspath(data_path)
+        if not data_path.startswith(os.path.abspath(cfg_main.repo_root)):
+            log(f"ERROR: Refusing to reinitialise data directory outside repo_root: {data_path}", level="ERROR")
             sys.exit(1)
 
-        if os.path.isabs(dest):
-            data_path = dest
-        else:
-            data_path = os.path.join(repo_root, dest)
+        if not os.path.exists(data_path):
+            log(f"Data directory does not exist (nothing to reinitialise): {data_path}", level="INFO")
+            sys.exit(0)
 
-        if not os.path.abspath(data_path).startswith(os.path.abspath(repo_root)):
-            log(f"ERROR: Refusing to delete data directory outside repo_root: {data_path}", level="ERROR")
+        desc = f"Reinitialise '{name}' — snapshot and remove data at {data_path}"
+        if not _pin_confirm(desc, args.force):
             sys.exit(1)
 
-        print(f"DELETE mirror '{name}'")
-        print(f"  Config file:      {src}")
-        print(f"  Data directory:   {data_path}")
+        # Snapshot current data
+        snap_base = Path(cfg_main.repo_root) / "Snapshots"
+        snap_dir = snap_base / name
+        ts = _timestamp()
+        target = snap_dir / ts
+        os.makedirs(str(snap_dir), exist_ok=True)
+        log(f"Snapshotting '{name}' from {data_path} -> {target}", level="INFO")
+        subprocess.run(["cp", "-al", data_path, str(target)], check=True)
+        print(f"Created snapshot: {target}")
+
+        # Remove data directory
+        shutil.rmtree(data_path)
+        print(f"Removed data directory: {data_path}")
+
+        # Leave activation status untouched
         enabled_link = repos_enabled / f"{name}.conf"
         if enabled_link.exists():
-            print(f"  Active symlink:   {enabled_link}")
+            print(f"Activation status unchanged (still active: {enabled_link})")
         else:
-            print("  Active symlink:   (not active)")
+            print(f"Activation status unchanged (inactive)")
 
-        pin = f"{random.randint(0, 9999):04d}"
-        print("")
-        print("This is a DESTRUCTIVE operation.")
-        print("It will:")
-        print("  - Deactivate the mirror (remove symlink in repos-enabled, if present)")
-        print("  - Recursively delete ALL data under the data directory above")
-        print("")
-        print(f"To confirm, type the following PIN: {pin}")
-        entered = input("PIN: ").strip()
-        if entered != pin:
-            print("PIN mismatch - aborting delete")
-            sys.exit(1)
-
-        if enabled_link.exists():
-            enabled_link.unlink()
-            print(f"Deactivated mirror '{name}' (removed {enabled_link})")
-
-        if os.path.exists(data_path):
-            shutil.rmtree(data_path)
-            print(f"Deleted data directory: {data_path}")
-        else:
-            print(f"Data directory does not exist: {data_path}")
-
-        print("Mirror delete completed.")
+        print(f"Reinitialised '{name}' — next sync will re-download from upstream.")
         sys.exit(0)
 
     log("Use `mirror-dedupe --sync` to run the sync pipeline,", level="INFO")
     log("`mirror-dedupe-scan` to discover and configure repos,", level="INFO")
-    log("or `--list`/`--activate`/`--deactivate`/`--test`/`--delete`", level="INFO")
+    log("or `--list`/`--activate`/`--deactivate`/`--test`/`--reinitialise`", level="INFO")
     log("to manage existing configurations.", level="INFO")
     sys.exit(0)
 

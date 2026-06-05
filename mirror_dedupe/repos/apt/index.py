@@ -22,11 +22,12 @@ from mirror_dedupe.schema.package import Package, Packages
 class AptIndex(Schema.Index):
     ## @brief APT-specific Index that parses RFC822 stanza text.
 
-    def __init__(self, *, dest: str = "", **kwargs: Any) -> None:
+    def __init__(self, *, dest: str = "", size: int = 0, **kwargs: Any) -> None:
         ## @brief Construct an APT Index with a dest prefix for Package paths.
         ## @param dest    Repo dest prefix (empty in scan mode).
+        ## @param size    File size in bytes (0 if unknown).
         ## @param kwargs  Forwarded to ``Schema.Index.__init__``.
-        super().__init__(**kwargs)
+        super().__init__(**kwargs, size=size)
         self._dest = dest
 
     def _parse_packages(self, text: str, uri: str = "") -> Packages:
