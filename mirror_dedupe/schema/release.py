@@ -13,8 +13,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 import hashlib
 
 from .node import Node, NodeList
@@ -49,7 +48,7 @@ class Release(Node):
         suite: str,
         pocket: str | None,
         relative_dir: str,
-        path: str,
+        path: str = "",
         repo_type: str,
         kind: str,
         signature_extension: str | None = None,
@@ -83,20 +82,6 @@ class Release(Node):
         if digest is not None:
             data["digest"] = digest
         super().__init__(data)
-
-    def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
-        ## @brief Sync this Release and its child indices to the pool.
-        ##
-        ## @param config  Optional sync configuration dict.
-        ## @return List of paths written during sync.
-        if not Node._sync_enabled:
-            return []
-        results: List[Path] = []
-        if self._raw_bytes is not None:
-            results.extend(self.store(config=config))
-        for index in getattr(self, "indices", []):
-            results.extend(index.sync(config=config))
-        return results
 
     class Digest(Node):
         ## @brief Digest describing this Release's body.

@@ -21,10 +21,12 @@ import argparse
 import random
 import shutil
 from pathlib import Path
+from typing import List
 
 import yaml
 
 from .config import Config, DEFAULT_CONFIG_DIR
+from .lib.log import log
 
 
 def main():
@@ -41,6 +43,8 @@ def main():
                         help='Show what would be done without actually doing it')
     parser.add_argument('--mirror', type=str,
                         help='Process only the specified mirror (by name)')
+    parser.add_argument('--sync', action='store_true',
+                        help='Run the schema-based sync pipeline')
     parser.add_argument('--dedupe-only', action='store_true',
                         help='Only run deduplication phase (skip mirror sync)')
     parser.add_argument('--list', action='store_true',
@@ -67,8 +71,31 @@ def main():
         bool(args.delete),
     ]
     if sum(1 for x in management_ops if x) > 1:
-        print("ERROR: Only one of --list/--activate/--deactivate/--test/--delete may be used at a time", file=sys.stderr)
+        log("ERROR: Only one of --list/--activate/--deactivate/--test/--delete may be used at a time", level="ERROR")
         sys.exit(1)
+
+    if args.sync:
+        from .sync_orch import sync_repos
+
+        repo_names: List[str] = []
+        if args.mirror:
+            repo_names.append(args.mirror)
+        else:
+            enabled = Path(config_dir) / 'repos-enabled'
+            if enabled.exists():
+                repo_names = sorted(
+                    f.stem for f in enabled.glob("*.conf")
+                )
+            if not repo_names:
+                log(
+                    "No active repos found. Use --list to see available mirrors "
+                    "and --activate to enable one.",
+                    level="ERROR",
+                )
+                sys.exit(1)
+
+        sync_repos(repo_names, config_dir=args.config_dir)
+        sys.exit(0)
 
     config_dir_path = Path(config_dir)
     repos_available = config_dir_path / 'repos-available'
@@ -106,17 +133,17 @@ def main():
         dst = repos_enabled / f"{name}.conf"
 
         if not src.exists():
-            print(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", file=sys.stderr)
+            log(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", level="ERROR")
             sys.exit(1)
 
         os.makedirs(repos_enabled, exist_ok=True)
 
         if dst.exists():
-            print(f"Mirror '{name}' is already active ({dst})")
+            log(f"Mirror '{name}' is already active ({dst})", level="INFO")
             sys.exit(0)
 
         os.symlink(os.path.relpath(src, repos_enabled), dst)
-        print(f"Activated mirror '{name}' -> {dst}")
+        log(f"Activated mirror '{name}' -> {dst}", level="INFO")
         sys.exit(0)
 
     if args.deactivate:
@@ -124,18 +151,18 @@ def main():
         dst = repos_enabled / f"{name}.conf"
 
         if not dst.exists():
-            print(f"Mirror '{name}' is not active ({dst} not found)")
+            log(f"Mirror '{name}' is not active ({dst} not found)", level="INFO")
             sys.exit(0)
 
         dst.unlink()
-        print(f"Deactivated mirror '{name}'")
+        log(f"Deactivated mirror '{name}'", level="INFO")
         sys.exit(0)
 
     if args.test:
         name = args.test
         src = repos_available / f"{name}.conf"
         if not src.exists():
-            print(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", file=sys.stderr)
+            log(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", level="ERROR")
             sys.exit(1)
 
         with open(src, 'r') as f:
@@ -154,7 +181,7 @@ def main():
         gpg_key_path = mirror_cfg.get('gpg_key_path')
 
         if not upstream:
-            print(f"ERROR: Mirror '{name}' has no 'upstream' defined in {src}", file=sys.stderr)
+            log(f"ERROR: Mirror '{name}' has no 'upstream' defined in {src}", level="ERROR")
             sys.exit(1)
 
         print(f"Testing mirror '{name}'")
@@ -211,7 +238,7 @@ def main():
         name = args.delete
         src = repos_available / f"{name}.conf"
         if not src.exists():
-            print(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", file=sys.stderr)
+            log(f"ERROR: Mirror '{name}' does not exist in repos-available ({src})", level="ERROR")
             sys.exit(1)
 
         repo_root = cfg_main.repo_root
@@ -221,7 +248,7 @@ def main():
 
         dest = mirror_cfg.get('dest')
         if not dest:
-            print(f"ERROR: Mirror '{name}' has no 'dest' defined in {src}", file=sys.stderr)
+            log(f"ERROR: Mirror '{name}' has no 'dest' defined in {src}", level="ERROR")
             sys.exit(1)
 
         if os.path.isabs(dest):
@@ -230,7 +257,7 @@ def main():
             data_path = os.path.join(repo_root, dest)
 
         if not os.path.abspath(data_path).startswith(os.path.abspath(repo_root)):
-            print(f"ERROR: Refusing to delete data directory outside repo_root: {data_path}", file=sys.stderr)
+            log(f"ERROR: Refusing to delete data directory outside repo_root: {data_path}", level="ERROR")
             sys.exit(1)
 
         print(f"DELETE mirror '{name}'")
@@ -268,13 +295,10 @@ def main():
         print("Mirror delete completed.")
         sys.exit(0)
 
-    # Sync operations (--mirror, --dedupe-only, default mode) are not yet
-    # wired — they will be connected to the schema-based sync pipeline
-    # (Repo.sync() / Apt.sync()) in a future version.
-    print("Mirror sync is not yet implemented in this version.", file=sys.stderr)
-    print("Use `mirror-dedupe-scan` to discover repositories and", file=sys.stderr)
-    print("run `--list`/`--activate`/`--deactivate`/`--test`/`--delete`", file=sys.stderr)
-    print("to manage existing configurations.", file=sys.stderr)
+    log("Use `mirror-dedupe --sync` to run the sync pipeline,", level="INFO")
+    log("`mirror-dedupe-scan` to discover and configure repos,", level="INFO")
+    log("or `--list`/`--activate`/`--deactivate`/`--test`/`--delete`", level="INFO")
+    log("to manage existing configurations.", level="INFO")
     sys.exit(0)
 
 

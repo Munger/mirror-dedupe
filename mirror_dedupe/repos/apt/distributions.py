@@ -14,11 +14,11 @@
 from __future__ import annotations
 
 from typing import List, Optional, Tuple
-import sys
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.html_helpers import build_url
-from .discovery import looks_like_release, discover_distribution_paths, probe_fallback_suites, _release_text_cache
+from mirror_dedupe.lib.log import log
+from .discovery import looks_like_release, discover_distribution_paths, probe_fallback_suites
 from .distribution import Distribution
 
 
@@ -69,7 +69,7 @@ class DistributionsParser:
             distributions = Schema.Distributions()
             for path in self._candidates:
                 release_url = build_url(upstream, root, path, anchor)
-                print(f"  {path}: fetching Release", file=sys.stderr)
+                log(f"  {path}: fetching Release")
                 from mirror_dedupe.schema.node import Node
 
                 text_bytes = Node.probe_url(release_url, net_config)
@@ -79,13 +79,13 @@ class DistributionsParser:
                 if not text or not looks_like_release(text):
                     continue
 
-                _release_text_cache[(upstream, root, path)] = text
-
                 dist = Distribution(
                     url=release_url,
                     upstream=upstream,
                     name=path,
-                ).parse(config=net_config, text=text)
+                )
+                dist._cache = text_bytes
+                dist._repo = self.repo
                 distributions.append(dist)
 
             self.repo.setdefault("params", {})["discovery_method"] = "explicit"
@@ -97,7 +97,7 @@ class DistributionsParser:
         used_fallback = False
 
         if nobrowse:
-            print("[apt] skipping HTML BFS (cached: not browsable)", file=sys.stderr)
+            log("[apt] skipping HTML BFS (cached: not browsable)")
             used_fallback = True
         else:
             for idx, url in enumerate(upstreams_list):
@@ -109,16 +109,13 @@ class DistributionsParser:
                 )
                 if upstream_results:
                     if idx > 0:
-                        print(
-                            f"[apt] discovered distributions via alternate upstream {url}",
-                            file=sys.stderr,
-                        )
+                        log(f"[apt] discovered distributions via alternate upstream {url}")
                     break
 
         # --- 4. Codename fallback probe ---------------------------------
 
         if not upstream_results:
-            print("[apt] HTML discovery found no suites; trying codename fallback", file=sys.stderr)
+            log("[apt] HTML discovery found no suites; trying codename fallback")
             fallback = probe_fallback_suites(
                 upstream,
                 index_root=root,
@@ -126,12 +123,12 @@ class DistributionsParser:
                 config=net_config,
             )
             if fallback:
-                print(f"[apt] codename fallback found: {', '.join(fallback)}", file=sys.stderr)
+                log(f"[apt] codename fallback found: {', '.join(fallback)}")
                 upstream_results = [(name, upstream) for name in fallback]
                 used_fallback = True
 
         if not upstream_results:
-            print("[apt] no distributions discovered under /dists on any upstream; giving up", file=sys.stderr)
+            log("[apt] no distributions discovered under /dists on any upstream; giving up", level="WARN")
             return []
 
         # --- Set discovery params for next scan -------------------------
@@ -149,12 +146,18 @@ class DistributionsParser:
         distributions = Schema.Distributions()
         for path, eff_upstream in upstream_results:
             release_url = build_url(eff_upstream, root, path, anchor)
-            cached_text = _release_text_cache.get((eff_upstream, root, path))
             dist = Distribution(
                 url=release_url,
                 upstream=eff_upstream,
                 name=path,
-            ).parse(config=net_config, text=cached_text)
+            )
+            # If the body was pre-fetched during BFS discovery, pre-cache it
+            # so Distribution.on_parse() does not re-fetch.
+            from .discovery import _release_text_cache
+            cached_text = _release_text_cache.get((eff_upstream, root, path))
+            if cached_text is not None:
+                dist._cache = cached_text.encode("utf-8")
+            dist._repo = self.repo
             distributions.append(dist)
 
         return distributions

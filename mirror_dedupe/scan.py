@@ -21,6 +21,7 @@ import yaml
 from mirror_dedupe.schema.repo import Repo
 from mirror_dedupe.config import Config
 from mirror_dedupe.lib.html_helpers import url_hostname
+from mirror_dedupe.lib.log import log
 import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 
@@ -48,7 +49,7 @@ def scan(name: str, upstreams: List[str],
     ## @return A fully parsed Repo instance.
 
     primary_upstream = upstreams[0]
-    print(f"Scanning {primary_upstream}...", file=sys.stderr)
+    log(f"Scanning {primary_upstream}...")
 
     # --release/--dist/--releases are APT-specific concepts, so if the user
     # supplies explicit distribution names without also specifying a repo
@@ -81,7 +82,7 @@ def scan(name: str, upstreams: List[str],
             except Exception:
                 pass
 
-    repo = repo.parse()
+    repo = repo.analyse()
 
     return repo
 
@@ -95,8 +96,8 @@ def generate_config(repo: Repo, dest: str,
                     collapse_dists: bool = False) -> str:
     ## @brief Generate repository configuration from a fully-populated Repo.
     ##
-    ## ``repo`` is expected to have already been parsed by its concrete
-    ## ``Repo.Parser`` implementation.  This function applies user-specified
+    ## ``repo`` is expected to have already been parsed by its
+    ## ``on_parse()`` method.  This function applies user-specified
     ## filters and emits a YAML configuration that mirror-dedupe can consume.
     ##
     ## GPG keys are no longer auto-discovered here.  If the caller supplies
@@ -126,7 +127,7 @@ def generate_config(repo: Repo, dest: str,
         step += 1
         return label
 
-    print(f"  {next_step_label()} Examining discovered repository structure...", file=sys.stderr)
+    log(f"  {next_step_label()} Examining discovered repository structure...")
 
     upstream_index = repo.upstream_idx
     upstream_node = repo.upstreams[upstream_index] if repo.upstreams else None
@@ -139,7 +140,7 @@ def generate_config(repo: Repo, dest: str,
             if dist.name and dist.name not in discovered:
                 discovered.append(str(dist.name))
     if not discovered:
-        print("      Warning: Could not auto-detect distributions", file=sys.stderr)
+        log("      Warning: Could not auto-detect distributions", level="WARN")
 
     all_dists_mode = False
     collapsed_from_all = False
@@ -153,14 +154,7 @@ def generate_config(repo: Repo, dest: str,
             distributions = dists
     else:
         if not discovered:
-            print(
-                "ERROR: No distributions were auto-detected and no --dist/--release/--releases overrides were provided.",
-                file=sys.stderr,
-            )
-            print(
-                "       Please rerun with explicit --releases (or --dist) to choose which suites to mirror.",
-                file=sys.stderr,
-            )
+            log("ERROR: No distributions were auto-detected and no --dist/--release/--releases overrides were provided.\n       Please rerun with explicit --releases (or --dist) to choose which suites to mirror.", level="ERROR")
             sys.exit(1)
         all_dists_mode = True
         distributions = discovered
@@ -188,9 +182,9 @@ def generate_config(repo: Repo, dest: str,
             all_dists_mode = False
             collapsed_from_all = True
 
-    print(f"      Using distributions: {', '.join(distributions)}", file=sys.stderr)
+    log(f"      Using distributions: {', '.join(distributions)}")
 
-    print(f"  {next_step_label()} Discovering architectures/components...", file=sys.stderr)
+    log(f"  {next_step_label()} Discovering architectures/components...")
     arch_set = set()
     comp_set = set()
 
@@ -212,10 +206,7 @@ def generate_config(repo: Repo, dest: str,
         detected_set = set(detected_arches)
         for a in architectures:
             if a not in detected_set:
-                print(
-                    f"      Warning: architecture '{a}' was not found in Release metadata",
-                    file=sys.stderr,
-                )
+                log(f"      Warning: architecture '{a}' was not found in Release metadata", level="WARN")
     else:
         architectures = detected_arches
 
@@ -224,10 +215,7 @@ def generate_config(repo: Repo, dest: str,
         detected_set = set(detected_components)
         for c in components:
             if c not in detected_set:
-                print(
-                    f"      Warning: component '{c}' was not found in Release metadata",
-                    file=sys.stderr,
-                )
+                log(f"      Warning: component '{c}' was not found in Release metadata", level="WARN")
     else:
         components = detected_components
 
@@ -237,14 +225,11 @@ def generate_config(repo: Repo, dest: str,
         architectures = [a for a in architectures if a in mask_set]
         removed = [a for a in before if a not in architectures]
         if removed:
-            print(
-                f"      Note: architectures filtered by global mask: removed {', '.join(removed)}",
-                file=sys.stderr,
-            )
+            log(f"      Note: architectures filtered by global mask: removed {', '.join(removed)}")
 
-    print("", file=sys.stderr)
-    print(f"      Architectures: {', '.join(architectures)}", file=sys.stderr)
-    print(f"      Components: {', '.join(components)}", file=sys.stderr)
+    log("")
+    log(f"      Architectures: {', '.join(architectures)}")
+    log(f"      Components: {', '.join(components)}")
 
     name = repo.name
     upstream_index = repo.upstream_idx
@@ -260,6 +245,7 @@ def generate_config(repo: Repo, dest: str,
         "",
         f"name: {name}",
         f"dest: {dest}",
+        f"repo_type: {repo.get('repo_type', repo.REPO_TYPE)}",
     ]
 
     if upstream_entries:
@@ -272,7 +258,7 @@ def generate_config(repo: Repo, dest: str,
 
     if gpg_key_url:
         config_lines.append(f"gpg_key_url: {gpg_key_url}")
-        print(f"      GPG key URL (user-supplied): {gpg_key_url}", file=sys.stderr)
+        log(f"      GPG key URL (user-supplied): {gpg_key_url}")
 
     config_lines.append("architectures:")
     for arch in architectures:
@@ -295,14 +281,16 @@ def generate_config(repo: Repo, dest: str,
     if (all_dists_mode and not collapse_dists) or (len(distributions) == 1 and distributions[0] == 'stable'):
         config_lines.append("expand_distributions: false")
 
+    config_lines.append("params:")
     params = repo.get("params")
     if params:
-        config_lines.append("params:")
         method = params.get("discovery_method", "html_bfs")
         config_lines.append(f"  discovery_method: {method}")
         nobrowse = params.get("nobrowse", False)
         if nobrowse:
             config_lines.append("  nobrowse: true")
+        ipv6_ok = params.get("ipv6_ok", True)
+        config_lines.append(f"  ipv6_enabled: {str(ipv6_ok).lower()}")
 
     config_lines.append("")
 
@@ -442,7 +430,7 @@ def main() -> None:
     elif args.upstream:
         upstreams = [args.upstream]
     else:
-        print("ERROR: No upstream URL provided. Supply either a positional upstream or --upstream/--upstreams.", file=sys.stderr)
+        log("ERROR: No upstream URL provided. Supply either a positional upstream or --upstream/--upstreams.", level="ERROR")
         sys.exit(1)
 
     try:
@@ -455,18 +443,7 @@ def main() -> None:
             config_dir=args.config_dir,
         )
     except NotImplementedError:
-        print(
-            f"ERROR: No supported Repo implementation could parse upstream {upstreams[0]!r}.",
-            file=sys.stderr,
-        )
-        print(
-            "       If this is an APT repository with an unusual layout, you may need to add",
-            file=sys.stderr,
-        )
-        print(
-            "       or extend a Repo implementation (e.g. Apt) rather than using scan.py directly.",
-            file=sys.stderr,
-        )
+        log(f"ERROR: No supported Repo implementation could parse upstream {upstreams[0]!r}.\n       If this is an APT repository with an unusual layout, you may need to add\n       or extend a Repo implementation (e.g. Apt) rather than using scan.py directly.", level="ERROR")
         sys.exit(1)
 
     if args.gpg_key_url:
@@ -501,28 +478,12 @@ def main() -> None:
         snapshot_path = os.path.join(config_dir, f"{snapshot_basename}.json")
         with open(snapshot_path, 'w', encoding='utf-8') as sf:
             json.dump(repo.snapshot(), sf, indent=2)
-        print(f"Snapshot saved to: {snapshot_path}", file=sys.stderr)
+        log(f"Snapshot saved to: {snapshot_path}")
     except Exception as e:
-        print(f"Warning: failed to write snapshot: {e}", file=sys.stderr)
+        log(f"Warning: failed to write snapshot: {e}", level="WARN")
 
-    print(f"Configuration saved to: {config_file}", file=sys.stderr)
-    print("", file=sys.stderr)
-    print("Next steps:", file=sys.stderr)
-    print("  # Test the repository configuration before activating it", file=sys.stderr)
-    print(f"  mirror-dedupe --test {args.name}", file=sys.stderr)
-    print("", file=sys.stderr)
-    print("  # If the test looks good, activate the repository:", file=sys.stderr)
-    print(f"  mirror-dedupe --activate {args.name}", file=sys.stderr)
-    print("", file=sys.stderr)
-    print("  # Manual enable (equivalent to --activate) if you prefer:", file=sys.stderr)
-    print(f"  ln -s {config_file} {os.path.join(args.config_dir, 'repos-enabled', args.name + '.conf')}", file=sys.stderr)
-    print(f"\nOr simply:", file=sys.stderr)
-    print(f"  cd {args.config_dir}/repos-enabled", file=sys.stderr)
-    print(f"  ln -s ../repos-available/{args.name}.conf .", file=sys.stderr)
-
-    print("", file=sys.stderr)
-    print("This is my best guess and should give you a decent head start when mirroring this repo.", file=sys.stderr)
-    print("However, I'm not perfect so you really should examine the config file carefully before activating it.", file=sys.stderr)
+    log(f"Configuration saved to: {config_file}")
+    log("\nNext steps:\n  # Test the repository configuration before activating it\n  mirror-dedupe --test {args.name}\n\n  # If the test looks good, activate the repository:\n  mirror-dedupe --activate {args.name}\n\n  # Manual enable (equivalent to --activate) if you prefer:\n  ln -s {config_file} {os.path.join(args.config_dir, 'repos-enabled', args.name + '.conf')}\n\nOr simply:\n  cd {args.config_dir}/repos-enabled\n  ln -s ../repos-available/{args.name}.conf .\n\nThis is my best guess and should give you a decent head start when mirroring this repo.\nHowever, I'm not perfect so you really should examine the config file carefully before activating it.")
 
 
 if __name__ == '__main__':

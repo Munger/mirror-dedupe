@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-import subprocess
+from pathlib import Path
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List
@@ -223,44 +223,41 @@ _inventory_cache: Inventory | None = None
 
 
 def build_inventory(pool_root: str, repos_root: str) -> Inventory:
-    ## @brief Scan pool and repos via ``find`` to map hashes to repo paths.
+    ## @brief Walk pool and repos to map hashes to repo paths.
     ##
-    ## Uses a single ``find`` invocation with ``-printf`` to collect
-    ## inode, link count, and path for every file under both roots.
-    ## Builds and returns a populated ``Inventory``.
+    ## Iterates all files under *pool_root* and *repos_root* using
+    ## ``os.walk``, collecting inode, link count, and path for each
+    ## file.  Builds and returns a populated ``Inventory``.
     ##
     ## @param pool_root   Absolute path to the content-addressable pool.
     ## @param repos_root  Absolute path to the repo tree.
     ## @return A fully populated Inventory.
 
-    proc = subprocess.run(
-        ["find", pool_root, repos_root, "-xdev", "-type", "f", "-printf", "%i %n %p\0"],
-        check=True,
-        capture_output=True,
-    )
-    data = proc.stdout.split(b"\0")
-
     inodes: Dict[int, Dict[str, object]] = {}
     pool_files: Dict[str, int] = {}
     repo_files: Dict[str, int] = {}
-    for entry in data:
-        if not entry:
-            continue
-        try:
-            inode_str, links_str, path_str = entry.decode("utf-8", errors="ignore").split(" ", 2)
-            inode = int(inode_str)
-            links = int(links_str)
-        except ValueError:
-            continue
-        path = path_str.strip()
-        entry_ref = inodes.setdefault(inode, {"hash": None, "links": links})
-        entry_ref["links"] = links
-        if path.startswith(pool_root):
-            hash_val = Path(path).name
-            entry_ref["hash"] = hash_val
-            pool_files[hash_val] = inode
-        elif path.startswith(repos_root):
-            repo_files[path] = inode
+
+    for root, dirs, files in os.walk(pool_root):
+        for name in files:
+            fpath = os.path.join(root, name)
+            try:
+                st = os.stat(fpath)
+            except OSError:
+                continue
+            inode = st.st_ino
+            entry = inodes.setdefault(inode, {"hash": None, "links": st.st_nlink})
+            entry["links"] = st.st_nlink
+            entry["hash"] = name
+            pool_files[name] = inode
+
+    for root, dirs, files in os.walk(repos_root):
+        # Skip hidden dirs (.mirror-dedupe, etc.)
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in files:
+            fpath = os.path.join(root, name)
+            inode = os.stat(fpath).st_ino
+            repo_files[fpath] = inode
+            inodes.setdefault(inode, {"hash": None, "links": 1})
 
     return Inventory(
         inodes=inodes,
