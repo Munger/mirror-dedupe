@@ -22,12 +22,20 @@ from mirror_dedupe.schema.package import Package, Packages
 class AptIndex(Schema.Index):
     ## @brief APT-specific Index that parses RFC822 stanza text.
 
+    def __init__(self, *, dest: str = "", **kwargs: Any) -> None:
+        ## @brief Construct an APT Index with a dest prefix for Package paths.
+        ## @param dest    Repo dest prefix (empty in scan mode).
+        ## @param kwargs  Forwarded to ``Schema.Index.__init__``.
+        super().__init__(**kwargs)
+        self._dest = dest
+
     def _parse_packages(self, text: str, uri: str = "") -> Packages:
         ## @brief Parse RFC822 stanzas into Package children.
         ##
         ## Skips non-package/sources indices, parses ``Filename``,
         ## ``SHA256``, and ``Size`` from each stanza, and constructs
-        ## ``Package`` nodes with a full download URI.
+        ## ``Package`` nodes with a full download URI and repo-root-relative
+        ## path (prefixed with ``self._dest``).
         ##
         ## @param text  Decompressed Packages text.
         ## @param uri   The URI of this index.
@@ -37,6 +45,7 @@ class AptIndex(Schema.Index):
         if kind not in ("packages", "sources"):
             return Packages()
 
+        dest = self._dest
         base = uri.split("/dists/", 1)[0] if "/dists/" in uri else ""
         packages = Packages()
 
@@ -63,8 +72,9 @@ class AptIndex(Schema.Index):
                 except ValueError:
                     continue
                 pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
+                pkg_path = f"{dest}/{filename}" if dest else filename
                 packages.append(Package(
-                    path=filename,
+                    path=pkg_path,
                     hash=sha256,
                     size=size_int,
                     uri=pkg_uri,

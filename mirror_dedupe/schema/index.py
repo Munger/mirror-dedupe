@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .node import Node, NodeList
 from .package import Package, Packages
@@ -31,6 +31,10 @@ class Index(Node):
     ## Optional fields:
     ##
     ## * ``metadata`` — parser-specific data stored in an ``Index.Metadata`` node
+
+    _children = ["packages"]
+    ## @brief Declare ``packages`` as child nodes so that ``_tree_iter()``
+    ##        (used by ``_sync_content()``) walks into Package children.
 
     _restore_via_payload = True
 
@@ -80,10 +84,32 @@ class Index(Node):
         ## @return A ``Packages`` NodeList.
         return Packages()
 
-    def parse(self) -> "Index":
-        ## @brief Decompress raw bytes and parse into child Package nodes.
+    def parse(self, **kwargs: Any) -> "Index":  # type: ignore[override]
+        ## @brief Fetch index content, decompress, and parse into child Package nodes.
+        ##
+        ## Only processes indices whose ``kind`` is ``"packages"`` or
+        ## ``"sources"`` — Contents, Translation, and other metadata files
+        ## are skipped (they are already enumeratively downloaded by the
+        ## Release's hash-section entries and do not need stanza parsing).
+        ##
+        ## In scan mode, ``fetch()`` performs an in-memory HTTP download.
+        ## In sync mode, ``fetch()`` synchronises through the pool via
+        ## ``self.read()``.  Fetch failures (e.g. upstream 404 for an
+        ## uncompressed variant) are logged and the node is returned
+        ## without children.
+        ##
+        ## @param config  Optional configuration dict passed to ``fetch()``.
         ## @return This Index (with ``packages`` populated).
-        data = self._raw_bytes
+        config: Optional[Dict[str, Any]] = kwargs.get("config")
+        kind = self.get("kind")
+        if kind not in ("packages", "sources"):
+            return self
+        try:
+            data = self.fetch(uri=self.get("uri"), config=config)
+        except RuntimeError:
+            from ..lib.log import log
+            log(f"  Failed to fetch index {self.get('uri', 'unknown')}", level="ERROR")
+            return self
         if not data:
             return self
         path = self.get("path", "")
@@ -97,7 +123,7 @@ class Index(Node):
             text = data.decode("utf-8", errors="replace")
         uri = self.get("uri", "")
         self.packages = self._parse_packages(text, uri=uri)
-        self._raw_bytes = None
+        self._cache = None
         return self
 
     class Metadata(Node):

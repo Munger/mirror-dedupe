@@ -13,10 +13,10 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
-import sys
 
 from mirror_dedupe.lib.codenames import apt_codenames
 from mirror_dedupe.lib.html_helpers import build_url, extract_href
+from mirror_dedupe.lib.log import log
 from mirror_dedupe.schema.node import Node
 
 
@@ -29,7 +29,7 @@ PROBE_TIMEOUT = 5  ## @brief Per-URL timeout (seconds) for codename probes.
 _bfs_cache: Dict[Tuple[str, str, str, int], List[Tuple[str, str]]] = {}
 
 # Cache: Release text by (upstream, index_root, path).  Populated during BFS
-# probe and consumed by Distribution.parse() so the same Release file is never
+# probe and consumed by DistributionsParser so the same Release file is never
 # fetched more than once per scan.
 _release_text_cache: Dict[Tuple[str, str, str], str] = {}
 
@@ -138,11 +138,11 @@ def discover_distribution_paths(
 
     if root_html is None:
         dists_url = build_url(upstream, index_root)
-        print(f"[apt] probing dists index: {dists_url}", file=sys.stderr)
+        log(f"[apt] probing dists index: {dists_url}", level="DEBUG")
         root_html = _fetch_text(dists_url)
 
     if not root_html:
-        print("[apt] no HTML content at /dists/; giving up on suite discovery", file=sys.stderr)
+        log("[apt] no HTML content at /dists/; giving up on suite discovery", level="DEBUG")
         # Child prefix fallback: /dists/ may sit under a subdirectory (e.g. nodesource)
         if _allow_child_prefix:
             base_html = _fetch_text(upstream)
@@ -168,33 +168,33 @@ def discover_distribution_paths(
         return []
 
     lines = root_html.splitlines()
-    print(f"[apt] /dists/ HTML line count: {len(lines)}", file=sys.stderr)
+    log(f"[apt] /dists/ HTML line count: {len(lines)}", level="DEBUG")
 
     suites: List[str] = []
     for name in _iter_href_names(lines, dirs_only=False):
         if name and name not in suites:
-            print(f"[apt] discovered suite under /dists: {name}", file=sys.stderr)
+            log(f"[apt] discovered suite under /dists: {name}", level="DEBUG")
             suites.append(name)
 
     if not suites:
-        print(
+        log(
             "[apt] no suites discovered in /dists/ HTML; attempting dirs-only fallback",
-            file=sys.stderr,
+            level="DEBUG",
         )
         for name in _iter_href_names(lines, dirs_only=True):
             if name and name not in suites:
-                print(f"[apt] discovered suite under /dists (dirs-only): {name}", file=sys.stderr)
+                log(f"[apt] discovered suite under /dists (dirs-only): {name}", level="DEBUG")
                 suites.append(name)
 
     if not suites:
-        print("[apt] no suites discovered in /dists/ HTML; giving up on suite discovery", file=sys.stderr)
+        log("[apt] no suites discovered in /dists/ HTML; giving up on suite discovery", level="DEBUG")
         _bfs_cache[cache_key] = []
         return []
 
     queue: List[tuple[str, int]] = [(name, 1) for name in suites]
     seen_paths = {name for name in suites}
 
-    print(f"[apt] total top-level suites discovered: {len(queue)}", file=sys.stderr)
+    log(f"[apt] total top-level suites discovered: {len(queue)}", level="DEBUG")
 
     discovered_paths: List[str] = []
 
@@ -207,10 +207,10 @@ def discover_distribution_paths(
         text = _fetch_text(release_url)
         if text and looks_like_release(text):
             _release_text_cache[(upstream, index_root, path)] = text
-            print(f"  {path}: fetched", file=sys.stderr)
+            log(f"  {path}: fetched")
             discovered_paths.append(path)
             continue  # Leaf found — no need to descend
-        print(f"  {path}: not found", file=sys.stderr)
+        log(f"  {path}: not found")
 
         if depth >= max_depth:
             continue
@@ -226,7 +226,7 @@ def discover_distribution_paths(
             if child_path in seen_paths:
                 continue
 
-            print(f"[apt] discovered nested candidate under /dists: {child_path}", file=sys.stderr)
+            log(f"[apt] discovered nested candidate under /dists: {child_path}", level="DEBUG")
             seen_paths.add(child_path)
             queue.append((child_path, depth + 1))
 
@@ -256,23 +256,28 @@ def probe_any_suite(
     index_root: str = "dists",
     anchor: str = "Release",
     config: Optional[Dict[str, Any]] = None,
+    extra_suites: Optional[List[str]] = None,
 ) -> bool:
     ## @brief Return ``True`` if a known suite has a valid Release at *upstream*.
     ##
     ## Short-circuits on the first confirmed match.  Intended for
     ## type detection (``is_this_yours``) where a single hit is
-    ## sufficient.
+    ## sufficient.  Tries *extra_suites* (from config ``distributions``)
+    ## before falling back to the static known-suite list.
     ##
-    ## @param upstream    Upstream URL.
-    ## @param index_root  Index root directory (default ``"dists"``).
-    ## @param anchor      Anchor filename (default ``"Release"``).
-    ## @param config      Optional network config dict (ipv6_ok, timeout).
-    ## @return True if any known suite has a valid Release file.
+    ## @param upstream     Upstream URL.
+    ## @param index_root   Index root directory (default ``"dists"``).
+    ## @param anchor       Anchor filename (default ``"Release"``).
+    ## @param config       Optional network config dict (ipv6_ok, timeout).
+    ## @param extra_suites Optional suite names from config to probe first.
+    ## @return True if any suite has a valid Release file.
 
     short_config = dict(config or {})
     short_config.setdefault("timeout", PROBE_TIMEOUT)
 
-    for suite in _known_suites_to_probe():
+    suites_to_try: list[str] = list(extra_suites or [])
+    suites_to_try.extend(_known_suites_to_probe())
+    for suite in suites_to_try:
         rel_url = build_url(upstream, index_root, suite, anchor)
         try:
             text_bytes = Node.probe_url(rel_url, short_config)
@@ -325,7 +330,7 @@ def probe_fallback_suites(
         try:
             text_bytes = Node.probe_url(rel_url, short_config)
             if text_bytes is None:
-                print(f"  {suite}: not found", file=sys.stderr)
+                log(f"  {suite}: not found")
                 continue
             text = text_bytes.decode("utf-8", errors="replace")
         except Exception:
@@ -342,10 +347,10 @@ def probe_fallback_suites(
                     if claimed is None:
                         claimed = val
             if claimed == suite:
-                print(f"  {suite}: found", file=sys.stderr)
+                log(f"  {suite}: found")
                 candidates.append(suite)
                 continue
 
-        print(f"  {suite}: not found", file=sys.stderr)
+        log(f"  {suite}: not found")
 
     return candidates

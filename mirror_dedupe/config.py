@@ -17,6 +17,8 @@ import sys
 import yaml
 from pathlib import Path
 
+from mirror_dedupe.lib.log import log
+
 
 DEFAULT_CONFIG_DIR = "/etc/mirror-dedupe"
 
@@ -31,15 +33,20 @@ class Config:
     def load(cls, config_dir: str = DEFAULT_CONFIG_DIR) -> "Config":
         ## @brief Load (or return cached) Config for *config_dir*.
         ##
-        ## Returns the cached instance if one exists for the same
-        ## resolved directory; otherwise creates a new one.
+        ## Returns the cached instance if one exists for any loaded
+        ## directory when called without an explicit override (i.e. the
+        ## default).  When an explicit *config_dir* is given, reloads if
+        ## different from the cached directory.
         ##
         ## @param config_dir  Path to the configuration directory.
         ## @return A Config instance.
 
         config_dir_resolved = str(Path(config_dir or DEFAULT_CONFIG_DIR).resolve())
-        if cls._instance is not None and cls._config_dir == config_dir_resolved:
-            return cls._instance
+        if cls._instance is not None:
+            if config_dir == DEFAULT_CONFIG_DIR:
+                return cls._instance
+            if cls._config_dir == config_dir_resolved:
+                return cls._instance
         cls._instance = cls(config_dir_resolved)
         cls._config_dir = config_dir_resolved
         return cls._instance
@@ -73,7 +80,7 @@ class Config:
             with open(main_config_path, 'r') as f:
                 self._data = yaml.safe_load(f) or {}
         except Exception as e:
-            print(f"Error loading configuration from {config_dir_resolved}: {e}")
+            log(f"Error loading configuration from {config_dir_resolved}: {e}", level="ERROR")
             sys.exit(1)
 
         global_disable_ipv6 = self._data.get('disable_ipv6', False)
@@ -86,11 +93,11 @@ class Config:
         self.collapse_distributions = self._data.get('collapse_distributions', False)
         self.buffer_size = self._data.get('buffer_size', 1048576)
         self.parallel_downloads = self._data.get('parallel_downloads', 10)
+        self.max_concurrent_syncs = self._data.get('max_concurrent_syncs', 2)
         self.curl_timeout = self._data.get('curl_timeout', 900)
         self.max_retries = self._data.get('max_retries', 3)
         self.progress_interval = self._data.get('progress_interval', 1000)
         self.no_hardlinks = bool(self._data.get('no_hardlinks', False))
-
         repos_dir = Path(config_dir_resolved) / 'repos-enabled'
         mirrors: list[dict] = []
 
@@ -108,7 +115,7 @@ class Config:
                             mirror['disable_ipv6'] = mirror.get('disable_ipv6', global_disable_ipv6)
                             mirrors.append(mirror)
                 except Exception as e:
-                    print(f"Warning: Failed to load {repo_file}: {e}")
+                    log(f"Warning: Failed to load {repo_file}: {e}", level="WARN")
 
         # Global arch mask: only keep architectures present in both mask and per-mirror list
         arch_mask = self._data.get('architectures', '*')
@@ -136,9 +143,10 @@ class Config:
                     mirror['architectures'] = effective
                 else:
                     # Keep original list rather than silently emptying it
-                    print(
+                    log(
                         f"Warning: Mirror '{mirror.get('name', '<unknown>')}' has no architectures left "
                         f"after applying global mask {mask_arches}; keeping original list {repo_arches}",
+                        level="WARN",
                     )
 
         self.mirrors = mirrors
@@ -149,6 +157,7 @@ class Config:
         self._data['collapse_distributions'] = self.collapse_distributions
         self._data['buffer_size'] = self.buffer_size
         self._data['parallel_downloads'] = self.parallel_downloads
+        self._data['max_concurrent_syncs'] = self.max_concurrent_syncs
         self._data['curl_timeout'] = self.curl_timeout
         self._data['max_retries'] = self.max_retries
         self._data['progress_interval'] = self.progress_interval
@@ -168,4 +177,9 @@ class Config:
         return self._data[key]
 
     def get(self, key, default=None):
+        ## @brief Dict-style get with a default fallback.
+        ##
+        ## @param key      Config key to look up.
+        ## @param default  Fallback value (default ``None``).
+        ## @return The value for *key*, or *default* if not present.
         return self._data.get(key, default)

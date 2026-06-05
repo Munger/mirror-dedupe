@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from mirror_dedupe import schema as Schema
 
@@ -21,6 +21,10 @@ class Distribution(Schema.Distribution):
     ## @brief APT-specific Distribution node that fetches Release files, parses
     ##        release headers (components, architectures, fields) and hash sections
     ##        (MD5Sum, SHA1, SHA256), and populates metadata.
+
+    _children = ["release"]
+    ## @brief Base ``Node.parse()`` recurses into the child Release after
+    ##        ``on_parse()`` completes.
 
     class Metadata(Schema.Distribution.Metadata):
         ## @brief APT-specific metadata for a distribution derived from a Release.
@@ -163,24 +167,49 @@ class Distribution(Schema.Distribution):
 
         return sections
 
-    def parse(self, config: Any = None, text: str | None = None) -> "Distribution":
-        ## @brief Populate this distribution from a Release file.
+    def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
+        ## @brief Populate the Distribution and create child Release.
         ##
-        ## If *text* is provided (e.g. from the BFS cache), parse from it
-        ## directly instead of fetching the Release URL over HTTP.
+        ## In scan mode, fetches the Release body via HTTP, parses headers
+        ## into ``self["metadata"]``, and creates a child Release node
+        ## with the body pre-cached.
+        ##
+        ## In sync mode, skips the HTTP fetch (the Release will fetch
+        ## through the pool when its own ``on_parse()`` runs) and creates
+        ## the child Release directly with the correct path and dest.
+        ##
+        ## Architecture/component filters from the parent Repo are set on
+        ## the child Release for index filtering.
         ##
         ## @param config  Optional network config dict (ipv6_ok, timeout).
-        ## @param text    Optional pre-fetched Release body text.
-        ## @return This Distribution (for chaining).
+        ## @return None
 
-        if text is None:
-            try:
-                text_bytes = self.fetch(config=config)
-            except RuntimeError:
-                return self  # Silently skip distributions whose Release is unreachable
-            if text_bytes is None:
-                return self
-            text = text_bytes.decode("utf-8", errors="replace")
+        from mirror_dedupe.config import Config
+        repo = getattr(self, "_repo", None)
+
+        if getattr(Config.load(), "_sync_mode", False):
+            # Sync mode: Release downloads through the pool — no fetch needed here
+            dest = repo.get("dest", "") if repo else ""
+            from .release import Release as AptRelease
+            self.release = AptRelease(
+                url=self.get("uri"),
+                upstream=self.upstream,
+                suite=self.name,
+                dest=dest,
+            )
+            if repo is not None:
+                self.release._arch_filter = getattr(repo, "_arch_filter", None)
+                self.release._comp_filter = getattr(repo, "_comp_filter", None)
+            return
+
+        # Scan mode: fetch Release body via HTTP, parse headers, create Release
+        try:
+            text_bytes = self.fetch(uri=self.get("uri"), config=config)
+        except RuntimeError:
+            return
+        if text_bytes is None:
+            return
+        text = text_bytes.decode("utf-8", errors="replace")
 
         # Parse Release file headers to extract components, architectures, fields
         parsed = self._parse_release_headers(text)
@@ -205,4 +234,17 @@ class Distribution(Schema.Distribution):
         self["architectures"] = architectures
         self["metadata"] = release_metadata
 
-        return self
+        # Create child Release — pre-cache the body so the Release
+        # does not re-fetch it from upstream.
+        from .release import Release as AptRelease
+
+        self.release = AptRelease(
+            url=self.get("uri"),
+            upstream=self.upstream,
+            suite=self.name,
+        )
+        self.release._cache = text_bytes
+        # Pass architecture/component filters from the parent Repo
+        if repo is not None:
+            self.release._arch_filter = getattr(repo, "_arch_filter", None)
+            self.release._comp_filter = getattr(repo, "_comp_filter", None)

@@ -24,9 +24,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import subprocess
+import threading
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Generic, Iterable, Optional, Tuple, Type, TypeVar, Callable
+
+from ..lib.http_download import HTTPFetch, HTTPDownload, kill_active_subprocesses
+
+_staging_locks: dict[str, threading.Lock] = {}
+_staging_locks_lock = threading.Lock()
 
 
 class Node(dict):
@@ -41,7 +46,11 @@ class Node(dict):
     _restore_via_payload: ClassVar[bool] = False
     _node_fields: ClassVar[Dict[str, Type["Node"]]] = {}
     _list_fields: ClassVar[Dict[str, Tuple[Type["NodeList"], Type["Node"]]]] = {}
-    _sync_enabled: ClassVar[bool] = True
+    _children: ClassVar[List[str]] = []
+    ## @brief Names of attributes holding child nodes to recurse into
+    ##        during ``parse()``.  Subclasses override to declare their
+    ##        structural children (e.g. ``["distributions"]``,
+    ##        ``["release"]``, ``["indices"]``).
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         ## @brief Collect reserved attribute names for each subclass.
@@ -110,7 +119,7 @@ class Node(dict):
         ## @param kwargs  Keyword arguments stored as schema fields.
 
         super().__init__()
-        object.__setattr__(self, "_raw_bytes", None)
+        object.__setattr__(self, "_cache", None)
 
         if args:
             if len(args) > 1:
@@ -141,6 +150,7 @@ class Node(dict):
         ##
         ## @return A plain dict/list/scalar structure.
 
+        # Recursively convert Node → dict, list → list, scalar → identity.
         def convert(value: Any) -> Any:
             if isinstance(value, Node):
                 return {k: convert(v) for k, v in value.items()}
@@ -223,6 +233,14 @@ class Node(dict):
 
     @classmethod
     def _from_payload(cls, payload: Dict[str, Any]) -> "Node":
+        ## @brief Create a Node from a plain payload dict without parsing.
+        ##
+        ## Bypasses the normal ``__init__`` to avoid side effects —
+        ## used during snapshot restore where the payload already contains
+        ## all fields.
+        ##
+        ## @param payload  Plain dict of field values.
+        ## @return A new Node instance.
         self = cls.__new__(cls)
         Node.__init__(self, payload)
         return self
@@ -292,6 +310,7 @@ class Node(dict):
         ##
         ## @param func  Callable to apply to each child Node.
 
+        # Recurse into Node/NodeList/dict/list to apply func to every leaf.
         def recurse(value: Any) -> None:
             if isinstance(value, Node):
                 func(value)
@@ -363,6 +382,16 @@ class Node(dict):
         return self._clone_recursive({})
 
     def _clone_recursive(self, memo: Dict[int, "Node"]) -> "Node":
+        ## @brief Deep-clone this node using an identity memo dict.
+        ##
+        ## Uses ``object.__new__`` and ``dict.__init__`` to bypass the
+        ## subclass ``__init__`` (which may have side effects) while
+        ## preserving the subclass type.  Shared references (same Node
+        ## reachable through multiple paths) are preserved via the memo.
+        ##
+        ## @param memo  Dict mapping ``id(original) → clone`` for cycle
+        ##              and shared-reference detection.
+        ## @return A deep copy of this Node.
         if not isinstance(self, dict):
             raise TypeError(
                 "Node subclass must remain dict-backed for clone() to work. "
@@ -378,6 +407,7 @@ class Node(dict):
         memo[obj_id] = new
         dict.__init__(new, {})
 
+        # Deep-clone a single value: recurse into Node/list/dict.
         def clone_value(value: Any) -> Any:
             if isinstance(value, Node):
                 return value._clone_recursive(memo)
@@ -458,148 +488,238 @@ class Node(dict):
         if not uri:
             return None
         try:
-            return cls._fetch_url(uri, config)
+            return HTTPFetch(uri)
         except RuntimeError:
             return None
 
-    @staticmethod
-    def _fetch_url(uri: str, config=None, output_path=None) -> Optional[bytes]:
-        timeout = config.get("timeout", 300) if config else 300
-        base = ["curl", "-s", "-f", "-L", "--max-time", str(timeout)]
-        if output_path:
-            base += ["-o", str(output_path)]
-        args = base + [uri]
-        capture = output_path is None
-        proc = subprocess.run(args, capture_output=capture)
-        # IPv6 fallback: if curl fails and IPv6 is enabled, retry with --ipv4
-        if proc.returncode != 0 and config and config.get("ipv6_ok", True):
-            proc = subprocess.run(base + ["--ipv4", uri], capture_output=capture)
-            if proc.returncode == 0:
-                config["ipv6_ok"] = False  # Mark failed so subsequent calls skip IPv6
-        if proc.returncode != 0:
-            msg = proc.stderr.decode("utf-8", errors="replace").strip() if proc.stderr else ""
-            raise RuntimeError(
-                f"Failed to fetch {uri}: curl exit {proc.returncode} {msg}"
-            )
-        return proc.stdout if capture else None
+
 
     @staticmethod
     def _pool_path(hash_val: str) -> Path:
+        ## @brief Resolve the on-disk pool path for a SHA-256 hash.
+        ##
+        ## The pool directory structure is
+        ## ``{pool_root}/by-hash/SHA256/{first2}/{next2}/{full_hash}``,
+        ## where ``first2 = hash_val[:2]`` and ``next2 = hash_val[2:4]``.
+        ## This fan-out prevents any single directory from holding more
+        ## than 256 subdirectories.
+        ##
+        ## @param hash_val  Full SHA-256 hex string (64 chars).
+        ## @return The pool ``Path`` for this hash.
         from mirror_dedupe.config import Config
         cfg = Config.load()
         return Path(cfg.pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
 
+    def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
+        ## @brief Populate this node's schema and create child nodes.
+        ##
+        ## Called by ``parse()``.  Subclasses override to populate their
+        ## own payload fields and attach child nodes via the attributes
+        ## declared in ``_children``.  The base implementation is a no-op.
+        ##
+        ## @param config  Optional configuration dict (network settings,
+        ##                filters, etc.).
+        ## @return None
+        pass
+
+    def parse(self, *, config: Optional[Dict[str, Any]] = None) -> "Node":
+        ## @brief Populate this node and recursively parse its children.
+        ##
+        ## Calls ``on_parse()`` to populate this node, then walks each
+        ## attribute named in ``_children`` and calls ``parse()`` on each
+        ## child node.  Children can be a ``NodeList`` of nodes or a
+        ## single ``Node`` (e.g. a distribution's child Release).
+        ##
+        ## @param config  Optional configuration dict passed down to
+        ##                all ``on_parse()`` calls.
+        ## @return This node (for chaining).
+        self.on_parse(config=config)
+        self.recurse(config=config)
+        return self
+
+    def recurse(self, *, config: Optional[Dict[str, Any]] = None) -> "Node":
+        ## @brief Walk declared children and call ``parse()`` on each.
+        ##
+        ## Skips this node's ``on_parse()`` — use when the tree already
+        ## has its structural children created (e.g. sync mode builds
+        ## distributions from config, then recurses to populate them).
+        ##
+        ## @param config  Optional configuration dict passed down to
+        ##                all ``on_parse()`` calls on children.
+        ## @return This node (for chaining).
+        for attr in type(self)._children:
+            children = getattr(self, attr, None)
+            if children is None:
+                continue
+            if isinstance(children, NodeList):
+                for child in children:
+                    child.parse(config=config)
+            elif isinstance(children, Node):
+                children.parse(config=config)
+        return self
+
+    def _tree_iter(self):
+        ## @brief Recursive generator yielding every node in this tree.
+        ##
+        ## Walks all children declared in ``_children`` in depth-first
+        ## order, yielding each node (including self) exactly once.
+        ## Used by ``_sync_content()`` to feed work items to the worker
+        ## pool without building an intermediate list.
+        ##
+        ## @yield ``Node`` instances in depth-first order.
+        yield self
+        for attr in type(self)._children:
+            children = getattr(self, attr, None)
+            if children is None:
+                continue
+            if isinstance(children, NodeList):
+                for child in children:
+                    yield from child._tree_iter()
+            elif isinstance(children, Node):
+                yield from children._tree_iter()
+
     @property
     def checksum(self) -> str:
         ## @brief Return the SHA-256 checksum for this node.
-        ## @return The hex digest string, or an empty string when not applicable.
-
-        return ""
-
-    def fetch(self, *, config: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
-        ## @brief Download content from ``self.uri``, caching in ``_raw_bytes``.
         ##
-        ## Checks the content-addressable pool first via ``self.checksum``.
-        ## Falls back to HTTP fetch and verifies the hash if available.
+        ## Checks ``self["hash"]`` — populated at construction for
+        ## packages, or set by ``sync()`` after the first download.
         ##
+        ## @return The hex digest string, or an empty string when not available.
+
+        return self.get("hash", "")
+
+    def fetch(self, uri: str, *, config: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
+        ## @brief Fetch *uri* content into memory.
+        ##
+        ## In scan mode, performs a pure in-memory HTTP fetch with result
+        ## caching in ``_cache``.  In sync mode (when ``Config._sync_mode``
+        ## is set), redirects to ``self.read()`` which synchronises the
+        ## file through the pool and then reads it from disk.
+        ##
+        ## @param uri     URL to fetch.
         ## @param config  Optional configuration dict for fetch parameters.
-        ## @return The raw bytes, or ``None`` if no URI is set.
+        ## @return The raw bytes, or ``None`` if *uri* is empty.
 
-        if self._raw_bytes is not None:
-            return self._raw_bytes
-        uri = self.get("uri")
         if not uri:
             return None
-        hash_val = self.checksum
-        if hash_val:
-            pool_path = self._pool_path(hash_val)
-            if pool_path.exists():
-                data = pool_path.read_bytes()
-                actual = hashlib.sha256(data).hexdigest()
-                if actual == hash_val:
-                    self._raw_bytes = data
-                    return data
-        data = self._fetch_url(uri, config)
-        if hash_val:
-            actual = hashlib.sha256(data).hexdigest()
-            if actual != hash_val:
-                raise ValueError(
-                    f"Hash mismatch for {uri}: "
-                    f"expected {hash_val[:16]}..., got {actual[:16]}..."
-                )
-        self._raw_bytes = data
-        return data
-
-    def store(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
-        ## @brief Write cached ``_raw_bytes`` to the repo destination and pool.
-        ##
-        ## Writes to ``cfg.repo_root / path``, then writes to the pool when
-        ## ``self.checksum`` is set.
-        ##
-        ## @param config  Optional configuration dict (unused, reserved for future use).
-        ## @return A list containing the destination ``Path``, or an empty list if no data is cached.
-
-        if self._raw_bytes is None:
-            return []
-        path = self.get("path")
-        if not path:
-            return []
+        if self._cache is not None:
+            return self._cache
         from mirror_dedupe.config import Config
         cfg = Config.load()
-        dest = Path(cfg.repo_root) / path
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(self._raw_bytes)
-        hash_val = self.checksum
-        if hash_val:
-            pool_path = self._pool_path(hash_val)
-            if not pool_path.exists():
-                pool_path.parent.mkdir(parents=True, exist_ok=True)
-                pool_path.write_bytes(self._raw_bytes)
-        return [dest]
+        if getattr(cfg, "_sync_mode", False):
+            return self.read(config=config)
+        data = HTTPFetch(uri)
+        self._cache = data
+        return data
+
+    def read(self, *, config: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
+        ## @brief Return the content of this node's file from disk.
+        ##
+        ## Calls ``sync()`` first to ensure the file is in the pool and
+        ## hardlinked to the repo destination, then reads the bytes from
+        ## ``repos_root / path``.
+        ##
+        ## @param config  Optional configuration dict for sync parameters.
+        ## @return The raw bytes, or ``None`` if no URI or path is set.
+
+        if not self.get("uri") or not self.get("path"):
+            return None
+        self.sync(config=config)
+        from mirror_dedupe.config import Config
+        cfg = Config.load()
+        return (Path(cfg.repo_root) / self.get("path")).read_bytes()
 
     def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
         ## @brief Synchronise this node's file from upstream into the pool and repo.
         ##
-        ## Downloads via ``_fetch_url`` if the file is not already in the pool,
-        ## verifies the SHA-256 checksum, and registers a hardlink via
-        ## ``Inventory``.
+        ## Ensures the destination file matches upstream by verifying it is
+        ## hardlinked from the correct pool file.  Verification is one
+        ## inode comparison — no readback, no hash computation.
+        ##
+        ## Flow for known hashes:
+        ## 1. Pool file exists + dest exists + inodes match → done.
+        ## 2. Pool file exists + dest stale/missing → unlink dest, link from pool.
+        ## 3. Pool missing → download to staging, capture hash from curl,
+        ##    move into pool, unlink stale dest, link from pool.
+        ##
+        ## Files without a known hash (e.g. Release) always go through
+        ## the download path — they are small and the cost is negligible.
         ##
         ## @param config  Optional configuration dict for fetch parameters.
-        ## @return A list containing the destination ``Path``, or an empty list if sync is disabled or prerequisites are missing.
+        ## @return A list containing the destination ``Path``, or an empty list
+        ##         if prerequisites are missing.
 
-        if not Node._sync_enabled:
-            return []
         uri = self.get("uri")
-        hash_val = self.checksum
         path_val = self.get("path")
-        if not uri or not hash_val or not path_val:
+        if not uri or not path_val:
             return []
         from mirror_dedupe.config import Config
-        from mirror_dedupe.pool.inventory import Inventory
         cfg = Config.load()
-        pool_path = self._pool_path(hash_val)
         dest = Path(cfg.repo_root) / path_val
-        if not pool_path.exists():
-            pool_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = pool_path.with_suffix(".tmp")
-            self._fetch_url(uri, config, output_path=tmp)
-            h = hashlib.sha256()
-            with open(tmp, "rb") as f:
-                while True:
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    h.update(chunk)
-            if h.hexdigest() != hash_val:
-                tmp.unlink()
-                raise ValueError(
-                    f"Hash mismatch for {uri}: "
-                    f"expected {hash_val[:16]}..., got {h.hexdigest()[:16]}..."
+        pool_root = Path(cfg.pool_root)
+        hash_val = self.checksum
+        if hash_val:
+            pool_path = pool_root / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
+            if pool_path.exists():
+                if dest.exists():
+                    try:
+                        if dest.stat().st_ino == pool_path.stat().st_ino:
+                            return [dest]
+                    except OSError:
+                        pass
+                    dest.unlink()
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                os.link(pool_path, dest)
+                from ..lib.log import log
+                log(f"  Linked {path_val}")
+                return [dest]
+        staging_dir = pool_root / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging_key = hash_val or hashlib.sha256(uri.encode()).hexdigest()
+        with _staging_locks_lock:
+            lock = _staging_locks.setdefault(staging_key, threading.Lock())
+        with lock:
+            if hash_val:
+                pool_path = pool_root / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
+                if pool_path.exists():
+                    if dest.exists():
+                        try:
+                            if dest.stat().st_ino == pool_path.stat().st_ino:
+                                return [dest]
+                        except OSError:
+                            pass
+                        dest.unlink()
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    os.link(pool_path, dest)
+                    from ..lib.log import log
+                    log(f"  Linked {path_val}")
+                    return [dest]
+            tmp = str(staging_dir / staging_key)
+            try:
+                actual_hash = HTTPDownload(uri, tmp)
+            except RuntimeError:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
+                raise
+            if hash_val and actual_hash != hash_val:
+                os.unlink(tmp)
+                raise RuntimeError(
+                    f"Hash mismatch for {uri}: expected {hash_val}, got {actual_hash}"
                 )
+            self["hash"] = actual_hash
+            hash_val = hash_val or actual_hash
+            pool_path = pool_root / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
+            pool_path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(tmp, pool_path)
-        inventory = Inventory.get()
-        inventory.link_repo_path(hash_val, str(dest))
-        return [dest]
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.unlink(missing_ok=True)
+            os.link(pool_path, dest)
+            from ..lib.log import log
+            log(f"  Downloaded {path_val}")
+            return [dest]
 
 
 T = TypeVar("T", bound="Node")

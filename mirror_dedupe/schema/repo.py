@@ -3,8 +3,8 @@
 ## @brief Repo abstraction, registry, and high-level factories.
 ##
 ## ``Repo`` is the root node for repo-type-specific ecosystems (APT,
-## Yum, etc.).  Each concrete ``Repo`` subclass owns its own Parser
-## implementation and can be auto-detected via a lightweight
+## Yum, etc.).  Each concrete ``Repo`` subclass overrides ``on_parse()``
+## to populate its schema tree, and can be auto-detected via a lightweight
 ## ``is_this_yours()`` probe.  ``Repos`` is the corresponding
 ## ``NodeList`` wrapper.
 ##
@@ -14,9 +14,10 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
+import concurrent.futures
+import os
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Type, TypeVar
 
 from .node import Node, NodeList
@@ -28,7 +29,6 @@ from ..schema.index import Index, Indices
 from ..schema.release import Release, Releases
 from ..schema.vars import Vars
 from ..schema.upstream import Upstream, Upstreams
-from ..schema.network import NetworkConfig
 
 
 @dataclass
@@ -36,7 +36,11 @@ class Repo(Node):
     ## @brief Root Node for repo-type-specific ecosystems (APT, Yum, etc.).
     ##
     ## Each concrete subclass registers itself via the ``_registry``
-    ## mechanism and provides ``is_this_yours()`` and ``make_parser()``.
+    ## mechanism and provides ``is_this_yours()``.  ``_children`` is
+    ## ``["distributions"]`` — the base ``parse()`` recurses into each
+    ## distribution's own child tree.
+
+    _children = ["distributions"]
 
     REPO_TYPE: ClassVar[str] = "abstract"
 
@@ -54,7 +58,6 @@ class Repo(Node):
 
     _node_fields: ClassVar[Dict[str, Type[Node]]] = {
         "vars": Vars,
-        "network": NetworkConfig,
     }
 
     def __init__(
@@ -88,15 +91,42 @@ class Repo(Node):
 
         super().__init__(data)
 
-        self.network = NetworkConfig(ipv6_ok=True)
-        self["params"] = {}
+        self["params"] = {"ipv6_ok": True}
 
         self.distributions = Distributions()
-        self.architectures = Architectures()
-        self.components = Components()
+        self._architectures = Architectures()
+        self._components = Components()
         self.suites = Suites()
         self.indices = Indices()
         self.releases = Releases()
+
+    # --- computed properties ----------------------------------------------
+
+    @property
+    def architectures(self) -> Architectures:
+        ## @brief Computed property: aggregated architectres across all dists.
+        ## @return The ``Architectures`` collection.
+        return self._architectures
+
+    @architectures.setter
+    def architectures(self, value: Architectures) -> None:
+        ## @brief Setter for the architectures property.
+        ## @param value  New ``Architectures`` collection.
+        ## @return None
+        self._architectures = value
+
+    @property
+    def components(self) -> Components:
+        ## @brief Computed property: aggregated components across all dists.
+        ## @return The ``Components`` collection.
+        return self._components
+
+    @components.setter
+    def components(self, value: Components) -> None:
+        ## @brief Setter for the components property.
+        ## @param value  New ``Components`` collection.
+        ## @return None
+        self._components = value
 
     # --- registry helpers -------------------------------------------------
 
@@ -118,10 +148,10 @@ class Repo(Node):
     # --- detection --------------------------------------------------------
 
     @classmethod
-    @abstractmethod
-    def is_this_yours(cls, upstream: str) -> bool:
+    def is_this_yours(cls, upstream: str, extra_suites: Optional[list[str]] = None) -> bool:
         ## @brief Lightweight probe: does this upstream look like this repo type?
-        ## @param upstream  Upstream URL to probe.
+        ## @param upstream      Upstream URL to probe.
+        ## @param extra_suites  Optional dist names from config to try as suites.
         ## @return True if the upstream matches this repo type.
         raise NotImplementedError
 
@@ -137,45 +167,6 @@ class Repo(Node):
         ## @return List of label strings that were confirmed to exist.
         return []
 
-    # --- parser factory ---------------------------------------------------
-
-    @abstractmethod
-    def make_parser(self) -> "Repo.Parser":
-        ## @brief Return a Parser instance bound to this Repo.
-        ## @return A concrete Parser subclass instance.
-
-        raise NotImplementedError
-
-    class Parser(ABC):
-        ## @brief Base parser bound to a Repo instance.
-
-        def __init__(self, rt: "Repo") -> None:
-            ## @brief Initialise the base Parser.
-            ##
-            ## @param rt  The concrete Repo instance this parser operates on.
-            ## @return None
-            self.repo = rt
-
-        @abstractmethod
-        def parse(self) -> Any:
-            ## @brief Inspect the upstream and populate the bound repo data object.
-            ## @return Populated data (structure depends on concrete parser).
-            raise NotImplementedError
-
-    # --- content operations ------------------------------------------------
-
-    def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
-        ## @brief Sync all releases under this Repo to the pool.
-        ##
-        ## @param config  Optional sync configuration dict.
-        ## @return List of paths written during sync.
-        if not Node._sync_enabled:
-            return []
-        results: List[Path] = []
-        for release in self.releases:
-            results.extend(release.sync(config=config or self.get("network")))
-        return results
-
     # --- selection helpers ------------------------------------------------
 
     @classmethod
@@ -183,6 +174,7 @@ class Repo(Node):
         cls,
         repo: Any,
         urls: list[str],
+        extra_suites: Optional[list[str]] = None,
     ) -> tuple["Type[Repo] | None", str | None]:
         ## @brief Select an appropriate Repo class for this repo/URL set.
         ##
@@ -195,8 +187,10 @@ class Repo(Node):
         ## * If ``repo["repo_type"]`` is set, only probe the matching
         ##   RepoType across all URLs.
         ##
-        ## @param repo  A dict-like object with an optional ``repo_type`` key.
-        ## @param urls  List of candidate upstream URLs.
+        ## @param repo          A dict-like object with an optional ``repo_type`` key.
+        ## @param urls          List of candidate upstream URLs.
+        ## @param extra_suites  Optional list of extra suite names to probe
+        ##                      (from config's ``distributions`` field).
         ## @return Tuple of ``(RepoClass | None, url_used | None)``.
 
         rt_cls: Type[Repo] | None = None
@@ -217,11 +211,18 @@ class Repo(Node):
         if not repo_type_name or repo_type_name == "unknown":
             for t in types:
                 for url in ordered_urls:
-                    if t.is_this_yours(url):
-                        rt_cls = t
-                        used_url = url
-                        repo["repo_type"] = getattr(t, "REPO_TYPE", "unknown")
-                        break
+                    if extra_suites:
+                        if t.is_this_yours(url, extra_suites=extra_suites):
+                            rt_cls = t
+                            used_url = url
+                            repo["repo_type"] = getattr(t, "REPO_TYPE", "unknown")
+                            break
+                    else:
+                        if t.is_this_yours(url):
+                            rt_cls = t
+                            used_url = url
+                            repo["repo_type"] = getattr(t, "REPO_TYPE", "unknown")
+                            break
                 if rt_cls is not None:
                     break
         else:
@@ -243,6 +244,7 @@ class Repo(Node):
         ipv6_ok: bool | None = None,
         repo_type: str | None = None,
         upstream_urls: list[str] | None = None,
+        dist_candidates: Optional[list[str]] = None,
     ) -> "Repo":
         ## @brief Construct a Repo instance from a URL.
         ##
@@ -251,10 +253,11 @@ class Repo(Node):
         ## ``get_type_for_url`` registry helper and returns an instance
         ## bound to the upstream tree.
         ##
-        ## @param upstream      Primary upstream URL.
-        ## @param ipv6_ok       Whether IPv6 is supported.
-        ## @param repo_type     Explicit repo type override (e.g. ``"apt"``).
-        ## @param upstream_urls Additional candidate upstream URLs.
+        ## @param upstream        Primary upstream URL.
+        ## @param ipv6_ok         Whether IPv6 is supported.
+        ## @param repo_type       Explicit repo type override (e.g. ``"apt"``).
+        ## @param upstream_urls   Additional candidate upstream URLs.
+        ## @param dist_candidates Optional dist names from config for probing.
         ## @return A fully wired Repo instance.
 
         data: Dict[str, Any] = {"upstream_idx": 0}
@@ -268,7 +271,7 @@ class Repo(Node):
             sync_hint = "http"
 
         urls: list[str] = [upstream, *(upstream_urls or [])]
-        rt_cls, _used_url = cls.get_type_for_urls(data, urls)
+        rt_cls, _used_url = cls.get_type_for_urls(data, urls, extra_suites=dist_candidates)
         if rt_cls is None:
             rt_cls = cls
 
@@ -293,24 +296,171 @@ class Repo(Node):
 
         repo = rt_cls(upstreams=upstreams, **data)
         if ipv6_ok is not None:
-            repo.network = NetworkConfig(ipv6_ok=ipv6_ok)
+            repo["params"]["ipv6_ok"] = ipv6_ok
 
         return repo
 
     # --- high-level instance helpers ---------------------------------------
 
-    def parse(self) -> "Repo":
+    def parse(self, *, config: Optional[Dict[str, Any]] = None) -> "Repo":
         ## @brief Run repo-type-specific parsing and return this Repo.
         ##
-        ## Uses the concrete Repo implementation's ``make_parser()``
-        ## factory to construct a parser and run it against the bound
-        ## upstream, mutating this Repo instance in place.
+        ## Calls the base ``Node.parse()`` which invokes ``on_parse()``
+        ## on this node and recursively on all children declared in
+        ## ``_children``.
         ##
+        ## @param config  Optional configuration dict.
         ## @return This Repo after parsing (for chaining).
 
-        parser = self.make_parser()
-        parser.parse()
-        return self
+        return super().parse(config=config)
+
+    def analyse(self, *, config: Optional[Dict[str, Any]] = None) -> "Repo":
+        ## @brief Discover upstream and populate the schema tree (scan mode).
+        ##
+        ## Probes the upstream to discover distributions, parses Release
+        ## files, and populates the full node tree.  Pure in-memory —
+        ## no disk writes, no pool operations.
+        ##
+        ## @param config  Optional network configuration dict.
+        ## @return This Repo after analysis.
+
+        return self.parse(config=config)
+
+    def sync(
+        self,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        pool: Optional[concurrent.futures.ThreadPoolExecutor] = None,
+    ) -> None:
+        ## @brief Build the schema tree from config and download content.
+        ##
+        ## Constructs the distribution tree from known config (no upstream
+        ## probing), recurses to populate Release/Index metadata (each
+        ## node fetching content through the pool when ``_sync_mode`` is
+        ## active), and downloads all files via ``_sync_content()``.
+        ##
+        ## All nodes know their full repo-root-relative ``path`` from
+        ## construction time — no deferred path patching is needed.
+        ##
+        ## When *pool* is None the tree is built but no content is
+        ## transferred — useful for testing or dry-run.
+        ##
+        ## @param config  Optional configuration dict (suites, filters, etc.).
+        ## @param pool    Shared ``ThreadPoolExecutor`` for parallel downloads.
+        ##                When ``None``, content sync and stale sweep are
+        ##                skipped.
+
+        from ..config import Config
+        cfg = Config.load()
+        cfg._sync_mode = True
+        try:
+            self._build_sync_tree(config=config)
+            self.recurse(config=config)
+            if pool is not None:
+                self._sync_content(pool, config=config)
+                self._sweep_stale()
+        finally:
+            cfg._sync_mode = False
+
+    def _sync_content(
+        self,
+        pool: concurrent.futures.ThreadPoolExecutor,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, int]:
+        ## @brief Submit all syncable nodes to the repo's download pool.
+        ##
+        ## Iterates ``_tree_iter()`` and submits every node that has both
+        ## ``uri`` and ``path`` to *pool* for parallel download via
+        ## ``Node.sync()``.  Stores statistics in ``_sync_stats``.
+        ##
+        ## @param pool    Shared ``ThreadPoolExecutor`` for parallel downloads.
+        ## @param config  Optional configuration dict forwarded to each
+        ##                ``Node.sync()`` call (e.g. ``ipv6_ok``, ``timeout``).
+        ## @return Dict with keys ``ok``, ``skipped``, ``errors``.
+
+        futures: Dict[concurrent.futures.Future, Node] = {}
+        for node in self._tree_iter():
+            if node.get("uri") and node.get("path"):
+                future = pool.submit(node.sync, config=config)
+                futures[future] = node
+
+        stats: Dict[str, int] = {"ok": 0, "skipped": 0, "errors": 0}
+        for future in concurrent.futures.as_completed(futures):
+            node = futures[future]
+            try:
+                result = future.result()
+                if result:
+                    stats["ok"] += 1
+                else:
+                    stats["skipped"] += 1
+            except Exception as e:
+                stats["errors"] += 1
+                from ..lib.log import log
+                log(
+                    f"  Sync failed for {node.get('uri', 'unknown')}: {e}",
+                    level="ERROR",
+                )
+
+        self._sync_stats = stats
+        return stats
+
+    def _sweep_stale(self) -> None:
+        ## @brief Remove files in the repo destination not in the tree.
+        ##
+        ## Walks the repo's destination directory on disk and deletes any
+        ## file whose path (relative to ``repo_root``) is not present in
+        ## the in-memory node tree.  Empty directories are pruned
+        ## bottom-up.
+        ##
+        ## @return None
+
+        from ..config import Config
+
+        cfg = Config.load()
+        tree_paths: set[str] = set()
+        for node in self._tree_iter():
+            p = node.get("path")
+            if p:
+                tree_paths.add(p)
+
+        dest = self.get("dest", "")
+        if not dest:
+            return
+        dest_path = Path(cfg.repo_root) / dest
+        if not dest_path.exists():
+            return
+
+        removed = 0
+        for f in dest_path.rglob("*"):
+            if f.is_file():
+                rel = str(f.relative_to(Path(cfg.repo_root)))
+                if rel not in tree_paths:
+                    f.unlink()
+                    removed += 1
+
+        for dirpath, dirnames, filenames in os.walk(str(dest_path), topdown=False):
+            try:
+                dp = Path(dirpath)
+                if not any(dp.iterdir()):
+                    dp.rmdir()
+            except OSError:
+                continue
+
+        if removed:
+            from ..lib.log import log
+            log(f"Repo sweep: removed {removed} stale files from '{dest}'", level="INFO")
+
+    def _build_sync_tree(self, *, config: Optional[Dict[str, Any]] = None) -> None:
+        ## @brief Construct the distribution tree from known config.
+        ##
+        ## Override in concrete subclasses (e.g. ``Apt``) to create
+        ## Distribution nodes from configured suite names rather than
+        ## discovering them via HTTP probing.
+        ##
+        ## @param config  Optional configuration dict.
+        ## @raise NotImplementedError
+
+        raise NotImplementedError
 
     # --- snapshot / restore helpers ------------------------------------------
 
@@ -335,8 +485,10 @@ class Repo(Node):
 
         repo = cls._from_payload(snapshot)
 
-        if "network" not in snapshot:
-            repo.network = NetworkConfig(ipv6_ok=True)
+        params = repo.get("params")
+        if not isinstance(params, dict):
+            repo["params"] = {}
+        repo["params"].setdefault("ipv6_ok", True)
 
         cls._restore_children(repo, snapshot)
 

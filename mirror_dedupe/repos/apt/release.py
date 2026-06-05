@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.html_helpers import build_url
@@ -22,6 +22,10 @@ from .index import AptIndex
 
 class Release(Schema.Release):
     ## @brief APT-specific Release node that can parse its own indices.
+
+    _children = ["indices"]
+    ## @brief Base ``Node.parse()`` recurses into the child Index list
+    ##        after ``on_parse()`` completes.
 
     class IndexMetadata(Schema.Index.Metadata):
         ## @brief APT-specific metadata for an index entry derived from a Release.
@@ -47,19 +51,23 @@ class Release(Schema.Release):
         url: str,
         upstream: str,
         suite: str,
+        dest: str = "",
     ) -> None:
         ## @brief Construct an APT Release bound to a URL.
         ##
-        ## Initialises the underlying ``Schema.Release`` with APT-specific
-        ## layout defaults.
+        ## The Release body is not fetched here.  The parent Distribution
+        ## pre-caches the body in ``_cache`` before the base recursion
+        ## calls ``on_parse()``.  ``path`` is set at construction time
+        ## based on *dest* and *suite* so it is correct from birth.
         ##
         ## @param url      URL of the Release file.
         ## @param upstream Base upstream URL.
         ## @param suite    Logical suite name (e.g. ``"noble"``).
+        ## @param dest     Repo dest prefix (empty in scan mode).
 
         pocket: str | None = None
         relative_dir = f"dists/{suite}"
-        path = f"{relative_dir}/Release"
+        path = f"{dest}/dists/{suite}/Release" if dest else f"dists/{suite}/Release"
         repo_type = "apt"
         kind = "release"
 
@@ -78,6 +86,7 @@ class Release(Schema.Release):
         self.url = url
         self.upstream = upstream
         self.suite = suite
+        self._dest = dest
 
     def _parse_hash_section(self, data: str, section: str) -> List[Dict[str, Any]]:
         ## @brief Parse a single hash section (``MD5Sum``, ``SHA1``, ``SHA256``)
@@ -125,35 +134,61 @@ class Release(Schema.Release):
 
         return entries
 
-    def parse(self, config: Any = None, text: str | None = None) -> "Release":
-        ## @brief Populate indices for this Release from its hash sections.
+    def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
+        ## @brief Parse the Release body into child Index nodes.
         ##
-        ## If *text* is provided (e.g. from Distribution metadata), skip the
-        ## HTTP fetch and parse directly from the cached body.
+        ## The Release body is fetched via ``fetch()`` (returned from
+        ## ``_cache`` pre-cached by the parent Distribution).
+        ## Hash sections are parsed into ``self.indices``.  Index nodes
+        ## are created in memory only — sync to disk happens later via
+        ## the sync pipeline.
+        ##
+        ## Architecture/component filters are read from
+        ## ``self._arch_filter`` / ``self._comp_filter``, set by the
+        ## parent Distribution during its own ``on_parse()``.
         ##
         ## @param config  Optional network config dict (ipv6_ok, timeout).
-        ## @param text    Optional pre-fetched Release body text.
-        ## @return This Release (for chaining).
+        ## @return None
 
-        if text is None:
-            text_bytes = self.fetch(config=config)
-            if text_bytes is None:
-                raise RuntimeError(f"No content for Release at {self.get('uri', 'unknown')}")
-            text = text_bytes.decode("utf-8", errors="replace")
+        text_bytes = self.fetch(uri=self.get("uri"), config=config)
+        if text_bytes is None:
+            raise RuntimeError(f"No content for Release at {self.get('uri', 'unknown')}")
+        text = text_bytes.decode("utf-8", errors="replace")
+
+        arch_filter: Optional[List[str]] = getattr(self, "_arch_filter", None)
+        comp_filter: Optional[List[str]] = getattr(self, "_comp_filter", None)
 
         indices = Schema.Indices()
+        seen: Dict[str, Any] = {}
+        dest = self._dest
 
-        # Iterate all three hash sections to maximise cross-repo compatibility
+        # Iterate all three hash sections to maximise cross-repo compatibility.
+        # Deduplicate by path — SHA256 entries (iterated last) overwrite MD5/SHA1.
         for section in ("MD5Sum", "SHA1", "SHA256"):
             for entry in self._parse_hash_section(text, section):
-                path = entry["path"]
+                entry_path = entry["path"]
                 # Classify index by path pattern for downstream processing
-                if "Packages" in path:
+                if "Packages" in entry_path:
                     kind = "packages"
-                elif "Sources" in path:
+                elif "Sources" in entry_path:
                     kind = "sources"
                 else:
                     kind = "other"
+
+                # Apply architecture/component filters when provided
+                if arch_filter is not None or comp_filter is not None:
+                    parts = entry_path.split("/")
+                    if len(parts) >= 2:
+                        comp = parts[0]
+                        arch_part = parts[1]
+                        if arch_part.startswith("binary-"):
+                            arch = arch_part[7:]
+                        else:
+                            arch = arch_part
+                        if arch_filter is not None and arch not in arch_filter:
+                            continue
+                        if comp_filter is not None and comp not in comp_filter:
+                            continue
 
                 metadata = self.IndexMetadata(
                     suite=self.suite,
@@ -162,18 +197,17 @@ class Release(Schema.Release):
                     size=entry["size"],
                 )
 
-                index_uri = build_url(self.upstream, self.relative_dir, path)
+                index_uri = build_url(self.upstream, self.relative_dir, entry_path)
+                index_path = f"{dest}/dists/{self.suite}/{entry_path}" if dest else f"dists/{self.suite}/{entry_path}"
 
-                indices.append(
-                    AptIndex(
-                        path=path,
-                        kind=kind,
-                        metadata=metadata,
-                        uri=index_uri,
-                    )
+                seen[entry_path] = AptIndex(
+                    path=index_path,
+                    kind=kind,
+                    metadata=metadata,
+                    uri=index_uri,
+                    dest=dest,
                 )
 
-        self.indices = indices
-        return self
+        self.indices = Schema.Indices(seen.values())
 
 
