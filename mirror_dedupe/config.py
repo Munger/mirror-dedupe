@@ -16,6 +16,7 @@ import os
 import sys
 import yaml
 from pathlib import Path
+from typing import Dict, List
 
 from mirror_dedupe.lib.log import log
 
@@ -43,7 +44,7 @@ class Config:
 
         config_dir_resolved = str(Path(config_dir or DEFAULT_CONFIG_DIR).resolve())
         if cls._instance is not None:
-            if config_dir == DEFAULT_CONFIG_DIR:
+            if config_dir is None or config_dir == DEFAULT_CONFIG_DIR:
                 return cls._instance
             if cls._config_dir == config_dir_resolved:
                 return cls._instance
@@ -75,6 +76,7 @@ class Config:
         ## @param config_dir_resolved  Absolute path to the configuration
         ##                             directory.
 
+        self._config_dir = config_dir_resolved
         main_config_path = Path(config_dir_resolved) / 'mirror-dedupe.conf'
         try:
             with open(main_config_path, 'r') as f:
@@ -98,6 +100,16 @@ class Config:
         self.max_retries = self._data.get('max_retries', 3)
         self.progress_interval = self._data.get('progress_interval', 1000)
         self.no_hardlinks = bool(self._data.get('no_hardlinks', False))
+        raw_additional = self._data.get('additional_repos', []) or []
+        self.additional_repos: Dict[str, str] = {}
+        for entry in raw_additional:
+            if isinstance(entry, dict):
+                aname = entry.get("name", "")
+                adest = entry.get("dest", "")
+                if aname and adest:
+                    if not os.path.isabs(adest):
+                        adest = os.path.join(self.repo_root, adest)
+                    self.additional_repos[aname] = adest
         repos_dir = Path(config_dir_resolved) / 'repos-enabled'
         mirrors: list[dict] = []
 
@@ -163,6 +175,7 @@ class Config:
         self._data['progress_interval'] = self.progress_interval
         self._data['no_hardlinks'] = self.no_hardlinks
         self._data['mirrors'] = self.mirrors
+        self._data['additional_repos'] = self.additional_repos
 
     def __getitem__(self, key):
         ## @brief Dict-style access to config values.
@@ -183,3 +196,60 @@ class Config:
         ## @param default  Fallback value (default ``None``).
         ## @return The value for *key*, or *default* if not present.
         return self._data.get(key, default)
+
+    def resolve_dest(self, name: str) -> str | None:
+        ## @brief Resolve a repo *name* to its absolute ``dest`` path.
+        ##
+        ## Checks in order:
+        ## 1. ``repos-enabled/{name}.conf`` → ``dest`` field (if absolute already)
+        ## 2. ``repos-available/{name}.conf`` → ``dest`` field
+        ## 3. ``additional_repos`` prefs
+        ## 4. Fallback: ``{repo_root}/{name}``
+        ##
+        ## @param name  Repo name to resolve.
+        ## @return The absolute dest path, or ``None`` if unresolvable.
+
+        # Check repos-enabled first
+        for repos_dir_rel in ("repos-enabled", "repos-available"):
+            d = Path(self._config_dir) / repos_dir_rel / f"{name}.conf"  # type: ignore[arg-type]
+            if d.exists():
+                try:
+                    with open(d) as f:
+                        cfg = yaml.safe_load(f) or {}
+                    dest = cfg.get("dest")
+                    if dest:
+                        return dest if os.path.isabs(dest) else os.path.join(self.repo_root, dest)
+                except Exception:
+                    pass
+
+        # Check additional_repos
+        if name in self.additional_repos:
+            return self.additional_repos[name]
+
+        # Fallback: treat name as a subdirectory of repo_root
+        fallback = os.path.join(self.repo_root, name)
+        if os.path.isdir(fallback):
+            return fallback
+
+        return None
+
+    def list_repo_names(self) -> List[str]:
+        ## @brief Return sorted list of all known repo names.
+        ##
+        ## Combines entries from ``repos-enabled/*.conf`` (by filename stem)
+        ## and the ``additional_repos`` section in ``mirror-dedupe.conf``.
+        ##
+        ## @return Sorted list of repo names.
+
+        names: set[str] = set()
+
+        # Repos-enabled config files
+        repd = Path(self._config_dir) / "repos-enabled"  # type: ignore[arg-type]
+        if repd.exists():
+            for f in repd.glob("*.conf"):
+                names.add(f.stem)
+
+        # Additional repos from prefs
+        names.update(self.additional_repos.keys())
+
+        return sorted(names)

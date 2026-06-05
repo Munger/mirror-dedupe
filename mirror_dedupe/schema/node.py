@@ -637,6 +637,10 @@ class Node(dict):
         ## hardlinked from the correct pool file.  Verification is one
         ## inode comparison — no readback, no hash computation.
         ##
+        ## Pushes a ``self["stats"]`` dict with hit/miss/bytes_tx counters
+        ## after a successful sync, so that ``Repo.stats()`` can aggregate
+        ## across the tree.
+        ##
         ## Flow for known hashes:
         ## 1. Pool file exists + dest exists + inodes match → done.
         ## 2. Pool file exists + dest stale/missing → unlink dest, link from pool.
@@ -647,8 +651,7 @@ class Node(dict):
         ## the download path — they are small and the cost is negligible.
         ##
         ## @param config  Optional configuration dict for fetch parameters.
-        ## @return A list containing the destination ``Path``, or an empty list
-        ##         if prerequisites are missing.
+        ## @return List of ``Path`` objects for linked/downloaded files.
 
         uri = self.get("uri")
         path_val = self.get("path")
@@ -665,6 +668,9 @@ class Node(dict):
                 if dest.exists():
                     try:
                         if dest.stat().st_ino == pool_path.stat().st_ino:
+                            self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                            from ..lib.log import log
+                            log(f"  Unchanged {path_val}")
                             return [dest]
                     except OSError:
                         pass
@@ -673,6 +679,7 @@ class Node(dict):
                 os.link(pool_path, dest)
                 from ..lib.log import log
                 log(f"  Linked {path_val}")
+                self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
                 return [dest]
         staging_dir = pool_root / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
@@ -686,6 +693,9 @@ class Node(dict):
                     if dest.exists():
                         try:
                             if dest.stat().st_ino == pool_path.stat().st_ino:
+                                self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                                from ..lib.log import log
+                                log(f"  Unchanged {path_val}")
                                 return [dest]
                         except OSError:
                             pass
@@ -694,16 +704,10 @@ class Node(dict):
                     os.link(pool_path, dest)
                     from ..lib.log import log
                     log(f"  Linked {path_val}")
+                    self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
                     return [dest]
             tmp = str(staging_dir / staging_key)
-            try:
-                actual_hash = HTTPDownload(uri, tmp)
-            except RuntimeError:
-                try:
-                    os.unlink(tmp)
-                except FileNotFoundError:
-                    pass
-                raise
+            actual_hash = HTTPDownload(uri, tmp)
             if hash_val and actual_hash != hash_val:
                 os.unlink(tmp)
                 raise RuntimeError(
@@ -717,8 +721,11 @@ class Node(dict):
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.unlink(missing_ok=True)
             os.link(pool_path, dest)
+            sz = int(dest.stat().st_size)
+            self["size"] = sz
             from ..lib.log import log
             log(f"  Downloaded {path_val}")
+            self["stats"] = {"hit": 0, "miss": 1, "bytes_tx": sz}
             return [dest]
 
 
