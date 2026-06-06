@@ -126,6 +126,9 @@ def discover_distribution_paths(
     ## @return List of ``(path, effective_upstream)`` tuples.
 
     def _fetch_text(url: str) -> str | None:
+        ## @brief Fetch a URL's body as decoded UTF-8 text.
+        ## @param url  Fully-qualified URL.
+        ## @return Decoded text, or ``None`` if the fetch failed.
         raw = Node.probe_url(url, config)
         if raw is not None:
             return raw.decode("utf-8", errors="replace")

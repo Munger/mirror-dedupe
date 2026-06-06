@@ -38,6 +38,14 @@ class Distribution(Schema.Distribution):
             hash_sections: Dict[str, List[Dict[str, Any]]] | None = None,
             body: Schema.Release.Digest | None = None,
         ) -> None:
+            ## @brief Initialise APT-specific Distribution metadata from a Release.
+            ##
+            ## @param fields         Raw Release key-value fields.
+            ## @param components     Parsed component list.
+            ## @param architectures  Parsed architecture list.
+            ## @param hash_sections  Raw hash section blocks (MD5Sum/SHA1/SHA256).
+            ## @param body           Digest snapshot for cheap identity checks.
+            ## @return None
             super().__init__(
                 fields=fields,
                 components=components,
@@ -184,10 +192,9 @@ class Distribution(Schema.Distribution):
         ## @param config  Optional network config dict (ipv6_ok, timeout).
         ## @return None
 
-        from mirror_dedupe.config import Config
         repo = getattr(self, "_repo", None)
 
-        if getattr(Config.load(), "_sync_mode", False):
+        if self._repo_vars is not None and self._repo_vars.sync_mode:
             # Sync mode: Release downloads through the pool — no fetch needed here
             dest = repo.get("dest", "") if repo else ""
             from .release import Release as AptRelease
@@ -197,6 +204,7 @@ class Distribution(Schema.Distribution):
                 suite=self.name,
                 dest=dest,
             )
+            self.release._repo_vars = self._repo_vars
             if repo is not None:
                 self.release._arch_filter = getattr(repo, "_arch_filter", None)
                 self.release._comp_filter = getattr(repo, "_comp_filter", None)
@@ -243,6 +251,7 @@ class Distribution(Schema.Distribution):
             upstream=self.upstream,
             suite=self.name,
         )
+        self.release._repo_vars = self._repo_vars
         self.release._cache = text_bytes
         # Pass architecture/component filters from the parent Repo
         if repo is not None:

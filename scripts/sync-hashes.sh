@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-verbose=0
+verbose=1
 batch_size=${BATCH_SIZE:-200}
+include_names=()
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -10,13 +11,25 @@ while [[ $# -gt 0 ]]; do
       verbose=1
       shift
       ;;
+    -q|--quiet)
+      verbose=0
+      shift
+      ;;
     -b|--batch-size)
       batch_size=$2
       shift 2
       ;;
+    --include)
+      if [[ -z "$2" || "$2" == -* ]]; then
+        echo "ERROR: --include requires a name argument" >&2
+        exit 2
+      fi
+      include_names+=("$2")
+      shift 2
+      ;;
     -*)
       echo "Unknown option: $1" >&2
-      echo "usage: $0 [-v] [-b batch_size] <repos_dir> <pool_dir>" >&2
+      echo "usage: $0 [-v] [-b batch_size] --include NAME ... <repos_root> <pool_dir>" >&2
       exit 2
       ;;
     *)
@@ -26,19 +39,33 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ $# -ne 2 ]]; then
-  echo "usage: $0 [-v] [-b batch_size] <repos_dir> <pool_dir>" >&2
+  echo "usage: $0 [-v] [-b batch_size] --include NAME ... <repos_root> <pool_dir>" >&2
   exit 2
 fi
+
+repos=$1
+pool=$2
+[[ -d "$repos" ]] || { echo "Missing repos root: $repos" >&2; exit 1; }
+[[ -d "$pool" ]] || { echo "Missing pool dir: $pool" >&2; exit 1; }
+
+if [[ ${#include_names[@]} -eq 0 ]]; then
+  echo "ERROR: at least one --include NAME is required" >&2
+  exit 2
+fi
+
+printf "  Checking repositories %s\n" "${include_names[*]}"
 
 logfile=${LOGFILE:-/tmp/sync-hashes.log}
 : >"$logfile"
 exec 2>>"$logfile"
 
 log() {
+  local lvl="$1"
+  shift
   if (( verbose )); then
-    printf '%s\n' "$*"
+    printf '  [%s] %s\n' "$lvl" "$*"
   fi
-  printf '%s\n' "$*" >>"$logfile"
+  printf '[%s] %s\n' "$lvl" "$*" >>"$logfile"
   return 0
 }
 trap '' PIPE
@@ -48,9 +75,8 @@ link_hashed() {
   local repo_file=$1
   local hash=$2
 
-  # Validation: Ensure hash is exactly 64 hex characters
   if [[ ! $hash =~ ^[a-f0-9]{64}$ ]]; then
-    log "ERROR: Invalid hash detected: $hash for $repo_file"
+    log "ERROR" "Invalid hash: $hash for $repo_file"
     return 1
   fi
 
@@ -59,23 +85,18 @@ link_hashed() {
   local dest="$hash_root/$a/$b/$hash"
 
   if [[ -e "$dest" ]]; then
-    log "Link repo to existing hash: $repo_file <- $dest"
+    log "LINK" "$repo_file <- pool (existing)"
     ln -fn "$dest" "$repo_file"
   else
     mkdir -p "$(dirname "$dest")"
-    log "Link hash: $repo_file -> $dest"
+    log "LINK" "$repo_file -> pool (new)"
     ln -fn "$repo_file" "$dest"
   fi
 }
 
-repos=$1
-pool=$2
-[[ -d "$repos" ]] || { echo "Missing repos dir: $repos" >&2; exit 1; }
-
-# Canonicalize paths to absolute
+# Canonicalize paths
 repos=$(cd "$repos" && pwd)
 pool=$(cd "$pool" && pwd)
-
 hash_root="$pool/by-hash/SHA256"
 mkdir -pv "$hash_root"
 
@@ -84,14 +105,35 @@ hash_done=0
 skip_seen=0
 skip_missing=0
 
-# --- PHASE 1: Index existing pool ---
-log "Indexing existing pool..."
+# --- Build find-starting-points --------------------------------------------
+find_roots=()
+for name in "${include_names[@]}"; do
+  root="$repos/$name"
+  if [[ -d "$root" ]]; then
+    find_roots+=("$root")
+  else
+    log "WARN" "Skipping --include '$name': not found under $repos"
+  fi
+done
+if [[ ${#find_roots[@]} -eq 0 ]]; then
+  log "ERROR" "No --include directories exist under $repos"
+  exit 1
+fi
+
+# --- PHASE 1: Index existing pool ------------------------------------------
+log "INFO" "Indexing existing pool..."
 while IFS= read -r -d '' inode; do
   byhash_inode["$inode"]=1
-done < <(find "$pool" -xdev -type f -printf '%i\0' 2>/dev/null || true)
+done < <(
+  find "$pool" -xdev -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
+    stat -f '%i' "$f" 2>/dev/null || stat -c '%i' "$f" 2>/dev/null
+    printf '\0'
+  done
+  true
+)
 
-# --- PHASE 2: Processing ---
-log "Processing repositories..."
+# --- PHASE 2: Processing ---------------------------------------------------
+log "INFO" "Processing ${#include_names[@]} repos (${#find_roots[@]} directories)..."
 set +e
 work_fifo=$(mktemp)
 rm -f "$work_fifo"
@@ -100,19 +142,16 @@ mkfifo "$work_fifo"
 (
   set +e
   trap - ERR
-  # Worker opens for reading ONLY.
   exec {w_fd}<"$work_fifo"
 
   while :; do
     batch_repo_files=()
-    # Read first record (blocking).
     if ! IFS= read -r -d '' record <&$w_fd; then
       break
     fi
     repo_file=${record#*|}
     batch_repo_files+=("$repo_file")
 
-    # Read more records (non-blocking) to fill the batch.
     while (( ${#batch_repo_files[@]} < batch_size )); do
       if ! IFS= read -r -t 0.01 -d '' record <&$w_fd; then
         break
@@ -127,11 +166,8 @@ mkfifo "$work_fifo"
     tmp_err=$(mktemp)
     trap 'rm -f "$tmp_out" "$tmp_list" "$tmp_err"' RETURN
     printf '%s\0' "${batch_repo_files[@]}" >"$tmp_list"
-    log "DEBUG: Batch contains ${#batch_repo_files[@]} files, first few: ${batch_repo_files[0]} ${batch_repo_files[1]} ${batch_repo_files[2]}"
-    # Use xargs -0 to avoid long argv and for compatibility (no --files0-from support here).
     if ! xargs -0 sha256sum --zero >"$tmp_out" 2>"$tmp_err" <"$tmp_list"; then
-      log "worker: HASH FAIL batch count=${#batch_repo_files[@]} stderr: $(<"$tmp_err")"
-      log "DEBUG: tmp_list contents: $(cat "$tmp_list" | tr '\0' '\n' | head -5)"
+      log "ERROR" "HASH FAIL batch count=${#batch_repo_files[@]}"
       exit 1
     fi
     while IFS= read -r -d '' line; do
@@ -147,13 +183,12 @@ mkfifo "$work_fifo"
 ) &
 worker_pid=$!
 
-# Main process opens for writing.
-# We open it twice: once for the 'keep-alive' and once for the 'writer'.
 exec {wf_ka}>"$work_fifo"
 exec {wf_fd}>"$work_fifo"
 
 trap 'exec {wf_fd}>&- 2>/dev/null; exec {wf_ka}>&- 2>/dev/null; kill $worker_pid 2>/dev/null; exit 130' INT TERM
 
+# find excludes .mirror-dedupe dirs via -prune, only emits files
 while IFS= read -r -d '' inode && IFS= read -r -d '' repo_file; do
   set +e
   if [[ ${byhash_inode[$inode]+x} ]]; then
@@ -176,30 +211,43 @@ while IFS= read -r -d '' inode && IFS= read -r -d '' repo_file; do
     break
   fi
 
-  log "DEBUG: Enqueuing inode=$inode file=$repo_file"
   if ! printf '%s|%s\0' "$inode" "$repo_file" >&$wf_fd 2>/dev/null; then
     break
   fi
-done < <(find "$repos" -xdev -type f -printf '%i\0%p\0' 2>/dev/null || true)
+done < <(
+  find "${find_roots[@]}" -xdev \( -type d -name ".mirror-dedupe" -prune \) -o -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
+    inode=$(stat -f '%i' "$f" 2>/dev/null || stat -c '%i' "$f" 2>/dev/null)
+    printf '%s\0%s\0' "$inode" "$f"
+  done
+  true
+)
 
 set -e
-# Close BOTH descriptors to send EOF to the worker.
 exec {wf_fd}>&-
 exec {wf_ka}>&-
 
 wait "$worker_pid"
 rm -f "$work_fifo"
 
-log "Pruning stale hashes..."
+# --- PHASE 3: Prune orphans -------------------------------------------------
+log "INFO" "Pruning stale hashes (link count 1)..."
+pruned=0
 while IFS= read -r -d '' hfile; do
-  log "Remove stale hash: $hfile"
   rm -f "$hfile"
+  ((pruned++))
 done < <(find "$hash_root" -xdev -type f -links 1 -print0)
 
-log "Pruning empty directories..."
+log "INFO" "Pruning empty directories..."
 while IFS= read -r d; do
-  log "Remove dir: $d"
-  rmdir "$d"
+  rmdir "$d" 2>/dev/null || true
 done < <(find "$hash_root" -xdev -depth -type d -empty -print)
 
-echo "Done."
+# --- Summary ----------------------------------------------------------------
+total=$(( hash_done + skip_seen ))
+if (( verbose )); then
+  printf '\n'
+  log "DONE" "Scanned $total files: $hash_done linked, $skip_seen skipped, $pruned pruned"
+  if (( skip_missing > 0 )); then
+    log "WARN" "$skip_missing files disappeared during processing"
+  fi
+fi

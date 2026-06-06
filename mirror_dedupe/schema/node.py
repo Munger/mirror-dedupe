@@ -122,6 +122,7 @@ class Node(dict):
 
         super().__init__()
         object.__setattr__(self, "_cache", None)
+        object.__setattr__(self, "_repo_vars", None)
 
         if args:
             if len(args) > 1:
@@ -152,8 +153,10 @@ class Node(dict):
         ##
         ## @return A plain dict/list/scalar structure.
 
-        # Recursively convert Node → dict, list → list, scalar → identity.
         def convert(value: Any) -> Any:
+            ## @brief Recursively convert Node → dict, list → list, scalar → identity.
+            ## @param value  Any value in the tree.
+            ## @return Plain Python data structure (no Node instances).
             if isinstance(value, Node):
                 return {k: convert(v) for k, v in value.items()}
             if isinstance(value, list):
@@ -312,8 +315,9 @@ class Node(dict):
         ##
         ## @param func  Callable to apply to each child Node.
 
-        # Recurse into Node/NodeList/dict/list to apply func to every leaf.
         def recurse(value: Any) -> None:
+            ## @brief Walk a value tree calling *func* on every Node/NodeList.
+            ## @param value  Any value (Node, NodeList, dict, list, scalar).
             if isinstance(value, Node):
                 func(value)
             if isinstance(value, NodeList):
@@ -409,8 +413,10 @@ class Node(dict):
         memo[obj_id] = new
         dict.__init__(new, {})
 
-        # Deep-clone a single value: recurse into Node/list/dict.
         def clone_value(value: Any) -> Any:
+            ## @brief Deep-clone a single value, recursing into Node/list/dict.
+            ## @param value  Any value in the tree.
+            ## @return Deep clone of *value*.
             if isinstance(value, Node):
                 return value._clone_recursive(memo)
             if isinstance(value, list):
@@ -495,22 +501,6 @@ class Node(dict):
             return None
 
 
-
-    @staticmethod
-    def _pool_path(hash_val: str) -> Path:
-        ## @brief Resolve the on-disk pool path for a SHA-256 hash.
-        ##
-        ## The pool directory structure is
-        ## ``{pool_root}/by-hash/SHA256/{first2}/{next2}/{full_hash}``,
-        ## where ``first2 = hash_val[:2]`` and ``next2 = hash_val[2:4]``.
-        ## This fan-out prevents any single directory from holding more
-        ## than 256 subdirectories.
-        ##
-        ## @param hash_val  Full SHA-256 hex string (64 chars).
-        ## @return The pool ``Path`` for this hash.
-        from mirror_dedupe.config import Config
-        cfg = Config.load()
-        return Path(cfg.pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
 
     def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
         ## @brief Populate this node's schema and create child nodes.
@@ -604,9 +594,12 @@ class Node(dict):
 
         if data is not None:
             return io.BytesIO(data)
-        from mirror_dedupe.config import Config
-        cfg = Config.load()
-        return open(Path(cfg.repo_root) / self["path"], "rb")
+        if self._repo_vars is not None:
+            return open(Path(self._repo_vars.repo_root) / self["path"], "rb")
+        raise RuntimeError(
+            "Cannot open file on disk: node has no _repo_vars "
+            "and no data bytes were provided"
+        )
 
     def _iter_lines(self, data: Optional[bytes] = None):
         ## @brief Yield decoded text lines from this node's content.
@@ -683,9 +676,7 @@ class Node(dict):
             return None
         if self._cache is not None:
             return self._cache
-        from mirror_dedupe.config import Config
-        cfg = Config.load()
-        if getattr(cfg, "_sync_mode", False):
+        if self._repo_vars is not None and self._repo_vars.sync_mode:
             return self.read(config=config)
         data = HTTPFetch(uri)
         self._cache = data
@@ -704,9 +695,9 @@ class Node(dict):
         if not self.get("uri") or not self.get("path"):
             return None
         self.sync(config=config)
-        from mirror_dedupe.config import Config
-        cfg = Config.load()
-        return (Path(cfg.repo_root) / self.get("path")).read_bytes()
+        if self._repo_vars is not None:
+            return (Path(self._repo_vars.repo_root) / self.get("path")).read_bytes()
+        return None
 
     def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
         ## @brief Synchronise this node's file from upstream into the pool and repo.
@@ -735,55 +726,63 @@ class Node(dict):
         path_val = self.get("path")
         if not uri or not path_val:
             return []
-        from mirror_dedupe.config import Config
-        cfg = Config.load()
-        dest = Path(cfg.repo_root) / path_val
-        pool_root = Path(cfg.pool_root)
+
+        rv = self._repo_vars
+        if rv is None:
+            raise RuntimeError(
+                f"sync() called on {path_val} without _repo_vars"
+            )
+
+        dest = Path(rv.repo_root) / path_val
+        pool_root = rv.pool_root
         hash_val = self.checksum
+
         if hash_val:
-            pool_path = pool_root / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
-            if pool_path.exists():
+            if rv.inv is not None and rv.inv.has(hash_val):
+                self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                log(f"  Unchanged* {path_val}")
+                return [dest]
+
+            if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
+                pool_path = Path(pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
                 if dest.exists():
-                    try:
-                        if dest.stat().st_ino == pool_path.stat().st_ino:
-                            self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                            from ..lib.log import log
-                            log(f"  Unchanged {path_val}")
-                            return [dest]
-                    except OSError:
-                        pass
                     dest.unlink()
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 os.link(pool_path, dest)
-                from ..lib.log import log
+                ino = dest.stat().st_ino
+                if rv.inv is not None:
+                    rv.inv.add(hash_val, ino)
                 log(f"  Linked {path_val}")
                 self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
                 return [dest]
-        staging_dir = pool_root / "staging"
+
+        staging_dir = Path(pool_root) / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
         staging_key = hash_val or hashlib.sha256(uri.encode()).hexdigest()
         with _staging_locks_lock:
             lock = _staging_locks.setdefault(staging_key, threading.Lock())
         with lock:
             if hash_val:
-                pool_path = pool_root / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
+                pool_path = Path(pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
                 if pool_path.exists():
                     if dest.exists():
                         try:
                             if dest.stat().st_ino == pool_path.stat().st_ino:
                                 self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                                from ..lib.log import log
-                                log(f"  Unchanged {path_val}")
+                                log(f"  Unchanged* {path_val}")
                                 return [dest]
                         except OSError:
                             pass
                         dest.unlink()
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     os.link(pool_path, dest)
-                    from ..lib.log import log
+                    ino = dest.stat().st_ino
+                    if rv.inv is not None:
+                        rv.inv.add(hash_val, ino)
                     log(f"  Linked {path_val}")
                     self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
                     return [dest]
+
             tmp = str(staging_dir / staging_key)
             actual_hash = HTTPDownload(uri, tmp)
             if hash_val and actual_hash != hash_val:
@@ -793,7 +792,7 @@ class Node(dict):
                 )
             self["hash"] = actual_hash
             hash_val = hash_val or actual_hash
-            pool_path = pool_root / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
+            pool_path = Path(pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
             pool_path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(tmp, pool_path)
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -801,7 +800,11 @@ class Node(dict):
             os.link(pool_path, dest)
             sz = int(dest.stat().st_size)
             self["size"] = sz
-            from ..lib.log import log
+            ino = dest.stat().st_ino
+            if rv.inv is not None:
+                rv.inv.add(hash_val, ino)
+            if rv.pool_inv is not None:
+                rv.pool_inv.add(hash_val, ino)
             log(f"  Downloaded {path_val}")
             self["stats"] = {"hit": 0, "miss": 1, "bytes_tx": sz}
             return [dest]

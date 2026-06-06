@@ -76,12 +76,14 @@ class AptIndex(Schema.Index):
                         continue
                     pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
                     pkg_path = f"{dest}/{filename}" if dest else filename
-                    packages.append(Package(
+                    pkg = Package(
                         path=pkg_path,
                         hash=sha256_val,
                         size=size_int,
                         uri=pkg_uri,
-                    ))
+                    )
+                    pkg._repo_vars = self._repo_vars
+                    packages.append(pkg)
                 stanza_lines = []
             elif line:
                 stanza_lines.append(line)
@@ -105,12 +107,14 @@ class AptIndex(Schema.Index):
                 else:
                     pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
                     pkg_path = f"{dest}/{filename}" if dest else filename
-                    packages.append(Package(
+                    pkg = Package(
                         path=pkg_path,
                         hash=sha256_val,
                         size=size_int,
                         uri=pkg_uri,
-                    ))
+                    )
+                    pkg._repo_vars = self._repo_vars
+                    packages.append(pkg)
 
         self.packages = packages
         return iter(packages)
