@@ -177,6 +177,7 @@ class Apt(Schema.Repo):
     def architectures(self, value: Schema.Architectures) -> None:
         ## @brief Set the aggregated architectures override.
         ## @param value  ``Architectures`` NodeList to store.
+        ## @return None
         self._architectures = value
 
     @property

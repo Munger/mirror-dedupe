@@ -121,6 +121,15 @@ class TSNode(Node):
     # --- lock helpers -----------------------------------------------------
 
     def _with_lock(self, func: Callable[[], Any]) -> Any:
+        ## @brief Execute a callable under this node's per-instance lock.
+        ##
+        ## Acquires the internal ``RLock``, calls *func*, and returns its
+        ## result.  Used internally by the dict/attribute mutators so that
+        ## all writes are serialised without callers needing to manage the
+        ## lock themselves.
+        ##
+        ## @param func  Thunk to invoke while holding the lock.
+        ## @return Whatever *func* returns.
         lock = getattr(self, "_lock")
         with lock:
             return func()
