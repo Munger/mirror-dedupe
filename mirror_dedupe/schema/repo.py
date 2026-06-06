@@ -961,6 +961,21 @@ class Repos(NodeList[Repo]):
         original_sigint = signal.signal(signal.SIGINT, _sigint_handler)
         faulthandler.register(signal.SIGINFO)
 
+        # Verify pool and repo are on the same filesystem (hardlinks required)
+        pool_dev = os.stat(cfg.pool_root).st_dev
+        repo_dev = os.stat(cfg.repo_root).st_dev
+        if pool_dev != repo_dev:
+            log(
+                "ERROR: pool_root and repo_root are on different filesystems. "
+                "mirror-dedupe requires pool and repo to reside on the same "
+                "logical volume for hardlink-based deduplication. "
+                f"pool st_dev={pool_dev}, repo st_dev={repo_dev}. "
+                "Use LVM to place both directories on the same volume, or "
+                "adjust pool_root/repo_root in mirror-dedupe.conf.",
+                level="ERROR"
+            )
+            sys.exit(1)
+
         log("Checking inventory...", level="INFO")
         try:
             pool_inv = Inventory.from_pool(cfg.pool_root)

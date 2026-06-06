@@ -390,6 +390,17 @@ def main():
             snap_dir = snap_base / label
             ts = _timestamp()
             target = snap_dir / ts
+            if os.path.isdir(dest_path):
+                src_dev = os.stat(dest_path).st_dev
+                snap_dev = os.stat(str(snap_base)).st_dev
+                if src_dev != snap_dev:
+                    log(
+                        "ERROR: Snapshot source and Snapshots/ directory are on different "
+                        "filesystems. cp -al (hardlinks) requires both to reside on the same "
+                        f"logical volume. src st_dev={src_dev}, snap st_dev={snap_dev}.",
+                        level="ERROR"
+                    )
+                    sys.exit(1)
             os.makedirs(str(snap_dir), exist_ok=True)
             log(f"Snapshotting '{label}' from {dest_path} -> {target}", level="INFO")
             subprocess.run(
@@ -871,6 +882,18 @@ def main():
         else:
             print("    ERROR: Upstream is not reachable over HTTP/HTTPS (curl failed)")
             sys.exit(1)
+
+        print("  Filesystem check (pool vs repo)...")
+        try:
+            pool_dev = os.stat(cfg_main.pool_root).st_dev
+            repo_dev = os.stat(cfg_main.repo_root).st_dev
+            same_fs = "yes" if pool_dev == repo_dev else "NO"
+            print(f"    pool ({cfg_main.pool_root}) and repo ({cfg_main.repo_root}): "
+                  f"same filesystem = {same_fs}")
+            if pool_dev != repo_dev:
+                print("    WARNING: Hardlink deduplication requires pool and repo to be on the same volume.")
+        except OSError as e:
+            print(f"    ERROR: Cannot stat pool or repo root: {e}")
 
         if gpg_key_url:
             print("")
