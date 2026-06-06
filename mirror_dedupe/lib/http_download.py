@@ -51,12 +51,40 @@ def kill_active_subprocesses() -> None:
     ##
     ## @return None
     with _active_lock:
-        for p in list(_active_procs):
-            try:
-                p.kill()
-            except OSError:
-                pass
-        _active_procs.clear()
+        _kill_all_no_lock()
+
+
+def _kill_all_no_lock() -> None:
+    ## @brief Iterate and kill all tracked processes (no lock held).
+    ##
+    ## Separated so the signal handler can call it with a non-blocking
+    ## lock attempt — acquiring a ``threading.Lock`` from a signal handler
+    ## risks deadlock if another thread holds it at the moment of the
+    ## interrupt.
+    ##
+    ## @return None
+    for p in list(_active_procs):
+        try:
+            p.kill()
+        except OSError:
+            pass
+    _active_procs.clear()
+
+
+def kill_active_subprocesses_signal_safe() -> None:
+    ## @brief Signal-handler-safe variant of ``kill_active_subprocesses``.
+    ##
+    ## Attempts a non-blocking lock acquisition and bails if the lock is
+    ## held (the other thread will finish quickly and the process is about
+    ## to exit anyway).  Call this from a SIGINT handler before
+    ## ``os._exit()``.
+    ##
+    ## @return None
+    if _active_lock.acquire(blocking=False):
+        try:
+            _kill_all_no_lock()
+        finally:
+            _active_lock.release()
 
 
 def _run_subprocess(args: List[str]) -> Tuple[int, Optional[bytes], bytes]:
@@ -105,6 +133,9 @@ _HTTP_REASONS: Dict[int, str] = {
 
 
 def _http_reason(code: int) -> str:
+    ## @brief Return a human-readable HTTP status description.
+    ## @param code  HTTP status code.
+    ## @return Description string (e.g. ``"Not Found"``) or ``"HTTP {code}"``.
     return _HTTP_REASONS.get(code, f"HTTP {code}")
 
 
@@ -151,6 +182,12 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
     _TRANSIENT_EXITS: Tuple[int, ...] = (7, 18, 35, 52, 55, 56)
 
     def _compute_hash() -> str:
+        ## @brief Compute the SHA-256 hash of *output_str*.
+        ##
+        ## Tries ``sha256sum`` first (Linux), then ``shasum -a 256``
+        ## (macOS).  Raises ``RuntimeError`` if neither tool is found.
+        ##
+        ## @return SHA-256 hex digest as a 64-character string.
         rc, out, _ = _run_subprocess(["sha256sum", output_str])
         if rc == 0:
             return out.decode("utf-8").split()[0]

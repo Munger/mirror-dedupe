@@ -122,6 +122,8 @@ def generate_config(repo: Repo, dest: str,
     step = 1
 
     def next_step_label() -> str:
+        ## @brief Return an incrementing ``[N/total]`` step label.
+        ## @return Formatted label string.
         nonlocal step
         label = f"[{step}/{total_steps}]"
         step += 1
@@ -376,6 +378,9 @@ def main() -> None:
     global_collapse_dists = bool(cfg.collapse_distributions)
 
     def _normalize_arch_mask(value):
+        ## @brief Normalise an architecture mask value (wildcard → passthrough).
+        ## @param value  Raw mask (``"*"``, string, or list).
+        ## @return ``None`` for passthrough, a list of arch names, or ``None``.
         if isinstance(value, str):
             v = value.strip()
             if v.lower() in ('*', 'all') or not v:
@@ -388,6 +393,9 @@ def main() -> None:
     global_arch_mask = _normalize_arch_mask(arch_mask)
 
     def _split_csv(values):
+        ## @brief Split a list of comma-separated strings, deduplicated.
+        ## @param values  List of strings (some may contain commas).
+        ## @return Flat deduplicated list of individual items.
         items = []
         for v in values or []:
             if not v:

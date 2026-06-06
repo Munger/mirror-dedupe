@@ -18,7 +18,7 @@ import yaml
 from pathlib import Path
 from typing import Dict, List
 
-from mirror_dedupe.lib.log import log
+from mirror_dedupe.lib.log import log, setup_log_colours
 
 
 DEFAULT_CONFIG_DIR = "/etc/mirror-dedupe"
@@ -100,6 +100,7 @@ class Config:
         self.max_retries = self._data.get('max_retries', 3)
         self.progress_interval = self._data.get('progress_interval', 1000)
         self.no_hardlinks = bool(self._data.get('no_hardlinks', False))
+        self.sweep_pool_after_sync = bool(self._data.get('sweep_pool_after_sync', False))
         raw_additional = self._data.get('additional_repos', []) or []
         self.additional_repos: Dict[str, str] = {}
         for entry in raw_additional:
@@ -133,7 +134,14 @@ class Config:
         arch_mask = self._data.get('architectures', '*')
 
         def _normalize_arch_mask(value):
-            """Convert wildcard '*' to None (passthrough), list to itself."""
+            ## @brief Normalise an architecture mask value.
+            ##
+            ## ``"*"``, ``"all"``, or empty → ``None`` (passthrough).
+            ## A single string → one-element list.  A list → itself.
+            ## Anything else → ``None``.
+            ##
+            ## @param value  Raw architecture mask from config.
+            ## @return Normalised mask or ``None``.
             if isinstance(value, str):
                 v = value.strip()
                 if v.lower() in ('*', 'all') or not v:
@@ -174,8 +182,17 @@ class Config:
         self._data['max_retries'] = self.max_retries
         self._data['progress_interval'] = self.progress_interval
         self._data['no_hardlinks'] = self.no_hardlinks
+        self._data['sweep_pool_after_sync'] = self.sweep_pool_after_sync
         self._data['mirrors'] = self.mirrors
         self._data['additional_repos'] = self.additional_repos
+        self._data['log_colour'] = self._data.get('log_colour', 'DEFAULT')
+        self._data['log_colour_bg'] = self._data.get('log_colour_bg', 'NONE')
+
+        setup_log_colours(
+            self._data['log_colour'],
+            self._data['log_colour_bg'],
+            mirrors,
+        )
 
     def __getitem__(self, key):
         ## @brief Dict-style access to config values.

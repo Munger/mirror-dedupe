@@ -38,6 +38,13 @@ class Release(Schema.Release):
             checksum: str,
             size: int,
         ) -> None:
+            ## @brief Initialise APT-specific Index metadata from a Release hash entry.
+            ##
+            ## @param suite     Suite name for scoping.
+            ## @param algorithm Hash algorithm label (e.g. ``"sha256"``).
+            ## @param checksum  Hex digest.
+            ## @param size      File size in bytes.
+            ## @return None
             super().__init__(
                 suite=suite,
                 algorithm=algorithm,
@@ -198,8 +205,13 @@ class Release(Schema.Release):
         seen_paths: set = set()
 
         for base, group in by_base.items():
-            # Prefer better compression: xz > bz2 > gz > uncompressed
             def _rank(entry: Dict[str, Any]) -> int:
+                ## @brief Rank compression by preference (lower = better).
+                ##
+                ## Preference order: ``xz`` > ``bz2`` > ``gz`` > uncompressed.
+                ##
+                ## @param entry  A hash entry with a ``"path"`` key.
+                ## @return Rank integer (0 = best).
                 p = entry["path"]
                 if p.endswith(".xz"):
                     return 0
@@ -235,6 +247,7 @@ class Release(Schema.Release):
                 dest=dest,
                 size=primary["size"],
             )
+            primary_index._repo_vars = self._repo_vars
             indices.append(primary_index)
             yield primary_index
 
@@ -259,6 +272,7 @@ class Release(Schema.Release):
                     uri=v_uri,
                     size=variant["size"],
                 )
+                v_index._repo_vars = self._repo_vars
                 indices.append(v_index)
                 yield v_index
 

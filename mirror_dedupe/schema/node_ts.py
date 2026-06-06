@@ -67,10 +67,14 @@ class TSNode(Node):
     # --- validation helpers -----------------------------------------------
 
     def _validate_value(self, value: Any) -> None:
-        """Ensure value is safe for thread-safe tree.
-
-        Raises TypeError if value would break thread-safety guarantees.
-        """
+        ## @brief Validate thread-safety of a value before insertion.
+        ##
+        ## Only TSNode, TSNodeList, and immutable primitives are allowed.
+        ## Plain Node, raw dict, and plain list instances are rejected.
+        ##
+        ## @param value  The value to validate.
+        ## @raises TypeError  If *value* is not thread-safe.
+        ## @return None
         # TSNode and TSNodeList are always safe
         if isinstance(value, (TSNode, TSNodeList)):
             return
@@ -169,6 +173,8 @@ class TSNode(Node):
             self._validate_value(value)
 
         def op() -> None:
+            ## @brief Lock-guarded attribute setter.
+            ## @return None
             super(TSNode, self).__setattr__(name, value)
 
         self._with_lock(op)
@@ -199,6 +205,8 @@ class TSNode(Node):
         ## @return None
 
         def op() -> None:
+            ## @brief Lock-guarded update with pre-validation.
+            ## @return None
             # Validate all incoming values before updating
             if args:
                 if len(args) > 1:
@@ -235,6 +243,8 @@ class TSNode(Node):
         ## @return This node after the merge.
 
         def op() -> TSNode:
+            ## @brief Lock-guarded merge with pre-validation.
+            ## @return This node after merge.
             # Validate the entire incoming tree before merging
             if isinstance(other, dict):
                 for v in other.values():
@@ -251,6 +261,8 @@ class TSNode(Node):
         ## @return None
 
         def op() -> None:
+            ## @brief Lock-guarded thaw.
+            ## @return None
             super(TSNode, self).thaw(deep=deep)
 
         self._with_lock(op)
@@ -262,6 +274,8 @@ class TSNode(Node):
         ## @return None
 
         def op() -> None:
+            ## @brief Lock-guarded freeze.
+            ## @return None
             super(TSNode, self).freeze(deep=deep)
 
         self._with_lock(op)
@@ -293,6 +307,9 @@ class TSNodeList(NodeList[TNode], Generic[TNode]):
         super().__init__(*args, **kwargs)
 
     def _with_lock(self, func: Callable[[], Any]) -> Any:
+        ## @brief Execute *func* under this list's re-entrant lock.
+        ## @param func  Thunk to execute.
+        ## @return Return value of *func*.
         lock = getattr(self, "_lock")
         with lock:
             return func()
@@ -300,6 +317,10 @@ class TSNodeList(NodeList[TNode], Generic[TNode]):
     # --- list mutators ----------------------------------------------------
 
     def _check_item(self, item: TNode) -> None:
+        ## @brief Validate that *item* is a TSNode before insertion.
+        ## @param item  Item to check.
+        ## @raises TypeError  If *item* is not a TSNode.
+        ## @return None
         if not isinstance(item, TSNode):
             raise TypeError(
                 f"TSNodeList only accepts TSNode elements. "
@@ -325,6 +346,8 @@ class TSNodeList(NodeList[TNode], Generic[TNode]):
         ## @return None
 
         def op() -> None:
+            ## @brief Lock-guarded extend with per-item validation.
+            ## @return None
             for i in items:
                 self._check_item(i)
             super(TSNodeList, self).extend(items)
@@ -376,6 +399,8 @@ class TSNodeList(NodeList[TNode], Generic[TNode]):
 
         # Support both single index assignment and slice assignment.
         def op() -> None:
+            ## @brief Lock-guarded ``__setitem__`` with validation.
+            ## @return None
             if isinstance(index, slice):
                 for v in value:
                     self._check_item(v)

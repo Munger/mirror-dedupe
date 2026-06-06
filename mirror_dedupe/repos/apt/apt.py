@@ -19,7 +19,7 @@ from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.html_helpers import build_url
 from mirror_dedupe.lib.log import log
 from mirror_dedupe.schema.node import Node
-from .discovery import _iter_href_names, probe_any_suite, probe_fallback_suites
+from .discovery import _iter_href_names, probe_any_suite
 from .distributions import DistributionsParser
 
 
@@ -133,6 +133,7 @@ class Apt(Schema.Repo):
                 url=url, upstream=self.get("uri") or "", name=suite_name,
             )
             dist._repo = self
+            dist._repo_vars = self._repo_vars
 
             release = AptRelease(
                 url=url,
@@ -142,6 +143,7 @@ class Apt(Schema.Repo):
             )
             release._arch_filter = self._arch_filter
             release._comp_filter = self._comp_filter
+            release._repo_vars = self._repo_vars
             dist.release = release
 
             self.distributions.append(dist)
@@ -201,6 +203,9 @@ class Apt(Schema.Repo):
 
     @components.setter
     def components(self, value: Schema.Components) -> None:
+        ## @brief Set the internally-cached component collection.
+        ## @param value  ``Components`` instance to store.
+        ## @return None
         self._components = value
 
     @classmethod
@@ -252,25 +257,5 @@ class Apt(Schema.Repo):
             )
         except Exception:
             return False
-
-    @classmethod
-    def probe_known_labels(cls, upstream: str) -> List[str]:
-        ## @brief Probe well-known APT suite names at *upstream*.
-        ##
-        ## Delegates to ``probe_fallback_suites`` which probes
-        ## ``dists/{name}/Release`` for all known suite names and
-        ## returns the full confirmed list.
-        ##
-        ## @param upstream  Upstream URL to probe.
-        ## @return Names of suites confirmed to have valid Release files.
-
-        try:
-            return probe_fallback_suites(
-                upstream,
-                index_root=cls.INDEX_ROOT_DIR,
-                anchor=cls.INDEX_ANCHOR_FILENAME,
-            )
-        except Exception:
-            return []
 
 Schema.Repo.register(Apt)

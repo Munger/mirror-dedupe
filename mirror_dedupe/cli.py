@@ -223,8 +223,8 @@ def main():
     # Management operations (new)
     parser.add_argument('--list-repos', action='store_true',
                         help='List all known repos (config-based and additional)')
-    parser.add_argument('--repair', metavar='NAME', nargs='?', const='ALL',
-                        help='Run sync-hashes.sh on a repo dest or ALL (reconstructs pool from repo tree)')
+    parser.add_argument('--relink-pool', action='store_true',
+                        help='Re-link pool hashes with all managed repos and snapshots')
     parser.add_argument('--snapshot', metavar='NAME', nargs='?', const='ALL',
                         help='Create a hardlink snapshot of a repo dest or ALL')
     parser.add_argument('--list-snapshots', metavar='NAME', nargs='?', const='ALL',
@@ -239,6 +239,8 @@ def main():
                         help='Truncate stats.ndjson for a repo dest or ALL (requires PIN)')
     parser.add_argument('--migrate', action='store_true',
                         help='Migrate a legacy mirror-dedupe repo tree to the current layout (not yet implemented)')
+    parser.add_argument('--sweep-pool', action='store_true',
+                        help='Remove orphaned pool entries (st_nlink == 1)')
 
     args = parser.parse_args()
 
@@ -252,7 +254,7 @@ def main():
         bool(args.deactivate),
         bool(args.test),
         bool(args.reinitialise),
-        bool(args.repair),
+        bool(args.relink_pool),
         bool(args.snapshot),
         bool(args.list_snapshots),
         bool(args.restore_snapshot),
@@ -260,19 +262,20 @@ def main():
         bool(args.stats),
         bool(args.stats_reset),
         bool(args.migrate),
+        bool(args.sweep_pool),
     ]
     if sum(1 for x in management_ops if x) > 1:
         names = [
             "--list", "--list-repos", "--activate", "--deactivate",
-            "--test", "--reinitialise", "--repair", "--snapshot",
+            "--test", "--reinitialise", "--relink-pool", "--snapshot",
             "--list-snapshots", "--restore-snapshot", "--delete-snapshot",
-            "--stats", "--stats-reset", "--migrate",
+            "--stats", "--stats-reset", "--migrate", "--sweep-pool",
         ]
         log(f"ERROR: Only one management flag may be used at a time. Choose one of: {', '.join(names)}", level="ERROR")
         sys.exit(1)
 
     if args.sync:
-        from .schema.repo import Repos
+        from .schema.repo import Repos, pool_sweep_safe
 
         repo_names: List[str] = []
         if args.mirror:
@@ -293,6 +296,8 @@ def main():
 
         repos = Repos.from_names(repo_names, config_dir=args.config_dir)
         repos.sync_all(config_dir=args.config_dir)
+        if args.sweep_pool or cfg_main.sweep_pool_after_sync:
+            pool_sweep_safe(cfg_main, fail_if_locked=False)
         sys.exit(0)
 
     config_dir_path = Path(config_dir)
@@ -316,32 +321,50 @@ def main():
         sys.exit(0)
 
     # ------------------------------------------------------------------
-    # --repair : shell out to sync-hashes.sh
+    # --relink-pool : re-link pool hashes with repo + snapshot trees
     # ------------------------------------------------------------------
-    if args.repair:
-        name = args.repair
-        if name != "ALL":
-            candidates = cfg_main.list_repo_names()
-            if candidates:
-                name = _resolve_name_or_index(name, candidates, "repo")
+    if args.relink_pool:
         script = Path(__file__).resolve().parents[1] / "scripts" / "sync-hashes.sh"
         if not script.exists():
-            log(f"ERROR: Repair script not found at {script}", level="ERROR")
+            log(f"ERROR: Relink script not found at {script}", level="ERROR")
             sys.exit(1)
 
-        if name == "ALL":
-            log(f"Repairing entire repo tree: {cfg_main.repo_root}", level="INFO")
-            result = subprocess.run(
-                [str(script), cfg_main.repo_root, cfg_main.pool_root],
-            )
-            sys.exit(result.returncode)
+        # Build --include list from all managed repo dests + Snapshots.
+        managed_dests: set[str] = set()
+        for name in cfg_main.list_repo_names():
+            dest_abs = cfg_main.resolve_dest(name)
+            if not dest_abs:
+                continue
+            if dest_abs.startswith(cfg_main.repo_root.rstrip("/") + "/"):
+                managed_dests.add(dest_abs[len(cfg_main.repo_root.rstrip("/")) + 1:])
+        managed_dests.add("Snapshots")
 
-        dest = _resolve_dest(name, cfg_main)
-        if not dest:
-            log(f"ERROR: Cannot resolve '{name}' to a dest directory", level="ERROR")
+        include_dirs: list[str] = []
+        if not os.path.isdir(cfg_main.repo_root):
+            log(f"ERROR: repo_root '{cfg_main.repo_root}' does not exist", level="ERROR")
             sys.exit(1)
-        log(f"Repairing: {dest}", level="INFO")
-        result = subprocess.run([str(script), dest, cfg_main.pool_root])
+
+        for entry in sorted(os.listdir(cfg_main.repo_root)):
+            if entry in managed_dests:
+                include_dirs.append(entry)
+
+        if not args.force:
+            dirs_str = ", ".join(include_dirs)
+            answer = input(
+                f"This will regenerate pool entries for the following directories: "
+                f"{dirs_str}. Continue? [y/N] "
+            ).strip().lower()
+            if answer != "y":
+                log("Re-link cancelled.", level="INFO")
+                sys.exit(0)
+
+        cmd = [str(script), "-v"]
+        for d in include_dirs:
+            cmd.extend(["--include", d])
+        cmd.extend([cfg_main.repo_root, cfg_main.pool_root])
+        log(f"Re-linking {len(include_dirs)} directories under {cfg_main.repo_root}",
+            level="INFO")
+        result = subprocess.run(cmd)
         sys.exit(result.returncode)
 
     # ------------------------------------------------------------------
@@ -680,6 +703,15 @@ def main():
         print("--migrate is not yet implemented. It will migrate a legacy mirror-dedupe")
         print("repo tree (pre-0.2.x layout without .mirror-dedupe/ structure) to the")
         print("current layout. Coming in a future release.")
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # --sweep-pool : remove orphaned pool entries
+    # ------------------------------------------------------------------
+    if args.sweep_pool:
+        from .schema.repo import pool_sweep_safe
+        if not pool_sweep_safe(cfg_main, fail_if_locked=True):
+            sys.exit(1)
         sys.exit(0)
 
     # ------------------------------------------------------------------

@@ -19,6 +19,7 @@ import fcntl
 import json
 import os
 import platform
+import sys
 import signal
 import threading
 import time
@@ -40,7 +41,9 @@ from ..schema.release import Release, Releases
 from ..schema.vars import Vars
 from ..schema.upstream import Upstream, Upstreams
 from ..lib.log import log
-from ..lib.http_download import kill_active_subprocesses
+from ..lib.http_download import kill_active_subprocesses, kill_active_subprocesses_signal_safe
+from ..inventory import Inventory
+from ..repo_vars import RepoVars
 
 
 @dataclass
@@ -175,18 +178,6 @@ class Repo(Node):
         ## @param extra_suites  Optional dist names from config to try as suites.
         ## @return True if the upstream matches this repo type.
         raise NotImplementedError
-
-    @classmethod
-    def probe_known_labels(cls, upstream: str) -> List[str]:
-        ## @brief Probe well-known labels for this repo type.
-        ##
-        ## Returns labels that exist at *upstream*.  Base returns empty.
-        ## Subclasses implement with type-specific probes
-        ## (e.g. probing ``dists/{name}/Release`` for APT).
-        ##
-        ## @param upstream  Upstream URL to probe.
-        ## @return List of label strings that were confirmed to exist.
-        return []
 
     # --- selection helpers ------------------------------------------------
 
@@ -373,14 +364,10 @@ class Repo(Node):
         ## aggregates these on demand.  Per-repo NDJSON and summary
         ## output are produced by the parent ``Repos`` container.
         ##
-        ## @param config  Optional configuration dict (suites, filters, etc.).
-        ## @param pool    Shared ``ThreadPoolExecutor`` for parallel downloads.
-        ##                When ``None``, content sync and stale sweep are
-        ##                skipped.
+        ## @param config    Optional configuration dict (suites, filters, etc.).
+        ## @param pool      Shared ``ThreadPoolExecutor`` for parallel downloads.
 
-        from ..config import Config
-        cfg = Config.load()
-        cfg._sync_mode = True
+        self._repo_vars.sync_mode = True
         try:
             self._build_sync_tree(config=config)
             if pool is not None:
@@ -394,38 +381,66 @@ class Repo(Node):
                 ) if config else False
                 self._sweep_stale()
         finally:
-            cfg._sync_mode = False
+            self._repo_vars.sync_mode = False
 
     def _sync_content(
         self,
         pool: concurrent.futures.ThreadPoolExecutor,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        ## @brief Dynamic work queue: download, stream-discover, repeat.
+        ## @brief Dynamic work queue: submit, stream-discover, repeat.
         ##
-        ## Submits the known syncable nodes from the initial tree
-        ## (populated by ``_build_sync_tree()``) to *pool* for parallel
-        ## download.  As each future completes, ``stream()`` is called on
-        ## the node to materialise its children (e.g. Release → Indices,
-        ## Index → Packages).  Newly discovered children are submitted
-        ## to *pool* in turn, allowing download and discovery to overlap.
+        ## Submits all syncable nodes (from the initial tree and from
+        ## stream-discovered children) to *pool* for parallel download.
+        ## The coordinator performs **zero disk I/O** — it only checks the
+        ## in-memory repo inventory to skip already-known files.  All
+        ## pool lookups, links, and downloads happen inside worker threads
+        ## via ``Node.sync()``.
+        ##
+        ## As each future completes, ``stream()`` is called on the node to
+        ## materialise its children (e.g. Release → Indices, Index →
+        ## Packages).  Newly discovered children are submitted to *pool*
+        ## in turn, allowing download and discovery to overlap.
         ##
         ## Each leaf node pushes ``node["stats"]`` (hit/miss/bytes_tx).
         ## Errors are totalled and stored as ``self._top_stats["errors"]``.
         ##
-        ## @param pool    Shared ``ThreadPoolExecutor`` for parallel downloads.
-        ## @param config  Optional configuration dict forwarded to each
-        ##                ``Node.sync()`` call (e.g. ``ipv6_ok``, ``timeout``).
+        ## @param pool     Shared ``ThreadPoolExecutor`` for parallel downloads.
+        ## @param config   Optional configuration dict forwarded to each
+        ##                  ``Node.sync()`` call.
         ## @return None
 
         futures: Dict[concurrent.futures.Future, Node] = {}
+
+        def _handle_node(node: Node) -> None:
+            ## @brief Resolve *node*: skip, log unchanged, or submit to pool.
+            ##
+            ## Only checks the in-memory repo inventory — no disk I/O.
+            ## All pool lookups, hardlinks, and downloads are delegated
+            ## to worker threads via ``pool.submit()``.
+            ##
+            ## @param node  A Node with ``uri`` and ``path``.
+            ## @return None
+            if _ABORT_SYNC or not (node.get("uri") and node.get("path")):
+                return
+
+            h = node.checksum
+            if h and self._repo_vars.inv is not None and self._repo_vars.inv.has(h):
+                node["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                log(f"  Unchanged {node.get('path')}")
+                for child in node.stream():
+                    _handle_node(child)
+                return
+
+            future = pool.submit(node.sync, config=config)
+            futures[future] = node
+
+        # ---- initial tree ----
         for node in self._tree_iter():
-            if node.get("uri") and node.get("path"):
-                future = pool.submit(node.sync, config=config)
-                futures[future] = node
+            _handle_node(node)
 
         errors = 0
-        while futures:
+        while futures and not _ABORT_SYNC:
             done, _ = concurrent.futures.wait(
                 futures, return_when=concurrent.futures.FIRST_COMPLETED
             )
@@ -434,15 +449,12 @@ class Repo(Node):
                 try:
                     future.result()
                     for child in node.stream():
-                        if child.get("uri") and child.get("path"):
-                            child_future = pool.submit(child.sync, config=config)
-                            futures[child_future] = child
+                        _handle_node(child)
                 except Exception as e:
                     errors += 1
                     if "stats" not in node:
                         node["stats"] = {"hit": 0, "miss": 0, "bytes_tx": 0}
                     node["stats"]["error"] = str(e)
-                    from ..lib.log import log
                     log(f"  {e}")
 
         self._top_stats["errors"] = errors
@@ -457,9 +469,7 @@ class Repo(Node):
         ##
         ## @return None
 
-        from ..config import Config
-
-        cfg = Config.load()
+        repo_root = self._repo_vars.repo_root
         tree_paths: set[str] = set()
         for node in self._tree_iter():
             p = node.get("path")
@@ -469,14 +479,14 @@ class Repo(Node):
         dest = self.get("dest", "")
         if not dest:
             return
-        dest_path = Path(cfg.repo_root) / dest
+        dest_path = Path(repo_root) / dest
         if not dest_path.exists():
             return
 
         removed = 0
         for f in dest_path.rglob("*"):
             if f.is_file():
-                rel = str(f.relative_to(Path(cfg.repo_root)))
+                rel = str(f.relative_to(Path(repo_root)))
                 if rel not in tree_paths:
                     f.unlink()
                     removed += 1
@@ -759,6 +769,66 @@ def _pool_sweep(pool_root: str) -> None:
         log(f"Pool sweep: removed {removed} orphaned files (st_nlink == 1)", level="INFO")
 
 
+def _check_any_sync_lock(repo_root: str, repo_names: list[str]) -> str | None:
+    ## @brief Check if any named repo has an active sync lock.
+    ##
+    ## Uses ``LOCK_NB`` so this is a non-blocking probe.  Returns the
+    ## first repo name whose lock is held, or ``None`` if all are free.
+    ##
+    ## @param repo_root   Root directory for all repos.
+    ## @param repo_names  List of repo names to check.
+    ## @return Name of the first locked repo, or ``None``.
+    for name in repo_names:
+        lock_path = Path(repo_root) / RepoLock.FLOCK_DIR / name / RepoLock.LOCK_FILE
+        if not lock_path.exists():
+            continue
+        try:
+            fd = os.open(str(lock_path), os.O_RDWR)
+        except (FileNotFoundError, OSError):
+            continue
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        except BlockingIOError:
+            os.close(fd)
+            return name
+    return None
+
+
+def pool_sweep_safe(cfg: "Config", *, fail_if_locked: bool = False) -> bool:
+    ## @brief Sweep the pool for orphaned entries, respecting sync locks.
+    ##
+    ## Checks every known repo for an active lock via
+    ## ``_check_any_sync_lock()``.  If any is held and *fail_if_locked*
+    ## is ``True``, logs an error and returns ``False``.  If *fail_if_locked*
+    ## is ``False``, skips the sweep with an info message and returns
+    ## ``True`` (harmless skip).
+    ##
+    ## @param cfg            Loaded ``Config`` instance.
+    ## @param fail_if_locked If ``True``, fail when a lock is held.
+    ## @return ``True`` on success or harmless skip; ``False`` on error.
+    names = cfg.list_repo_names()
+    busy = _check_any_sync_lock(cfg.repo_root, names)
+    if busy:
+        if fail_if_locked:
+            log(
+                f"ERROR: Sync in progress for '{busy}' — cannot sweep pool",
+                level="ERROR",
+            )
+            return False
+        log(
+            f"Pool sweep skipped — another process holds the lock for '{busy}'",
+            level="INFO",
+        )
+        return True
+    _pool_sweep(cfg.pool_root)
+    return True
+
+
+_ABORT_SYNC: bool = False
+
+
 class Repos(NodeList[Repo]):
     ## @brief Container for Repo instances with high-level operations.
     ##
@@ -832,9 +902,9 @@ class Repos(NodeList[Repo]):
         ##
         ## Sets ``session_ts``, registers a SIGINT handler that kills
         ## tracked subprocesses, dispatches each repo to its own per-repo
-        ## ``ThreadPoolExecutor`` via ``_sync_one()``, runs
-        ## ``_pool_sweep()`` after all repos complete, writes per-repo
+        ## ``ThreadPoolExecutor`` via ``_sync_one()``, writes per-repo
         ## NDJSON, and prints a cross-repo summary table.
+        ## Pool sweep is handled by the caller.
         ##
         ## @param config_dir  Override path to the configuration directory
         ##                    (passed to ``from_names`` if used externally).
@@ -851,25 +921,75 @@ class Repos(NodeList[Repo]):
         max_concurrent = cfg.max_concurrent_syncs
 
         def _sigint_handler(signum: int, frame: Any) -> None:
-            ## @brief SIGINT handler: kill tracked subprocesses and restore default.
-            ## @param signum  Signal number.
-            ## @param frame   Current stack frame.
+            ## @brief Signal handler for SIGINT: abort all syncs immediately.
+            ##
+            ## Sets ``_ABORT_SYNC``, kills tracked curl subprocesses
+            ## (best-effort, non-blocking lock), then calls ``os._exit(130)``
+            ## to terminate the process without any further Python cleanup.
+            ## One Ctrl-C press is sufficient.
+            ##
+            ## @param signum  Signal number (unused).
+            ## @param frame   Current stack frame (unused).
             ## @return None
-            kill_active_subprocesses()
-            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            global _ABORT_SYNC
+            _ABORT_SYNC = True
+            kill_active_subprocesses_signal_safe()
+            os._exit(130)
 
         self.session_ts = datetime.now(timezone.utc).isoformat()
-        t0 = time.monotonic()
         original_sigint = signal.signal(signal.SIGINT, _sigint_handler)
+
+        log("Checking inventory...", level="INFO")
+        try:
+            pool_inv = Inventory.from_pool(cfg.pool_root)
+        except RuntimeError as e:
+            sys.exit(e.args[0] if e.args else "gfind not found")
+        managed_dests: set[str] = set()
+        for repo in self:
+            dest = repo.get("dest", "")
+            if dest.startswith(cfg.repo_root.rstrip("/") + "/"):
+                managed_dests.add(dest[len(cfg.repo_root.rstrip("/")) + 1:].split("/", 1)[0])
+            else:
+                managed_dests.add(repo.get("name", ""))
+        try:
+            repo_invs = Inventory.from_repos(cfg.repo_root, pool_inv, managed_dests)
+        except RuntimeError as e:
+            sys.exit(e.args[0] if e.args else "gfind not found")
+
+        for repo in self:
+            dest = repo.get("dest", "")
+            if dest.startswith(cfg.repo_root.rstrip("/") + "/"):
+                dest_name = dest[len(cfg.repo_root.rstrip("/")) + 1:].split("/", 1)[0]
+            else:
+                dest_name = repo.get("name", "")
+            inv = repo_invs.get(dest_name) if repo_invs else None
+            if inv is None:
+                inv = Inventory(
+                    id=dest_name,
+                    path=str(Path(cfg.repo_root) / (dest_name or "")),
+                )
+            params = repo.get("params") or {}
+            repo._repo_vars = RepoVars(
+                inv=inv,
+                pool_inv=pool_inv,
+                ipv6_ok=params.get("ipv6_ok", True),
+                repo_root=cfg.repo_root,
+                pool_root=cfg.pool_root,
+            )
+
+        t0 = time.monotonic()
 
         try:
             with concurrent.futures.ThreadPoolExecutor(
-                max_workers=min(max_concurrent, len(self))
+                max_workers=min(max_concurrent, len(self)),
+                thread_name_prefix="sync",
             ) as repo_pool:
                 futures = {}
                 for repo in self:
                     name = repo.get("name", "unknown")
-                    future = repo_pool.submit(self._sync_one, repo, cfg)
+                    future = repo_pool.submit(
+                        self._sync_one, repo, cfg,
+                    )
                     futures[future] = name
 
                 for future in concurrent.futures.as_completed(futures):
@@ -877,12 +997,15 @@ class Repos(NodeList[Repo]):
                     try:
                         future.result()
                     except Exception as e:
+                        if _ABORT_SYNC:
+                            break
                         log(
                             f"Repo '{name}' sync failed: {e}\n{traceback.format_exc()}",
                             level="ERROR",
                         )
 
-            _pool_sweep(cfg.pool_root)
+            if _ABORT_SYNC:
+                os._exit(130)
 
             for repo in self:
                 self._write_ndjson(repo)
@@ -894,26 +1017,41 @@ class Repos(NodeList[Repo]):
 
     @staticmethod
     def _make_worker_init(name: str):
+        ## @brief Create a ``ThreadPoolExecutor`` initializer that names workers.
+        ##
+        ## Returns a closure that, when called in each worker thread,
+        ## atomically increments a counter and sets
+        ## ``threading.current_thread().name`` to ``"<name> <N>"``.
+        ## This enables per-repo colour mapping in log output.
+        ##
+        ## @param name  Repo name to embed in worker thread names.
+        ## @return Initializer callable for ``ThreadPoolExecutor(initializer=...)``.
         _data: Dict[str, Any] = {"counter": 0, "lock": threading.Lock()}
         def _init() -> None:
+            ## @brief Per-worker initializer that sets the thread name.
+            ## @return None
             with _data["lock"]:
                 _data["counter"] += 1
                 threading.current_thread().name = f"{name} {_data['counter']}"
         return _init
 
-    def _sync_one(self, repo: Repo, cfg: "Config") -> None:
+    def _sync_one(
+        self,
+        repo: Repo,
+        cfg: "Config",
+    ) -> None:
         ## @brief Sync a single repo: metadata, packages, stats.
         ##
         ## @param repo  The ``Repo`` instance to sync.
         ## @param cfg   Global ``Config`` singleton.
         ## @return None
         name = repo.get("name", "unknown")
-        dest = repo.get("dest", "")
+        threading.current_thread().name = f"{name} 0"
         params = repo.get("params") or {}
         workers = params.get("parallel_downloads", cfg.parallel_downloads)
 
         with RepoLock(cfg.repo_root, name):
-            log(f"Syncing repo '{name}' to '{dest}'", level="INFO")
+            log(f"Syncing repo '{name}' to '{repo.get('dest', '')}'", level="INFO")
             config = repo.get("params")
             if config is None:
                 config = {"ipv6_ok": True}
@@ -937,9 +1075,14 @@ class Repos(NodeList[Repo]):
         if not name:
             return
 
-        from ..config import Config
-        cfg = Config.load()
-        stats_dir = Path(cfg.repo_root) / ".mirror-dedupe" / name
+        repo_root: str = ""
+        if repo._repo_vars is not None:
+            repo_root = repo._repo_vars.repo_root
+        if not repo_root:
+            from ..config import Config
+            cfg = Config.load()
+            repo_root = cfg.repo_root
+        stats_dir = Path(repo_root) / ".mirror-dedupe" / name
         stats_dir.mkdir(parents=True, exist_ok=True)
         stats_file = stats_dir / "stats.ndjson"
 
