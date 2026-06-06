@@ -29,11 +29,47 @@ import threading
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Generic, Iterable, Optional, Tuple, Type, TypeVar, Callable
 
+from ..lib import fmt_size, LOG_LABEL_W
 from ..lib.http_download import HTTPFetch, HTTPDownload, kill_active_subprocesses
 from ..lib.log import log
+from ..repo_vars import RepoVars
 
 _staging_locks: dict[str, threading.Lock] = {}
 _staging_locks_lock = threading.Lock()
+
+
+def _pool_path(pool_root: str, hash_val: str) -> Path:
+    ## @brief Build the deterministic pool path for a hash value.
+    ##
+    ## Pool layout is ``<pool_root>/by-hash/SHA256/<ab>/<cd>/<full_hash>``
+    ## where ``ab`` and ``cd`` are the first two and second two hex chars
+    ## of the hash.  This fan-out avoids millions of files in one directory.
+    ##
+    ## @param pool_root  Root directory of the content-addressed pool.
+    ## @param hash_val   64-char SHA-256 hex digest.
+    ## @return Absolute ``Path`` to the pool entry.
+    return Path(pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
+
+
+def _sync_link(pool_path: Path, dest: Path, rv: RepoVars, hash_val: str) -> int:
+    ## @brief Hardlink a pool file into a repo destination directory.
+    ##
+    ## Creates the parent directory tree if needed, removes any existing
+    ## file at *dest*, links *pool_path* → *dest*, and records the
+    ## mapping in the repo inventory so future lookups are fast.
+    ##
+    ## @param pool_path  Existing file in the content-addressed pool.
+    ## @param dest       Destination path under the repo root.
+    ## @param rv         ``RepoVars`` containing the repo inventory.
+    ## @param hash_val   SHA-256 hex digest of the content.
+    ## @return The inode number of the linked file.
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.unlink(missing_ok=True)
+    os.link(pool_path, dest)
+    ino = dest.stat().st_ino
+    if rv.inv is not None:
+        rv.inv.add(hash_val, ino)
+    return ino
 
 
 class Node(dict):
@@ -260,6 +296,7 @@ class Node(dict):
         ##
         ## @param node     The parent Node whose children should be restored.
         ## @param snapshot  Plain dict snapshot containing child data.
+        ## @return None
 
         if not isinstance(snapshot, dict):
             return
@@ -276,6 +313,7 @@ class Node(dict):
     def _check_frozen(self) -> None:
         ## @brief Raise if this node has been frozen.
         ## @raise TypeError  If the node is frozen.
+        ## @return None
 
         if getattr(self, "_frozen", False):
             raise TypeError(
@@ -291,6 +329,7 @@ class Node(dict):
         ## tree becomes immutable at the schema layer.
         ##
         ## @param deep  Whether to recursively freeze child nodes (default True).
+        ## @return None
 
         object.__setattr__(self, "_frozen", True)
         if deep:
@@ -302,6 +341,7 @@ class Node(dict):
         ## Restores mutability after a previous ``freeze()`` call.
         ##
         ## @param deep  Whether to recursively thaw child nodes (default True).
+        ## @return None
 
         object.__setattr__(self, "_frozen", False)
         if deep:
@@ -314,10 +354,12 @@ class Node(dict):
         ## across the schema tree without duplicating traversal logic.
         ##
         ## @param func  Callable to apply to each child Node.
+        ## @return None
 
         def recurse(value: Any) -> None:
             ## @brief Walk a value tree calling *func* on every Node/NodeList.
             ## @param value  Any value (Node, NodeList, dict, list, scalar).
+            ## @return None
             if isinstance(value, Node):
                 func(value)
             if isinstance(value, NodeList):
@@ -559,6 +601,7 @@ class Node(dict):
         ## pool without building an intermediate list.
         ##
         ## @yield ``Node`` instances in depth-first order.
+        ## @return A generator that iterates the full tree.
         yield self
         for attr in type(self)._children:
             children = getattr(self, attr, None)
@@ -610,6 +653,7 @@ class Node(dict):
         ##
         ## @param data  Optional bytes to read from (scan mode).
         ## @yield Decoded text lines.
+        ## @return A generator over decoded text lines.
 
         raw = self._open_binary(data)
         path: str = self.get("path", "")
@@ -657,6 +701,7 @@ class Node(dict):
         ##
         ## @param data  Optional bytes to parse (scan mode).
         ## @yield Child Node instances.
+        ## @return A generator over child nodes.
 
         return iter([])
 
@@ -702,25 +747,15 @@ class Node(dict):
     def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
         ## @brief Synchronise this node's file from upstream into the pool and repo.
         ##
-        ## Ensures the destination file matches upstream by verifying it is
-        ## hardlinked from the correct pool file.  Verification is one
-        ## inode comparison — no readback, no hash computation.
+        ## Ensures the destination file exists in the repo and is correctly
+        ## hardlinked to the pool. Uses inventories as a fast path; falls
+        ## back to stat() on disk when inventories miss. Logs each outcome
+        ## with a descriptive label.
         ##
-        ## Pushes a ``self["stats"]`` dict with hit/miss/bytes_tx counters
-        ## after a successful sync, so that ``Repo.stats()`` can aggregate
-        ## across the tree.
-        ##
-        ## Flow for known hashes:
-        ## 1. Pool file exists + dest exists + inodes match → done.
-        ## 2. Pool file exists + dest stale/missing → unlink dest, link from pool.
-        ## 3. Pool missing → download to staging, capture hash from curl,
-        ##    move into pool, unlink stale dest, link from pool.
-        ##
-        ## Files without a known hash (e.g. Release) always go through
-        ## the download path — they are small and the cost is negligible.
-        ##
-        ## @param config  Optional configuration dict for fetch parameters.
-        ## @return List of ``Path`` objects for linked/downloaded files.
+        ## @param config  Optional configuration dict (carries ``ipv6_ok``,
+        ##                timeout tuneables, etc.).
+        ## @return List of paths hardlinked into the repo (one-element in
+        ##         normal operation; empty if no uri/path is set).
 
         uri = self.get("uri")
         path_val = self.get("path")
@@ -734,55 +769,69 @@ class Node(dict):
             )
 
         dest = Path(rv.repo_root) / path_val
-        pool_root = rv.pool_root
         hash_val = self.checksum
 
+        # ---------------------------------------------------------
+        # Phase 1 — Inventory fast path (no disk beyond link)
+        # ---------------------------------------------------------
         if hash_val:
             if rv.inv is not None and rv.inv.has(hash_val):
                 self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                log(f"  Unchanged* {path_val}")
+                log(f"  {'Unchanged':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                 return [dest]
 
             if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
-                pool_path = Path(pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
-                if dest.exists():
-                    dest.unlink()
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                os.link(pool_path, dest)
-                ino = dest.stat().st_ino
-                if rv.inv is not None:
-                    rv.inv.add(hash_val, ino)
-                log(f"  Linked {path_val}")
+                pool_path = _pool_path(rv.pool_root, hash_val)
+                _sync_link(pool_path, dest, rv, hash_val)
                 self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                log(f"  {'Linked':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                 return [dest]
 
-        staging_dir = Path(pool_root) / "staging"
+        # ---------------------------------------------------------
+        # Phase 2 — Staging lock + stat fallback (cross-process)
+        # ---------------------------------------------------------
+        staging_dir = Path(rv.pool_root) / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
         staging_key = hash_val or hashlib.sha256(uri.encode()).hexdigest()
         with _staging_locks_lock:
             lock = _staging_locks.setdefault(staging_key, threading.Lock())
         with lock:
             if hash_val:
-                pool_path = Path(pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
-                if pool_path.exists():
-                    if dest.exists():
-                        try:
-                            if dest.stat().st_ino == pool_path.stat().st_ino:
-                                self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                                log(f"  Unchanged* {path_val}")
-                                return [dest]
-                        except OSError:
-                            pass
-                        dest.unlink()
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    os.link(pool_path, dest)
-                    ino = dest.stat().st_ino
-                    if rv.inv is not None:
-                        rv.inv.add(hash_val, ino)
-                    log(f"  Linked {path_val}")
+                # Recheck inventories after lock (another thread may have raced)
+                if rv.inv is not None and rv.inv.has(hash_val):
                     self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                    log(f"  {'Unchanged':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                     return [dest]
 
+                if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
+                    pool_path = _pool_path(rv.pool_root, hash_val)
+                    _sync_link(pool_path, dest, rv, hash_val)
+                    self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                    log(f"  {'Linked':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
+                    return [dest]
+
+                # Stat fallback — file exists on disk but neither inventory knew
+                pool_path = _pool_path(rv.pool_root, hash_val)
+                if pool_path.exists():
+                    # Update pool inventory with on-disk inode
+                    if rv.pool_inv is not None:
+                        rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
+                    if dest.exists() and dest.stat().st_ino == pool_path.stat().st_ino:
+                        # Already correctly linked — update repo inventory
+                        if rv.inv is not None:
+                            rv.inv.add(hash_val, dest.stat().st_ino)
+                        self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                        log(f"  {'Unchanged*':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
+                        return [dest]
+                    # Stale or missing dest — fix the link
+                    _sync_link(pool_path, dest, rv, hash_val)
+                    self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                    log(f"  {'Linked':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
+                    return [dest]
+
+            # ---------------------------------------------------------
+            # Phase 3 — Genuine download
+            # ---------------------------------------------------------
             tmp = str(staging_dir / staging_key)
             actual_hash = HTTPDownload(uri, tmp)
             if hash_val and actual_hash != hash_val:
@@ -792,21 +841,16 @@ class Node(dict):
                 )
             self["hash"] = actual_hash
             hash_val = hash_val or actual_hash
-            pool_path = Path(pool_root) / "by-hash" / "SHA256" / hash_val[:2] / hash_val[2:4] / hash_val
+            pool_path = _pool_path(rv.pool_root, hash_val)
             pool_path.parent.mkdir(parents=True, exist_ok=True)
             os.replace(tmp, pool_path)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.unlink(missing_ok=True)
-            os.link(pool_path, dest)
+            ino = _sync_link(pool_path, dest, rv, hash_val)
             sz = int(dest.stat().st_size)
             self["size"] = sz
-            ino = dest.stat().st_ino
-            if rv.inv is not None:
-                rv.inv.add(hash_val, ino)
             if rv.pool_inv is not None:
                 rv.pool_inv.add(hash_val, ino)
-            log(f"  Downloaded {path_val}")
             self["stats"] = {"hit": 0, "miss": 1, "bytes_tx": sz}
+            log(f"  {'Downloaded':<{LOG_LABEL_W}} {fmt_size(sz):>7}  {path_val}")
             return [dest]
 
 
@@ -824,6 +868,7 @@ class NodeList(List[T], Generic[T]):
     def _check_frozen(self) -> None:
         ## @brief Raise if this list has been frozen.
         ## @raise TypeError  If the list is frozen.
+        ## @return None
 
         if getattr(self, "_frozen", False):
             raise TypeError(f"{type(self).__name__} is frozen and cannot be modified")
@@ -831,6 +876,7 @@ class NodeList(List[T], Generic[T]):
     def freeze(self, *, deep: bool = True) -> None:
         ## @brief Mark this list (and optionally its children) as frozen.
         ## @param deep  Whether to recursively freeze child Nodes (default True).
+        ## @return None
 
         object.__setattr__(self, "_frozen", True)
         if deep:
@@ -841,6 +887,7 @@ class NodeList(List[T], Generic[T]):
     def thaw(self, *, deep: bool = True) -> None:
         ## @brief Clear the frozen flag on this list (and optionally children).
         ## @param deep  Whether to recursively thaw child Nodes (default True).
+        ## @return None
 
         object.__setattr__(self, "_frozen", False)
         if deep:

@@ -88,6 +88,7 @@ class Inventory:
 
     def __len__(self) -> int:
         ## @brief Return the number of entries in the inventory.
+        ## @return The number of hash↔inode mappings.
         with self._lock:
             return len(self._dict)
 
@@ -97,6 +98,7 @@ class Inventory:
         ## @brief Insert or update a single hash↔inode mapping.
         ## @param hash   SHA-256 hex string.
         ## @param inode  Filesystem inode number.
+        ## @return None
         with self._lock:
             self._dict[hash] = inode
             self._rev[inode] = hash
@@ -104,6 +106,7 @@ class Inventory:
     def add_bulk(self, entries: Dict[str, int]) -> None:
         ## @brief Insert or update multiple mappings atomically.
         ## @param entries  Dict of ``{hash: inode}`` to add.
+        ## @return None
         with self._lock:
             self._dict.update(entries)
             for h, ino in entries.items():

@@ -244,6 +244,8 @@ def _known_suites_to_probe() -> List[str]:
     ## Starts with ``stable`` (a common alias used by third-party repos)
     ## followed by all known Debian/Ubuntu codenames.  Order is stable
     ## first for fast detection in ``probe_any_suite()``.
+    ##
+    ## @return Ordered list of suite names (``stable`` first, then codenames).
 
     try:
         known = apt_codenames()

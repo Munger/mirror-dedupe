@@ -301,6 +301,7 @@ def generate_config(repo: Repo, dest: str,
 
 def main() -> None:
     ## @brief CLI entry point for ``mirror-dedupe-scan``.
+    ## @return None
 
     parser = argparse.ArgumentParser(
         description='Scan a repository and generate mirror-dedupe configuration',

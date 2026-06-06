@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from . import __version__
 from .config import Config, DEFAULT_CONFIG_DIR
 from .lib.log import log
 
@@ -187,12 +188,15 @@ def _snapshot_size(snapshot_path: Path) -> str:
 
 def main():
     ## @brief Main entry point for mirror-dedupe.
+    ## @return None
 
     parser = argparse.ArgumentParser(
         description='Mirror repository with global deduplication',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
+    parser.add_argument('--version', '-v', action='version',
+                        version=f'mirror-dedupe {__version__}')
     parser.add_argument('--config', dest='config_dir', default=None,
                         help='Path to configuration directory (default: /etc/mirror-dedupe)')
     parser.add_argument('--dry-run', action='store_true',

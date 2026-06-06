@@ -19,7 +19,10 @@ import fcntl
 import json
 import os
 import platform
+import shlex
+import subprocess
 import sys
+import faulthandler
 import signal
 import threading
 import time
@@ -344,15 +347,18 @@ class Repo(Node):
         config: Optional[Dict[str, Any]] = None,
         pool: Optional[concurrent.futures.ThreadPoolExecutor] = None,
     ) -> None:
-        ## @brief Build the schema tree from config and download content.
-        ##
-        ## Constructs the distribution tree from known config (no upstream
-        ## probing), then drives ``_sync_content()`` as a dynamic work
-        ## queue: known nodes are submitted to *pool* first; when one
-        ## completes, ``stream()`` is called to materialise children,
-        ## which are submitted in turn.  This lets the download and
-        ## discovery phases overlap.
-        ##
+    ## @brief Build the schema tree from config and download content.
+    ##
+    ## Constructs the distribution tree from known config (no upstream
+    ## probing), then drives ``_sync_content()`` as a dynamic work
+    ## queue: known nodes are submitted to *pool* first; when one
+    ## completes, ``stream()`` is called to materialise children,
+    ## which are submitted in turn.  This lets the download and
+    ## discovery phases overlap.
+    ##
+    ## @param config  Optional config dict (carries ``ipv6_ok``, etc.).
+    ## @return None
+    ##
         ## All nodes know their full repo-root-relative ``path`` from
         ## construction time — no deferred path patching is needed.
         ##
@@ -379,7 +385,8 @@ class Repo(Node):
                 self._top_stats["ipv6_fallback"] = (
                     config.get("ipv6_ok") is False and ipv6_before is not False
                 ) if config else False
-                self._sweep_stale()
+                self._top_stats["removed"] = self._sweep_stale()
+                self._top_stats["ipv6_ok"] = config.get("ipv6_ok", True) if config else True
         finally:
             self._repo_vars.sync_mode = False
 
@@ -388,78 +395,83 @@ class Repo(Node):
         pool: concurrent.futures.ThreadPoolExecutor,
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        ## @brief Dynamic work queue: submit, stream-discover, repeat.
+        ## @brief Dynamic work queue: fast-path links, worker-driven downloads.
         ##
-        ## Submits all syncable nodes (from the initial tree and from
-        ## stream-discovered children) to *pool* for parallel download.
-        ## The coordinator performs **zero disk I/O** — it only checks the
-        ## in-memory repo inventory to skip already-known files.  All
-        ## pool lookups, links, and downloads happen inside worker threads
-        ## via ``Node.sync()``.
+        ## The coordinator drives tree discovery using a manual stack.
+        ## For each node:
+        ##   - If its hash is in the pool inventory, ``node.sync()`` runs
+        ##     directly on the coordinator — the file already exists on
+        ##     disk, so this is a fast ``os.link()`` with ``log()`` in the
+        ##     coordinator context.
+        ##   - Otherwise the node is submitted to *pool* for a genuine
+        ##     download, keeping the coordinator free to continue
+        ##     discovery.
         ##
-        ## As each future completes, ``stream()`` is called on the node to
-        ## materialise its children (e.g. Release → Indices, Index →
-        ## Packages).  Newly discovered children are submitted to *pool*
-        ## in turn, allowing download and discovery to overlap.
+        ## After either path completes, ``stream()`` is called on the node
+        ## to materialise children (Release → Index → Package), which are
+        ## stacked for the same fast/slow decision.
         ##
-        ## Each leaf node pushes ``node["stats"]`` (hit/miss/bytes_tx).
-        ## Errors are totalled and stored as ``self._top_stats["errors"]``.
+        ## ``node.sync()`` is the single module responsible for all disk
+        ## access — the coordinator never duplicates its logic.
         ##
-        ## @param pool     Shared ``ThreadPoolExecutor`` for parallel downloads.
+        ## @param pool     Shared ``ThreadPoolExecutor`` for genuine downloads.
         ## @param config   Optional configuration dict forwarded to each
         ##                  ``Node.sync()`` call.
         ## @return None
 
         futures: Dict[concurrent.futures.Future, Node] = {}
-
-        def _handle_node(node: Node) -> None:
-            ## @brief Resolve *node*: skip, log unchanged, or submit to pool.
-            ##
-            ## Only checks the in-memory repo inventory — no disk I/O.
-            ## All pool lookups, hardlinks, and downloads are delegated
-            ## to worker threads via ``pool.submit()``.
-            ##
-            ## @param node  A Node with ``uri`` and ``path``.
-            ## @return None
-            if _ABORT_SYNC or not (node.get("uri") and node.get("path")):
-                return
-
-            h = node.checksum
-            if h and self._repo_vars.inv is not None and self._repo_vars.inv.has(h):
-                node["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                log(f"  Unchanged {node.get('path')}")
-                for child in node.stream():
-                    _handle_node(child)
-                return
-
-            future = pool.submit(node.sync, config=config)
-            futures[future] = node
-
-        # ---- initial tree ----
-        for node in self._tree_iter():
-            _handle_node(node)
-
+        stack = list(self._tree_iter())
         errors = 0
-        while futures and not _ABORT_SYNC:
+
+        while (stack or futures) and not _ABORT_SYNC:
+            while stack and not _ABORT_SYNC:
+                node = stack.pop()
+                if not (node.get("uri") and node.get("path")):
+                    continue
+
+                h = node.checksum
+                if (
+                    h
+                    and self._repo_vars.pool_inv is not None
+                    and self._repo_vars.pool_inv.has(h)
+                ):
+                    try:
+                        node.sync(config=config)
+                    except Exception as e:
+                        errors += 1
+                        if "stats" not in node:
+                            node["stats"] = {"hit": 0, "miss": 0, "bytes_tx": 0}
+                        node["stats"]["error"] = str(e)
+                        log(f"  {e}")
+                    for child in node.stream():
+                        stack.append(child)
+                    continue
+
+                future = pool.submit(node.sync, config=config)
+                futures[future] = node
+
+            if not futures or _ABORT_SYNC:
+                break
+
             done, _ = concurrent.futures.wait(
-                futures, return_when=concurrent.futures.FIRST_COMPLETED
+                futures, return_when=concurrent.futures.FIRST_COMPLETED,
             )
             for future in done:
                 node = futures.pop(future)
                 try:
                     future.result()
-                    for child in node.stream():
-                        _handle_node(child)
                 except Exception as e:
                     errors += 1
                     if "stats" not in node:
                         node["stats"] = {"hit": 0, "miss": 0, "bytes_tx": 0}
                     node["stats"]["error"] = str(e)
                     log(f"  {e}")
+                for child in node.stream():
+                    stack.append(child)
 
         self._top_stats["errors"] = errors
 
-    def _sweep_stale(self) -> None:
+    def _sweep_stale(self) -> int:
         ## @brief Remove files in the repo destination not in the tree.
         ##
         ## Walks the repo's destination directory on disk and deletes any
@@ -467,7 +479,10 @@ class Repo(Node):
         ## the in-memory node tree.  Empty directories are pruned
         ## bottom-up.
         ##
-        ## @return None
+        ## @return Number of stale files removed.
+
+        from ..lib import fmt_size, LOG_LABEL_W
+        from ..lib.log import log
 
         repo_root = self._repo_vars.repo_root
         tree_paths: set[str] = set()
@@ -478,18 +493,20 @@ class Repo(Node):
 
         dest = self.get("dest", "")
         if not dest:
-            return
+            return 0
         dest_path = Path(repo_root) / dest
         if not dest_path.exists():
-            return
+            return 0
 
         removed = 0
         for f in dest_path.rglob("*"):
             if f.is_file():
                 rel = str(f.relative_to(Path(repo_root)))
                 if rel not in tree_paths:
+                    sz = f.stat().st_size
                     f.unlink()
                     removed += 1
+                    log(f"  {'Removing':<{LOG_LABEL_W}} {fmt_size(sz):>7}  {rel}", level="INFO")
 
         for dirpath, dirnames, filenames in os.walk(str(dest_path), topdown=False):
             try:
@@ -500,8 +517,9 @@ class Repo(Node):
                 continue
 
         if removed:
-            from ..lib.log import log
             log(f"Repo sweep: removed {removed} stale files from '{dest}'", level="INFO")
+
+        return removed
 
     def stats(self) -> Dict[str, Any]:
         ## @brief Aggregate per-node stats from the full tree into a single dict.
@@ -550,6 +568,8 @@ class Repo(Node):
             "errors": top.get("errors", 0),
             "elapsed": top.get("elapsed", 0.0),
             "ipv6_fallback": top.get("ipv6_fallback", False),
+            "ipv6_ok": top.get("ipv6_ok", True),
+            "removed": top.get("removed", 0),
         }
 
     @classmethod
@@ -635,6 +655,7 @@ class Repo(Node):
         ##
         ## @param config  Optional configuration dict.
         ## @raise NotImplementedError
+        ## @return None
 
         raise NotImplementedError
 
@@ -747,23 +768,22 @@ def _pool_sweep(pool_root: str) -> None:
         return
 
     removed = 0
-    for dirpath, dirnames, filenames in os.walk(str(by_hash), topdown=False):
-        for name in filenames:
-            path = Path(dirpath) / name
-            try:
-                if path.stat().st_nlink == 1:
-                    path.unlink()
-                    removed += 1
-            except OSError:
-                continue
+    try:
+        result = subprocess.run(
+            f"find {shlex.quote(str(by_hash))} -type f -links 1 -delete -print | wc -l",
+            shell=True, capture_output=True, text=True,
+        )
+        out = result.stdout.strip()
+        if out:
+            removed = int(out)
+    except OSError as e:
+        log(f"Pool sweep error: {e}", level="ERROR")
+        return
 
-    for dirpath, dirnames, filenames in os.walk(str(by_hash), topdown=False):
-        try:
-            dp = Path(dirpath)
-            if dp != by_hash and not any(dp.iterdir()):
-                dp.rmdir()
-        except OSError:
-            continue
+    subprocess.run(
+        ["find", str(by_hash), "-depth", "-type", "d", "-delete"],
+        stderr=subprocess.DEVNULL,
+    )
 
     if removed:
         log(f"Pool sweep: removed {removed} orphaned files (st_nlink == 1)", level="INFO")
@@ -936,8 +956,10 @@ class Repos(NodeList[Repo]):
             kill_active_subprocesses_signal_safe()
             os._exit(130)
 
-        self.session_ts = datetime.now(timezone.utc).isoformat()
+        self.session_start = datetime.now(timezone.utc)
+        self.session_ts = self.session_start.isoformat()
         original_sigint = signal.signal(signal.SIGINT, _sigint_handler)
+        faulthandler.register(signal.SIGINFO)
 
         log("Checking inventory...", level="INFO")
         try:
@@ -1010,6 +1032,8 @@ class Repos(NodeList[Repo]):
             for repo in self:
                 self._write_ndjson(repo)
 
+            self.session_end = datetime.now(timezone.utc)
+            self.session_elapsed = time.monotonic() - t0
             self._print_summary()
             self._print_rss()
         finally:
@@ -1099,6 +1123,7 @@ class Repos(NodeList[Repo]):
             "pool_hits": s["pool_hits"],
             "pool_misses": s["pool_misses"],
             "ipv6_fallback": s["ipv6_fallback"],
+            "removed": s["removed"],
         }
 
         # Deltas from previous record
@@ -1123,10 +1148,13 @@ class Repos(NodeList[Repo]):
     def _print_summary(self) -> None:
         ## @brief Print a cross-repo sync summary table to stdout.
         ##
-        ## Columns: Repo, Files, Total, Deduped, TX, Hit, Miss, Err, Time, IPv6.
-        ## A ``Total`` row at the bottom aggregates all repos.
+        ## Columns: Repository, Files, Total, Deduped, Transferred, Hit,
+        ## Miss, Err, Time, IPv6, Removed.  A ``Total`` row at the bottom
+        ## aggregates all repos.
         ##
         ## @return None
+
+        from ..lib import fmt_datetime, fmt_duration
 
         rows: List[Dict[str, str]] = []
         for repo in self:
@@ -1137,21 +1165,13 @@ class Repos(NodeList[Repo]):
             return
 
         total_files = sum(int(r["files"].replace(",", "")) for r in rows)
-        total_bytes = sum(
-            self._parse_fmt(r["total"]) for r in rows
-        )
-        total_deduped = sum(
-            self._parse_fmt(r["deduped"]) for r in rows
-        )
-        total_tx = sum(
-            self._parse_fmt(r["tx"]) for r in rows
-        )
+        total_bytes = sum(self._parse_fmt(r["total"]) for r in rows)
+        total_deduped = sum(self._parse_fmt(r["deduped"]) for r in rows)
+        total_tx = sum(self._parse_fmt(r["tx"]) for r in rows)
         total_hits = sum(int(r["hit"].replace(",", "")) for r in rows)
         total_misses = sum(int(r["miss"].replace(",", "")) for r in rows)
         total_errors = sum(int(r["errors"]) for r in rows)
-        max_time = max(
-            (float(r["time"].rstrip("s")) for r in rows), default=0.0
-        )
+        total_removed = sum(int(r["removed"].replace(",", "")) for r in rows)
 
         def _fmt(b: int) -> str:
             ## @brief Format byte count as human-readable string.
@@ -1178,46 +1198,59 @@ class Repos(NodeList[Repo]):
             ## @return Left-justified string.
             return s.ljust(width) if len(s) < width else s
 
-        cw = self._col_widths(rows)
-        # Ensure idx column is wide enough for the row count
-        cw["idx"] = max(cw.get("idx", 3), len(str(len(rows) - 1)) if rows else 1)
+        def _center(s: str, width: int) -> str:
+            ## @brief Center a string within *width*.
+            ## @param s      Input string.
+            ## @param width  Target width.
+            ## @return Centered string.
+            return s.center(width) if len(s) < width else s
 
-        sep = "  ".join("-" * w for w in cw.values())
+        # Column definitions: (dict_key, heading, alignment)
+        cols = [
+            ("name", "Repository", "left"),
+            ("files", "Files", "right"),
+            ("total", "Total", "right"),
+            ("deduped", "Deduplicated", "right"),
+            ("tx", "Transferred", "right"),
+            ("hit", "Hit", "right"),
+            ("miss", "Miss", "right"),
+            ("errors", "Errors", "right"),
+            ("time", "Time", "right"),
+            ("ipv6", "IPv6", "right"),
+            ("removed", "Removed", "right"),
+        ]
+
+        cw = self._col_widths(rows)
+        sep = "  ".join("-" * cw[k] for k, _, _ in cols)
 
         print("")
-        print("sync summary")
+        start_s = fmt_datetime(self.session_start)
+        end_s = fmt_datetime(self.session_end)
+        elapsed_s = fmt_duration(self.session_elapsed)
+        print(f"  Start:   {start_s}")
+        print(f"  End:     {end_s}")
+        print(f"  Elapsed: {elapsed_s}")
+        print("")
         print(sep)
-        header = _pad("#", cw["idx"]).rjust(cw["idx"]) + "  "
-        header += _pad("Repo", cw["name"]) + "  "
-        header += _pad("Files", cw["files"]).rjust(cw["files"]) + "  "
-        header += _pad("Total", cw["total"]).rjust(cw["total"]) + "  "
-        header += _pad("Deduped", cw["deduped"]).rjust(cw["deduped"]) + "  "
-        header += _pad("TX", cw["tx"]).rjust(cw["tx"]) + "  "
-        header += _pad("Hit", cw["hit"]).rjust(cw["hit"]) + "  "
-        header += _pad("Miss", cw["miss"]).rjust(cw["miss"]) + "  "
-        header += _pad("Err", cw["errors"]).rjust(cw["errors"]) + "  "
-        header += _pad("Time", cw["time"]).rjust(cw["time"]) + "  "
-        header += _pad("IPv6", cw["ipv6"]).rjust(cw["ipv6"])
-        print(header)
+        header = ""
+        for key, heading, align in cols:
+            w = cw[key]
+            if align == "left":
+                header += _pad(heading, w)
+            else:
+                header += heading.rjust(w)
+            header += "  "
+        print(header.rstrip("  "))
         print(sep)
 
-        for ri, r in enumerate(rows):
-            line = str(ri).rjust(cw["idx"]) + "  "
-            line += _pad(r["name"], cw["name"]) + "  "
-            line += r["files"].rjust(cw["files"]) + "  "
-            line += r["total"].rjust(cw["total"]) + "  "
-            line += r["deduped"].rjust(cw["deduped"]) + "  "
-            line += r["tx"].rjust(cw["tx"]) + "  "
-            line += r["hit"].rjust(cw["hit"]) + "  "
-            line += r["miss"].rjust(cw["miss"]) + "  "
-            line += r["errors"].rjust(cw["errors"]) + "  "
-            line += r["time"].rjust(cw["time"]) + "  "
-            line += r["ipv6"].rjust(cw["ipv6"])
-            print(line)
+        for r in rows:
+            line = _pad(r["name"], cw["name"]) + "  "
+            for key, _, _ in cols[1:]:
+                line += r[key].rjust(cw[key]) + "  "
+            print(line.rstrip("  "))
 
         print(sep)
-        total_line = "".rjust(cw["idx"]) + "  "
-        total_line += _pad("Total", cw["name"]) + "  "
+        total_line = _pad("Total", cw["name"]) + "  "
         total_line += _fmt_int(total_files).rjust(cw["files"]) + "  "
         total_line += _fmt(total_bytes).rjust(cw["total"]) + "  "
         total_line += _fmt(total_deduped).rjust(cw["deduped"]) + "  "
@@ -1225,8 +1258,9 @@ class Repos(NodeList[Repo]):
         total_line += _fmt_int(total_hits).rjust(cw["hit"]) + "  "
         total_line += _fmt_int(total_misses).rjust(cw["miss"]) + "  "
         total_line += str(total_errors).rjust(cw["errors"]) + "  "
-        total_line += f"{max_time:.1f}s".rjust(cw["time"]) + "  "
-        total_line += "".rjust(cw["ipv6"])
+        total_line += fmt_duration(self.session_elapsed).rjust(cw["time"]) + "  "
+        total_line += "".rjust(cw["ipv6"]) + "  "
+        total_line += _fmt_int(total_removed).rjust(cw["removed"])
         print(total_line)
         print("")
 
@@ -1257,6 +1291,8 @@ class Repos(NodeList[Repo]):
             ## @return Formatted string (e.g. ``"1,234"``).
             return f"{n:,}" if n >= 1000 else str(n)
 
+        from ..lib import fmt_duration
+
         return {
             "name": name,
             "files": _fmt_int(s.get("file_count", 0)),
@@ -1266,8 +1302,9 @@ class Repos(NodeList[Repo]):
             "hit": _fmt_int(s.get("pool_hits", 0)),
             "miss": _fmt_int(s.get("pool_misses", 0)),
             "errors": str(s.get("errors", 0)),
-            "time": f"{s.get('elapsed', 0):.1f}s",
-            "ipv6": "v4" if s.get("ipv6_fallback") else "",
+            "time": fmt_duration(s.get("elapsed", 0)),
+            "ipv6": "yes" if s.get("ipv6_ok", True) and not s.get("ipv6_fallback") else "no",
+            "removed": _fmt_int(s.get("removed", 0)),
         }
 
     @staticmethod
@@ -1293,8 +1330,9 @@ class Repos(NodeList[Repo]):
         ##
         ## @param rows  List of formatted row dicts.
         ## @return Dict mapping column name to minimum pixel width.
-        widths = {"idx": 1, "name": 20, "files": 8, "total": 10, "deduped": 10,
-                  "tx": 12, "hit": 8, "miss": 8, "errors": 6, "time": 10, "ipv6": 4}
+        widths = {"name": 20, "files": 8, "total": 10, "deduped": 12,
+                  "tx": 12, "hit": 8, "miss": 8, "errors": 6, "time": 11,
+                  "ipv6": 4, "removed": 8}
         for r in rows:
             for k, v in r.items():
                 widths[k] = max(widths[k], len(v))

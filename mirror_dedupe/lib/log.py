@@ -270,9 +270,10 @@ def log(msg: str, level: str | None = None) -> None:
     ## INFO level.  When *level* is set (e.g. ``"WARN"``, ``"ERROR"``),
     ## the corresponding severity is used.
     ##
-    ## @param msg    The message text.
-    ## @param level  Optional severity label (``"DEBUG"``, ``"INFO"``,
-    ##               ``"WARN"``, ``"ERROR"``).
+        ## @param msg    The message text.
+        ## @param level  Optional severity label (``"DEBUG"``, ``"INFO"``,
+        ##               ``"WARN"``, ``"ERROR"``).
+        ## @return None
 
     logger = get_logger()
     lvl = _LEVEL_MAP.get(level.upper() if level else "", logging.INFO)
