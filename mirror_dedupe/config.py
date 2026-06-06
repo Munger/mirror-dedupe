@@ -59,7 +59,7 @@ class Config:
         ## extracts global settings (``disable_ipv6``, ``repo_root``,
         ## ``pool_root``, ``architectures``, ``collapse_distributions``,
         ## ``buffer_size``, ``parallel_downloads``, ``curl_timeout``,
-        ## ``max_retries``, ``progress_interval``, ``no_hardlinks``) into
+        ## ``max_retries``, ``progress_interval``) into
         ## named attributes on the instance.
         ##
         ## Iterates ``repos-enabled/*.conf`` for mirror definitions,
@@ -99,7 +99,6 @@ class Config:
         self.curl_timeout = self._data.get('curl_timeout', 900)
         self.max_retries = self._data.get('max_retries', 3)
         self.progress_interval = self._data.get('progress_interval', 1000)
-        self.no_hardlinks = bool(self._data.get('no_hardlinks', False))
         self.sweep_pool_after_sync = bool(self._data.get('sweep_pool_after_sync', False))
         raw_additional = self._data.get('additional_repos', []) or []
         self.additional_repos: Dict[str, str] = {}
@@ -181,7 +180,6 @@ class Config:
         self._data['curl_timeout'] = self.curl_timeout
         self._data['max_retries'] = self.max_retries
         self._data['progress_interval'] = self.progress_interval
-        self._data['no_hardlinks'] = self.no_hardlinks
         self._data['sweep_pool_after_sync'] = self.sweep_pool_after_sync
         self._data['mirrors'] = self.mirrors
         self._data['additional_repos'] = self.additional_repos
