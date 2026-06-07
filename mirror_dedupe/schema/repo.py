@@ -28,7 +28,6 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from dataclasses import dataclass
 from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, TypeVar
 from datetime import datetime, timezone
 
@@ -49,7 +48,6 @@ from ..inventory import Inventory
 from ..repo_vars import RepoVars
 
 
-@dataclass
 class Repo(Node):
     ## @brief Root Node for repo-type-specific ecosystems (APT, Yum, etc.).
     ##
@@ -57,6 +55,12 @@ class Repo(Node):
     ## mechanism and provides ``is_this_yours()``.  ``_children`` is
     ## ``["distributions"]`` — the base ``parse()`` recurses into each
     ## distribution's own child tree.
+    ##
+    ## Not decorated with ``@dataclass``: with no annotated instance fields
+    ## the decorator generates a zero-field ``__eq__`` (all instances of the
+    ## same class compare as equal) and a zero-field ``__repr__`` (always
+    ## ``Repo()``), both of which silently shadow the dict-based
+    ## implementations inherited from ``Node``.
 
     _children = ["distributions"]
 
@@ -1123,10 +1127,15 @@ class Repos(NodeList[Repo]):
 
         # Deltas from previous record
         try:
+            # Initialise line so that if stats_file exists but is empty the
+            # for-loop never executes and line remains a defined local rather
+            # than causing UnboundLocalError (not caught by the OSError /
+            # JSONDecodeError handler below).
+            line = ""
             with open(stats_file) as f:
                 for line in f:
                     pass
-                prev = json.loads(line) if line else {}
+            prev = json.loads(line) if line else {}
             curr_file_count = record["file_count"]
             prev_file_count = prev.get("file_count", 0)
             curr_bytes = record["total_bytes"]
