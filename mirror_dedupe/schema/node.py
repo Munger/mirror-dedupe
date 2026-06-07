@@ -328,15 +328,18 @@ class Node(dict):
     def freeze(self, *, deep: bool = True) -> None:
         ## @brief Mark this node (and optionally its children) as frozen.
         ##
-        ## When ``deep`` is True, recurse into nested Nodes so the entire
-        ## tree becomes immutable at the schema layer.
+        ## When ``deep`` is True, recurse into nested Nodes and NodeLists so
+        ## the entire tree becomes immutable at the schema layer.
         ##
         ## @param deep  Whether to recursively freeze child nodes (default True).
         ## @return None
 
         object.__setattr__(self, "_frozen", True)
         if deep:
-            self._walk_child_nodes(lambda n: n.freeze(deep=True))
+            self._walk_child_nodes(
+                lambda n: n.freeze(deep=True),
+                lambda lst: lst.freeze(deep=False),
+            )
 
     def thaw(self, *, deep: bool = True) -> None:
         ## @brief Clear the frozen flag on this node (and optionally children).
@@ -348,27 +351,56 @@ class Node(dict):
 
         object.__setattr__(self, "_frozen", False)
         if deep:
-            self._walk_child_nodes(lambda n: n.thaw(deep=True))
+            self._walk_child_nodes(
+                lambda n: n.thaw(deep=True),
+                lambda lst: lst.thaw(deep=False),
+            )
 
-    def _walk_child_nodes(self, func: Callable[["Node"], None]) -> None:
-        ## @brief Apply *func* to all direct child Nodes and NodeLists.
+    def _walk_child_nodes(
+        self,
+        func: Callable[["Node"], None],
+        list_func: Optional[Callable[["NodeList"], None]] = None,
+    ) -> None:
+        ## @brief Walk the subtree, applying *func* to every descendant Node
+        ##        and *list_func* (if supplied) to every descendant NodeList.
         ##
-        ## Used by operations such as ``freeze``/``thaw`` that need to recurse
-        ## across the schema tree without duplicating traversal logic.
+        ## Callers that need to propagate a flag onto NodeList containers —
+        ## e.g. the frozen flag during ``freeze()``/``thaw()`` — should supply
+        ## *list_func*.  Without it only Node instances are touched.
         ##
-        ## @param func  Callable to apply to each child Node.
+        ## The ``elif`` chain below is deliberately ordered Node → NodeList →
+        ## list → dict.  Two earlier bugs are fixed here:
+        ##
+        ##  1. The old code used ``getattr(nodelist, func.__name__, None)`` to
+        ##     find the matching method on each NodeList.  Lambdas always have
+        ##     ``__name__ == '<lambda>'``, so the lookup always returned ``None``
+        ##     and NodeLists were never frozen or thawed.  The fix is an explicit
+        ##     *list_func* parameter.
+        ##
+        ##  2. The old ``if isinstance(value, Node)`` was a standalone ``if``
+        ##     (not ``elif``), so Node values — which are also ``dict`` subclasses
+        ##     — fell through into the ``elif isinstance(value, dict)`` branch and
+        ##     had their subtrees traversed a second time.  For deep trees this
+        ##     caused exponential duplicate work.  Made ``elif`` to fix it.
+        ##
+        ## @param func       Callable applied to each descendant ``Node``.
+        ## @param list_func  Optional callable applied to each descendant
+        ##                   ``NodeList`` (called with ``deep=False`` by
+        ##                   convention — the caller owns recursion).
         ## @return None
 
         def recurse(value: Any) -> None:
-            ## @brief Walk a value tree calling *func* on every Node/NodeList.
-            ## @param value  Any value (Node, NodeList, dict, list, scalar).
+            ## @brief Dispatch a single value by type and recurse as needed.
+            ## @param value  Any value encountered while walking the payload.
             ## @return None
             if isinstance(value, Node):
+                # Node is a dict subclass; using elif here prevents the
+                # ``isinstance(value, dict)`` branch below from also firing
+                # and re-traversing the subtree (fix for bug #2 above).
                 func(value)
-            if isinstance(value, NodeList):
-                list_func = getattr(value, func.__name__, None)
-                if list_func:
-                    list_func(deep=False)
+            elif isinstance(value, NodeList):
+                if list_func is not None:
+                    list_func(value)
                 for v in value:
                     recurse(v)
             elif isinstance(value, list):
