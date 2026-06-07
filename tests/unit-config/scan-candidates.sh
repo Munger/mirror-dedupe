@@ -6,45 +6,53 @@
 # experimentation only.
 #
 # Usage:
-#   bash tests/unit-config/scan-candidates.sh --root <path>
+#   bash tests/unit-config/scan-candidates.sh --outdir <dir> [--config <path>]
 #
-# The --root argument specifies a test filesystem root. The script creates
-# the following tree under <root>:
-#   <root>/etc/mirror-dedupe/mirror-dedupe.conf
-#   <root>/etc/mirror-dedupe/repos-available/
-#   <root>/etc/mirror-dedupe/repos-enabled/
-#   <root>/mirror/repos/
-#   <root>/mirror/pool/
+# The --outdir argument specifies a directory for output. When --config is
+# omitted, a minimal mirror-dedupe.conf is generated at <outdir>/.  The
+# script runs --scan for each YAML candidate under scan_candidates/,
+# writing results to <outdir>/<name>.conf.
 #
-# Candidate definitions are read from scan_candidates/*.yaml adjacent to
-# this script. No data is synced by this script; it only runs
-# mirror-dedupe-scan.
+# No repos, pool, or data directories are needed — scanning is purely
+# in-memory HTTP discovery.
 #
 set -uo pipefail
 
-ROOT=""
+trap 'echo "" >&2; echo "Aborted by user." >&2; exit 130' INT
+
+CONFIG=""
+OUTDIR=""
 
 usage() {
   cat <<EOF >&2
-Usage: $(basename "$0") --root <path>
+Usage: $(basename "$0") --outdir <dir> [--config <path>]
 
 Required:
-  --root <path>   Test filesystem root (created if it does not exist)
+  --outdir <dir>    Output directory (created if it does not exist)
 
-Candidate definitions are loaded from scan_candidates/*.yaml relative
-to the script's location.
+Optional:
+  --config <path>   Path to mirror-dedupe.conf. If omitted, a minimal config
+                    is generated at <outdir>/mirror-dedupe.conf.
 EOF
   exit 1
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --root)
+    --config)
       if [[ -z "${2:-}" ]]; then
-        echo "ERROR: --root requires an argument" >&2
+        echo "ERROR: --config requires an argument" >&2
         usage
       fi
-      ROOT="$2"
+      CONFIG="$2"
+      shift 2
+      ;;
+    --outdir)
+      if [[ -z "${2:-}" ]]; then
+        echo "ERROR: --outdir requires an argument" >&2
+        usage
+      fi
+      OUTDIR="$2"
       shift 2
       ;;
     *)
@@ -54,48 +62,33 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "${ROOT}" ]]; then
-  echo "ERROR: --root is required" >&2
+if [[ -z "${OUTDIR}" ]]; then
+  echo "ERROR: --outdir is required" >&2
   usage
 fi
 
-ROOT="$(cd "$ROOT" 2>/dev/null && pwd -P || echo "${ROOT}")"
+OUTDIR="$(cd "$OUTDIR" 2>/dev/null && pwd -P || echo "${OUTDIR}")"
 
-CONFIG_DIR="${ROOT}/etc/mirror-dedupe"
-REPOS_DIR="${ROOT}/mirror/repos"
-POOL_DIR="${ROOT}/mirror/pool"
-REPOS_AVAILABLE="${CONFIG_DIR}/repos-available"
-REPOS_ENABLED="${CONFIG_DIR}/repos-enabled"
+mkdir -p "${OUTDIR}"
+
+# Generate minimal config file when --config was not provided
+if [[ -z "${CONFIG}" ]]; then
+  CONFIG="${OUTDIR}/mirror-dedupe.conf"
+  if [[ ! -f "${CONFIG}" ]]; then
+    cat > "${CONFIG}" <<CONF
+repo_root: /tmp/scan-root/repos
+pool_root: /tmp/scan-root/pool
+architectures: ['amd64']
+collapse_distributions: true
+CONF
+    echo "Created ${CONFIG}" >&2
+  fi
+fi
+
+SCAN_CMD="${SCAN_CMD:-python3 -m mirror_dedupe --scan}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 CANDIDATES_DIR="${SCRIPT_DIR}/scan_candidates"
-
-mkdir -p "${CONFIG_DIR}" "${REPOS_DIR}" "${POOL_DIR}" "${REPOS_AVAILABLE}" "${REPOS_ENABLED}"
-
-if [[ ! -f "${CONFIG_DIR}/mirror-dedupe.conf" ]]; then
-  cat > "${CONFIG_DIR}/mirror-dedupe.conf" <<CONF
-repo_root: ${REPOS_DIR}
-
-pool_root: ${POOL_DIR}
-
-architectures: ['amd64']
-
-collapse_distributions: false
-
-buffer_size: 1048576
-
-parallel_downloads: 10
-
-curl_timeout: 900
-
-max_retries: 3
-
-progress_interval: 1000
-CONF
-  echo "Created ${CONFIG_DIR}/mirror-dedupe.conf" >&2
-fi
-
-SCAN_CMD="${SCAN_CMD:-python3 -m mirror_dedupe.scan}"
 
 yaml_to_args() {
   local file="$1"
@@ -136,19 +129,19 @@ for yaml_file in "${CANDIDATES_DIR}"/*.yaml; do
     continue
   fi
 
-  if ! ${SCAN_CMD} --config "${CONFIG_DIR}" ${extra_args}; then
+  if ! ${SCAN_CMD} --config "${CONFIG}" --out "${OUTDIR}" ${extra_args}; then
     echo "ERROR: scan for ${name} failed (see above); continuing with next candidate" >&2
   fi
   echo "" >&2
 done
 
 cat <<EOF >&2
-All candidate scans completed.
 
-Config directory: ${CONFIG_DIR}
-Output:          ${REPOS_AVAILABLE}/
-Link:            ${REPOS_ENABLED}/  (create symlinks here to activate)
+Scans complete.
+
+Output directory: ${OUTDIR}
+Config files:    ${OUTDIR}/*.conf
 
 Next steps for each NAME above:
-  mirror-dedupe --config ${CONFIG_DIR} --test NAME
+  mirror-dedupe --config ${CONFIG} --test NAME
 EOF

@@ -29,8 +29,7 @@ class Upstream(Node):
     ## An open-ended metadata mapping is also provided so callers can
     ## attach additional per-upstream details without changing the schema.
     ##
-    ## IPv6 is controlled by ``NetworkConfig`` on the parent Repo, not
-    ## per-upstream.
+    ## IPv6 control is global (``Config.disable_ipv6``), not per-upstream.
 
     class Metadata(Node):
         ## @brief Opaque per-upstream metadata container.

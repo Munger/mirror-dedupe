@@ -108,6 +108,11 @@ class Index(Node):
         kind = self.get("kind")
         if kind not in ("packages", "sources"):
             return self
+        # Scan mode: indices are metadata-only (path/hash/size from Release
+        # stream).  Do not download the actual Packages/Sources files.
+        rv = getattr(self, "_repo_vars", None)
+        if rv is None or not rv.sync_mode:
+            return self
         try:
             data = self.fetch(uri=self.get("uri"), config=config)
         except RuntimeError:

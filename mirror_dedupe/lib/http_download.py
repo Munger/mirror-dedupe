@@ -20,6 +20,8 @@ import threading
 import time
 from typing import Dict, List, Optional, Tuple, Type
 
+from ..config import Config
+
 # -- subprocess tracking (Ctrl-C support) ------------------------------------
 
 _active_procs: set[subprocess.Popen] = set()
@@ -146,12 +148,23 @@ def HTTPFetch(uri: str) -> bytes:
     ## Packages.gz content.  Raises ``RuntimeError`` if curl exits
     ## non-zero (network error, DNS failure, SSL issue, etc.).
     ##
+    ## Uses ``--connect-timeout`` from ``Config.connect_timeout`` (default
+    ## 10) so the probe doesn't hang forever on an unresponsive upstream.
+    ##
+    ## Respects ``Config.disable_ipv6`` — passes ``-4`` to curl when
+    ## set, otherwise relies on curl's built-in Happy Eyeballs (RFC 8305)
+    ## for transparent IPv6/IPv4 fallback.
+    ##
     ## @param uri  Fully-qualified URL to fetch.
     ## @return Raw response bytes.
     ## @raises RuntimeError  If the HTTP request fails.
     if not uri:
         raise RuntimeError("No URI provided")
-    rc, out, err = _run_subprocess(["curl", "-s", "-L", uri])
+    config = Config.load()
+    args = ["curl", "-s", "-L", "--connect-timeout", str(config.connect_timeout), uri]
+    if config.disable_ipv6:
+        args.insert(1, "-4")
+    rc, out, err = _run_subprocess(args)
     if rc != 0:
         msg = err.decode("utf-8", errors="replace").strip() if err else ""
         raise RuntimeError(f"FAILED {uri} - curl exit {rc} {msg}".strip())
@@ -161,16 +174,21 @@ def HTTPFetch(uri: str) -> bytes:
 def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
     ## @brief Download a URI to a local file and return its SHA-256 hash.
     ##
-    ## Uses ``curl -sL`` with ``-C -`` to auto-resume partial downloads,
-    ## and ``-w %{http_code}`` to detect HTTP-level errors (4xx/5xx) even
-    ## on macOS where ``-f`` exits 56 for 4xx.  After a successful
-    ## download, computes the hash via ``sha256sum`` (Linux) or
+    ## Uses ``curl -sL`` with ``--connect-timeout`` (from
+    ## ``Config.connect_timeout``) and ``-C -`` to auto-resume partial
+    ## downloads, and ``-w %{http_code}`` to detect HTTP-level errors
+    ## (4xx/5xx) even on macOS where ``-f`` exits 56 for 4xx.  After a
+    ## successful download, computes the hash via ``sha256sum`` (Linux) or
     ## ``shasum -a 256`` (macOS fallback).
     ##
     ## On transient curl failures (exit codes 7, 18, 35, 52, 55, 56),
     ## retries up to *retries* times with exponential backoff (2s, 4s).
     ## The partial staging file is preserved for ``-C -`` resume across
     ## retry attempts.
+    ##
+    ## Respects ``Config.disable_ipv6`` — passes ``-4`` to curl when
+    ## set, otherwise relies on curl's built-in Happy Eyeballs (RFC 8305)
+    ## for transparent IPv6/IPv4 fallback.
     ##
     ## @param uri          Fully-qualified URL to download.
     ## @param output_path  Path to write the downloaded content.
@@ -180,6 +198,17 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
     output_str = str(output_path)
 
     _TRANSIENT_EXITS: Tuple[int, ...] = (7, 18, 35, 52, 55, 56)
+    _cfg = Config.load()
+    _ipv4_only = _cfg.disable_ipv6
+    _connect_timeout = str(_cfg.connect_timeout)
+
+    def _curl_args() -> List[str]:
+        ## @brief Build curl argument list, adding ``-4`` when IPv6 is disabled.
+        ## @return Argument list for ``subprocess.Popen``.
+        args = ["curl", "-s", "-L", "--connect-timeout", _connect_timeout, "-C", "-", "-w", "%{http_code}", "-o", output_str, uri]
+        if _ipv4_only:
+            args.insert(1, "-4")
+        return args
 
     def _compute_hash() -> str:
         ## @brief Compute the SHA-256 hash of *output_str*.
@@ -201,9 +230,7 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
     _range_retried = False
 
     for attempt in range(1 + retries):
-        rc, out, err = _run_subprocess(
-            ["curl", "-s", "-L", "-C", "-", "-w", "%{http_code}", "-o", output_str, uri],
-        )
+        rc, out, err = _run_subprocess(_curl_args())
         if rc == 0:
             if out:
                 try:

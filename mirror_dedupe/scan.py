@@ -3,9 +3,9 @@
 ##
 ## @brief Repository scanner for mirror-dedupe.
 ##
-## Provides the ``mirror-dedupe-scan`` CLI entry point for HTTP
-## discovery of repository metadata (distributions, architectures,
-## components) and generation of ``repos-available/*.conf`` files.
+## Provides the ``scan()`` and ``generate_config()`` functions used by
+## ``cli.py``'s ``--scan`` flag.  Can also run standalone via
+## ``python3 -m mirror_dedupe.scan``.
 ##
 ## @copyright Copyright (c) 2025-2026 Tim Hosking
 ## @see https://github.com/munger
@@ -14,9 +14,8 @@
 import sys
 import argparse
 from typing import List, Optional
-import os
 import json
-import yaml
+from pathlib import Path
 
 from mirror_dedupe.schema.repo import Repo
 from mirror_dedupe.config import Config
@@ -26,26 +25,18 @@ import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 
 def scan(name: str, upstreams: List[str],
-         ipv6_ok: Optional[bool] = None,
          repo_type: Optional[str] = None,
-         dist_overrides: Optional[List[str]] = None,
-         config_dir: Optional[str] = None) -> Repo:
+         dist_overrides: Optional[List[str]] = None) -> Repo:
     ## @brief Perform HTTP discovery and return a populated Repo.
     ##
     ## Creates a Repo via ``Repo.from_url``, optionally primes explicit
     ## distribution candidates, and runs the concrete parser to populate
     ## distributions, architectures, components, and releases.
     ##
-    ## If ``config_dir`` is provided and a previous scan result exists at
-    ## ``<config_dir>/repos-available/<name>.conf``, cached discovery params
-    ## are loaded into the Repo before parsing to accelerate re-scans.
-    ##
     ## @param name            Repository name.
     ## @param upstreams       Ordered list of upstream URLs (first is primary).
-    ## @param ipv6_ok         Whether IPv6 is considered usable.
     ## @param repo_type       Force a specific Repo type (e.g. ``"apt"``).
     ## @param dist_overrides  Explicit distribution names to probe.
-    ## @param config_dir      Config directory for loading cached params.
     ## @return A fully parsed Repo instance.
 
     primary_upstream = upstreams[0]
@@ -60,7 +51,6 @@ def scan(name: str, upstreams: List[str],
     repo = Repo.from_url(
         primary_upstream,
         upstream_urls=upstreams[1:],
-        ipv6_ok=ipv6_ok,
         repo_type=repo_type,
     )
     if name:
@@ -68,19 +58,6 @@ def scan(name: str, upstreams: List[str],
 
     if dist_overrides:
         repo.dist_candidates = dist_overrides
-
-    # Load cached discovery params from a previous scan, if available
-    if config_dir:
-        existing = os.path.join(config_dir, "repos-available", f"{name}.conf")
-        if os.path.exists(existing):
-            try:
-                with open(existing) as f:
-                    data = yaml.safe_load(f) or {}
-                cached = data.get("params")
-                if cached:
-                    repo.setdefault("params", {}).update(cached)
-            except Exception:
-                pass
 
     repo = repo.analyse()
 
@@ -291,8 +268,6 @@ def generate_config(repo: Repo, dest: str,
         nobrowse = params.get("nobrowse", False)
         if nobrowse:
             config_lines.append("  nobrowse: true")
-        ipv6_ok = params.get("ipv6_ok", True)
-        config_lines.append(f"  ipv6_enabled: {str(ipv6_ok).lower()}")
 
     config_lines.append("")
 
@@ -300,7 +275,10 @@ def generate_config(repo: Repo, dest: str,
 
 
 def main() -> None:
-    ## @brief CLI entry point for ``mirror-dedupe-scan``.
+    ## @brief Standalone entry point for ``python3 -m mirror_dedupe.scan``.
+    ##
+    ## Called directly when someone runs the module, or imported by
+    ## ``cli.py``'s ``--scan`` flag (preferred).
     ## @return None
 
     parser = argparse.ArgumentParser(
@@ -308,14 +286,14 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Examples:
   # Simple form: dest defaults to --name
-  mirror-dedupe-scan --name ubuntu http://archive.ubuntu.com/ubuntu
+  mirror-dedupe --scan --name ubuntu http://archive.ubuntu.com/ubuntu
 
   # Custom dest path
-  mirror-dedupe-scan --name ubuntu --dest ubuntu/main http://archive.ubuntu.com/ubuntu
+  mirror-dedupe --scan --name ubuntu --dest ubuntu/main http://archive.ubuntu.com/ubuntu
 
   # With an explicit GPG key override
-  mirror-dedupe-scan --name mariadb \
-    --gpg-key-url https://mirror.mariadb.org/PublicKey \
+  mirror-dedupe --scan --name mariadb \\
+    --gpg-key-url https://mirror.mariadb.org/PublicKey \\
     https://mirror.mariadb.org/repo/10.11/ubuntu"""
     )
 
@@ -323,8 +301,8 @@ def main() -> None:
                         help='Repository name (used for config filename and mirror-dedupe NAME)')
     parser.add_argument('--dest',
                         help='Destination path (relative to repo_root). Defaults to --name if omitted.')
-    parser.add_argument('--config', '--config-dir', dest='config_dir', default='/etc/mirror-dedupe',
-                        help='Configuration directory (default: /etc/mirror-dedupe)')
+    parser.add_argument('--out', dest='out_dir', required=True,
+                        help='Output directory for scan results')
     parser.add_argument('-r', '--dist', '--release', action='append', dest='dist',
                         help='Override the primary distribution/suite (may be specified multiple times)')
     parser.add_argument('-R', '--releases', dest='releases',
@@ -371,9 +349,7 @@ def main() -> None:
 
     dest = args.dest or args.name
 
-    cfg = Config.load(args.config_dir)
-    global_disable_ipv6 = bool(cfg.disable_ipv6)
-    ipv6_ok = not global_disable_ipv6
+    cfg = Config.load(args.config_path)
 
     arch_mask = cfg.architectures
     global_collapse_dists = bool(cfg.collapse_distributions)
@@ -446,10 +422,8 @@ def main() -> None:
         repo = scan(
             args.name,
             upstreams,
-            ipv6_ok=ipv6_ok,
             repo_type=args.repo_type,
             dist_overrides=dist_overrides,
-            config_dir=args.config_dir,
         )
     except NotImplementedError:
         log(f"ERROR: No supported Repo implementation could parse upstream {upstreams[0]!r}.\n       If this is an APT repository with an unusual layout, you may need to add\n       or extend a Repo implementation (e.g. Apt) rather than using scan.py directly.", level="ERROR")
@@ -473,26 +447,25 @@ def main() -> None:
         ),
     )
 
-    config_dir = os.path.join(args.config_dir, 'repos-available')
-    config_file = os.path.join(config_dir, f"{repo.name}.conf")
-
-    os.makedirs(config_dir, exist_ok=True)
-    with open(config_file, 'w', encoding='utf-8') as f:
-        f.write(config)
-        if not config.endswith("\n"):
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    config_file = out_dir / f"{repo.name}.conf"
+    config_file.write_text(config)
+    if not config.endswith("\n"):
+        with open(config_file, 'a') as f:
             f.write("\n")
 
     try:
-        snapshot_basename = repo.name
-        snapshot_path = os.path.join(config_dir, f"{snapshot_basename}.json")
-        with open(snapshot_path, 'w', encoding='utf-8') as sf:
-            json.dump(repo.snapshot(), sf, indent=2)
+        snapshot_path = out_dir / f"{repo.name}.json"
+        snapshot_path.write_text(
+            json.dumps(repo.snapshot(), indent=2)
+        )
         log(f"Snapshot saved to: {snapshot_path}")
     except Exception as e:
         log(f"Warning: failed to write snapshot: {e}", level="WARN")
 
     log(f"Configuration saved to: {config_file}")
-    log("\nNext steps:\n  # Test the repository configuration before activating it\n  mirror-dedupe --test {args.name}\n\n  # If the test looks good, activate the repository:\n  mirror-dedupe --activate {args.name}\n\n  # Manual enable (equivalent to --activate) if you prefer:\n  ln -s {config_file} {os.path.join(args.config_dir, 'repos-enabled', args.name + '.conf')}\n\nOr simply:\n  cd {args.config_dir}/repos-enabled\n  ln -s ../repos-available/{args.name}.conf .\n\nThis is my best guess and should give you a decent head start when mirroring this repo.\nHowever, I'm not perfect so you really should examine the config file carefully before activating it.")
+    log(f"\nNext steps:\n  # Test the repository configuration before activating it\n  mirror-dedupe --test {args.name}\n\n  # If the test looks good, activate the repository:\n  mirror-dedupe --activate {args.name}\n\n  # Manual enable (equivalent to --activate) if you prefer:\n  ln -s {config_file} {Path(cfg.config_dir) / 'repos-enabled' / (args.name + '.conf')}\n\nOr simply:\n  cd {Path(cfg.config_dir) / 'repos-enabled'}\n  ln -s ../repos-available/{args.name}.conf .\n\nThis is my best guess and should give you a decent head start when mirroring this repo.\nHowever, I'm not perfect so you really should examine the config file carefully before activating it.")
 
 
 if __name__ == '__main__':

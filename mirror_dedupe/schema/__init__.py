@@ -17,4 +17,5 @@ from .distribution import Distribution, Distributions
 from .index import Index, VariantIndex, Indices
 from .package import Package, Packages
 from .release import Release, Releases
+from .upstream import Upstream, Upstreams
 from .vars import Vars

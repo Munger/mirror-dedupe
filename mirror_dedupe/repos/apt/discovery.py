@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from collections import OrderedDict
+from threading import Lock
+from typing import Dict, Iterable, List, Tuple
 
 from mirror_dedupe.lib.codenames import apt_codenames
 from mirror_dedupe.lib.html_helpers import build_url, extract_href
@@ -20,18 +22,55 @@ from mirror_dedupe.lib.log import log
 from mirror_dedupe.schema.node import Node
 
 
-PROBE_TIMEOUT = 5  ## @brief Per-URL timeout (seconds) for codename probes.
+class _LRUCache:
+    ## @brief Bounded LRU cache with thread safety.
+    ##
+    ## Drops oldest entries when maxsize is exceeded.  Supports ``.get()``
+    ## and ``__setitem__`` for drop-in replacement of module-level dicts
+    ## that would otherwise leak memory over long-running sessions.
+    ##
+    ## @param maxsize  Maximum number of entries (default 128).
 
-# Cache: discovered distributions by (upstream, index_root, anchor, max_depth).
-# Avoids a duplicate BFS when is_this_yours() probes the same URL the parser
-# will later crawl.  Key does not include config/root_html since those are
-# derived from upstream and don't affect which suites exist upstream.
-_bfs_cache: Dict[Tuple[str, str, str, int], List[Tuple[str, str]]] = {}
+    def __init__(self, maxsize: int = 128):
+        self._maxsize = maxsize
+        self._lock = Lock()
+        self._data: OrderedDict = OrderedDict()
 
-# Cache: Release text by (upstream, index_root, path).  Populated during BFS
-# probe and consumed by DistributionsParser so the same Release file is never
-# fetched more than once per scan.
-_release_text_cache: Dict[Tuple[str, str, str], str] = {}
+    def get(self, key: object) -> object | None:
+        ## @brief Return cached value or ``None``.
+        ##
+        ## Promotes *key* to MRU position on hit.
+        ##
+        ## @param key  Cache key.
+        ## @return Cached value or ``None``.
+
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+                return self._data[key]
+            return None
+
+    def __setitem__(self, key: object, value: object) -> None:
+        ## @brief Insert or update *key* with *value*.
+        ##
+        ## Evicts the LRU entry when the cache exceeds maxsize.
+        ##
+        ## @param key    Cache key.
+        ## @param value  Value to cache.
+
+        with self._lock:
+            if key in self._data:
+                self._data.move_to_end(key)
+            self._data[key] = value
+            while len(self._data) > self._maxsize:
+                self._data.popitem(last=False)
+
+
+# Bounded LRU caches.  Formerly bare module-level dicts that grew unbounded
+# over the process lifetime.  BFS cache keyed by (upstream, index_root,
+# anchor, max_depth); Release text cache keyed by (upstream, index_root, path).
+_bfs_cache: _LRUCache = _LRUCache(maxsize=128)
+_release_text_cache: _LRUCache = _LRUCache(maxsize=512)
 
 
 def looks_like_release(body: str) -> bool:
@@ -94,7 +133,6 @@ def _iter_href_names(lines: Iterable[str], *, dirs_only: bool = False) -> Iterab
 def discover_distribution_paths(
     upstream: str,
     *,
-    config: Optional[Dict[str, Any]] = None,
     index_root: str = "dists",
     anchor: str = "Release",
     max_depth: int = 3,
@@ -115,7 +153,6 @@ def discover_distribution_paths(
     ## distributions are found.
     ##
     ## @param upstream        Base upstream URL.
-    ## @param config          Optional network config dict (ipv6_ok, timeout).
     ## @param index_root      Root directory for suites (default ``"dists"``).
     ## @param anchor          Anchor filename (default ``"Release"``).
     ## @param max_depth       Maximum BFS depth.
@@ -129,7 +166,7 @@ def discover_distribution_paths(
         ## @brief Fetch a URL's body as decoded UTF-8 text.
         ## @param url  Fully-qualified URL.
         ## @return Decoded text, or ``None`` if the fetch failed.
-        raw = Node.probe_url(url, config)
+        raw = Node.probe_url(url)
         if raw is not None:
             return raw.decode("utf-8", errors="replace")
         return None
@@ -141,11 +178,11 @@ def discover_distribution_paths(
 
     if root_html is None:
         dists_url = build_url(upstream, index_root)
-        log(f"[apt] probing dists index: {dists_url}", level="DEBUG")
+        log(f"[apt] probing dists index: {dists_url}")
         root_html = _fetch_text(dists_url)
 
     if not root_html:
-        log("[apt] no HTML content at /dists/; giving up on suite discovery", level="DEBUG")
+        log("[apt] no HTML content at /dists/; giving up on suite discovery")
         # Child prefix fallback: /dists/ may sit under a subdirectory (e.g. nodesource)
         if _allow_child_prefix:
             base_html = _fetch_text(upstream)
@@ -155,7 +192,6 @@ def discover_distribution_paths(
                     child_upstream = build_url(upstream, child)
                     child_results = discover_distribution_paths(
                         child_upstream,
-                        config=config,
                         index_root=index_root,
                         anchor=anchor,
                         max_depth=max_depth,
@@ -171,33 +207,32 @@ def discover_distribution_paths(
         return []
 
     lines = root_html.splitlines()
-    log(f"[apt] /dists/ HTML line count: {len(lines)}", level="DEBUG")
+    log(f"[apt] /dists/ HTML line count: {len(lines)}")
 
     suites: List[str] = []
     for name in _iter_href_names(lines, dirs_only=False):
         if name and name not in suites:
-            log(f"[apt] discovered suite under /dists: {name}", level="DEBUG")
+            log(f"[apt] discovered suite under /dists: {name}")
             suites.append(name)
 
     if not suites:
         log(
             "[apt] no suites discovered in /dists/ HTML; attempting dirs-only fallback",
-            level="DEBUG",
         )
         for name in _iter_href_names(lines, dirs_only=True):
             if name and name not in suites:
-                log(f"[apt] discovered suite under /dists (dirs-only): {name}", level="DEBUG")
+                log(f"[apt] discovered suite under /dists (dirs-only): {name}")
                 suites.append(name)
 
     if not suites:
-        log("[apt] no suites discovered in /dists/ HTML; giving up on suite discovery", level="DEBUG")
+        log("[apt] no suites discovered in /dists/ HTML; giving up on suite discovery")
         _bfs_cache[cache_key] = []
         return []
 
     queue: List[tuple[str, int]] = [(name, 1) for name in suites]
     seen_paths = {name for name in suites}
 
-    log(f"[apt] total top-level suites discovered: {len(queue)}", level="DEBUG")
+    log(f"[apt] total top-level suites discovered: {len(queue)}")
 
     discovered_paths: List[str] = []
 
@@ -229,7 +264,7 @@ def discover_distribution_paths(
             if child_path in seen_paths:
                 continue
 
-            log(f"[apt] discovered nested candidate under /dists: {child_path}", level="DEBUG")
+            log(f"[apt] discovered nested candidate under /dists: {child_path}")
             seen_paths.add(child_path)
             queue.append((child_path, depth + 1))
 
@@ -260,7 +295,6 @@ def probe_any_suite(
     upstream: str,
     index_root: str = "dists",
     anchor: str = "Release",
-    config: Optional[Dict[str, Any]] = None,
     extra_suites: Optional[List[str]] = None,
 ) -> bool:
     ## @brief Return ``True`` if a known suite has a valid Release at *upstream*.
@@ -273,19 +307,15 @@ def probe_any_suite(
     ## @param upstream     Upstream URL.
     ## @param index_root   Index root directory (default ``"dists"``).
     ## @param anchor       Anchor filename (default ``"Release"``).
-    ## @param config       Optional network config dict (ipv6_ok, timeout).
     ## @param extra_suites Optional suite names from config to probe first.
     ## @return True if any suite has a valid Release file.
-
-    short_config = dict(config or {})
-    short_config.setdefault("timeout", PROBE_TIMEOUT)
 
     suites_to_try: list[str] = list(extra_suites or [])
     suites_to_try.extend(_known_suites_to_probe())
     for suite in suites_to_try:
         rel_url = build_url(upstream, index_root, suite, anchor)
         try:
-            text_bytes = Node.probe_url(rel_url, short_config)
+            text_bytes = Node.probe_url(rel_url)
             if text_bytes is None:
                 continue
             text = text_bytes.decode("utf-8", errors="replace")
@@ -311,7 +341,6 @@ def probe_fallback_suites(
     upstream: str,
     index_root: str = "dists",
     anchor: str = "Release",
-    config: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     ## @brief Probe all known suite names and return confirmed matches.
     ##
@@ -323,17 +352,13 @@ def probe_fallback_suites(
     ## @param upstream    Upstream URL.
     ## @param index_root  Index root directory (default ``"dists"``).
     ## @param anchor      Anchor filename (default ``"Release"``).
-    ## @param config      Optional network config dict (ipv6_ok, timeout).
     ## @return List of suite names confirmed to have valid Release files.
-
-    short_config = dict(config or {})
-    short_config.setdefault("timeout", PROBE_TIMEOUT)
 
     candidates: List[str] = []
     for suite in _known_suites_to_probe():
         rel_url = build_url(upstream, index_root, suite, anchor)
         try:
-            text_bytes = Node.probe_url(rel_url, short_config)
+            text_bytes = Node.probe_url(rel_url)
             if text_bytes is None:
                 log(f"  {suite}: not found")
                 continue
