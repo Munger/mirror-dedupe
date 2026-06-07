@@ -56,7 +56,6 @@ class DistributionsParser:
 
         upstreams_list = [u.url for u in self.repo.upstreams if u.url]
         upstream = upstreams_list[self.upstream_index] if upstreams_list else ""
-        net_config = self.repo.get("network")
         root = self.repo.INDEX_ROOT_DIR
         anchor = self.repo.INDEX_ANCHOR_FILENAME
 
@@ -72,7 +71,7 @@ class DistributionsParser:
                 log(f"  {path}: fetching Release")
                 from mirror_dedupe.schema.node import Node
 
-                text_bytes = Node.probe_url(release_url, net_config)
+                text_bytes = Node.probe_url(release_url)
                 if text_bytes is None:
                     continue
                 text = text_bytes.decode("utf-8", errors="replace")
@@ -103,7 +102,6 @@ class DistributionsParser:
             for idx, url in enumerate(upstreams_list):
                 upstream_results = discover_distribution_paths(
                     url,
-                    config=net_config,
                     index_root=root,
                     anchor=anchor,
                 )
@@ -120,7 +118,6 @@ class DistributionsParser:
                 upstream,
                 index_root=root,
                 anchor=anchor,
-                config=net_config,
             )
             if fallback:
                 log(f"[apt] codename fallback found: {', '.join(fallback)}")

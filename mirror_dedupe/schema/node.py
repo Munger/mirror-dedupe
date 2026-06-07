@@ -34,7 +34,10 @@ from ..lib.http_download import HTTPFetch, HTTPDownload, kill_active_subprocesse
 from ..lib.log import log
 from ..repo_vars import RepoVars
 
-_staging_locks: dict[str, threading.Lock] = {}
+# Lock map: staging_key -> (per-hash lock, refcount).  Refcount tracks
+# concurrent threads waiting on the same hash so the entry can be pruned
+# when the last thread releases it, avoiding unbounded dict growth.
+_staging_locks: dict[str, tuple[threading.Lock, int]] = {}
 _staging_locks_lock = threading.Lock()
 
 
@@ -529,10 +532,9 @@ class Node(dict):
     # --- content operations -----------------------------------------------
 
     @classmethod
-    def probe_url(cls, uri: str, config: Optional[Dict[str, Any]] = None) -> Optional[bytes]:
+    def probe_url(cls, uri: str) -> Optional[bytes]:
         ## @brief Check whether a URL is reachable and return its content.
-        ## @param uri     The URL to probe.
-        ## @param config  Optional configuration dict (e.g. timeout values).
+        ## @param uri  The URL to probe.
         ## @return The raw response bytes, or ``None`` if the URL is empty or unreachable.
 
         if not uri:
@@ -709,12 +711,14 @@ class Node(dict):
         ## @brief Fetch *uri* content into memory.
         ##
         ## In scan mode, performs a pure in-memory HTTP fetch with result
-        ## caching in ``_cache``.  In sync mode (when ``Config._sync_mode``
-        ## is set), redirects to ``self.read()`` which synchronises the
-        ## file through the pool and then reads it from disk.
+        ## caching in ``_cache``.  In sync mode (when
+        ## ``_repo_vars.sync_mode`` is set), redirects to ``self.read()``
+        ## which synchronises the file through the pool and then reads it
+        ## from disk.
         ##
         ## @param uri     URL to fetch.
-        ## @param config  Optional configuration dict for fetch parameters.
+        ## @param config  Optional configuration dict forwarded to ``read()``
+        ##                in sync mode.
         ## @return The raw bytes, or ``None`` if *uri* is empty.
 
         if not uri:
@@ -752,8 +756,8 @@ class Node(dict):
         ## back to stat() on disk when inventories miss. Logs each outcome
         ## with a descriptive label.
         ##
-        ## @param config  Optional configuration dict (carries ``ipv6_ok``,
-        ##                timeout tuneables, etc.).
+        ## @param config  Optional configuration dict (carries suite,
+        ##                architecture, component filters).
         ## @return List of paths hardlinked into the repo (one-element in
         ##         normal operation; empty if no uri/path is set).
 
@@ -775,7 +779,8 @@ class Node(dict):
         # Phase 1 — Inventory fast path (no disk beyond link)
         # ---------------------------------------------------------
         if hash_val:
-            if rv.inv is not None and rv.inv.has(hash_val):
+            _inv_has = rv.inv is not None and rv.inv.has(hash_val)
+            if _inv_has and dest.exists():
                 self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
                 log(f"  {'Unchanged':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                 return [dest]
@@ -784,7 +789,8 @@ class Node(dict):
                 pool_path = _pool_path(rv.pool_root, hash_val)
                 _sync_link(pool_path, dest, rv, hash_val)
                 self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                log(f"  {'Linked':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
+                label = 'Linked*' if _inv_has else 'Linked'
+                log(f"  {label:<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                 return [dest]
 
         # ---------------------------------------------------------
@@ -793,65 +799,79 @@ class Node(dict):
         staging_dir = Path(rv.pool_root) / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
         staging_key = hash_val or hashlib.sha256(uri.encode()).hexdigest()
+        # Refcounted lock: track concurrent users per staging key so the map
+        # entry can be pruned when the last thread finishes with this hash.
         with _staging_locks_lock:
-            lock = _staging_locks.setdefault(staging_key, threading.Lock())
+            lock, refs = _staging_locks.get(staging_key, (threading.Lock(), 0))
+            _staging_locks[staging_key] = (lock, refs + 1)
         with lock:
-            if hash_val:
-                # Recheck inventories after lock (another thread may have raced)
-                if rv.inv is not None and rv.inv.has(hash_val):
-                    self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                    log(f"  {'Unchanged':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
-                    return [dest]
-
-                if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
-                    pool_path = _pool_path(rv.pool_root, hash_val)
-                    _sync_link(pool_path, dest, rv, hash_val)
-                    self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                    log(f"  {'Linked':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
-                    return [dest]
-
-                # Stat fallback — file exists on disk but neither inventory knew
-                pool_path = _pool_path(rv.pool_root, hash_val)
-                if pool_path.exists():
-                    # Update pool inventory with on-disk inode
-                    if rv.pool_inv is not None:
-                        rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
-                    if dest.exists() and dest.stat().st_ino == pool_path.stat().st_ino:
-                        # Already correctly linked — update repo inventory
-                        if rv.inv is not None:
-                            rv.inv.add(hash_val, dest.stat().st_ino)
+            try:
+                if hash_val:
+                    # Recheck inventories after lock (another thread may have raced)
+                    _inv_has = rv.inv is not None and rv.inv.has(hash_val)
+                    if _inv_has and dest.exists():
                         self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                        log(f"  {'Unchanged*':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
+                        log(f"  {'Unchanged':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                         return [dest]
-                    # Stale or missing dest — fix the link
-                    _sync_link(pool_path, dest, rv, hash_val)
-                    self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
-                    log(f"  {'Linked':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
-                    return [dest]
 
-            # ---------------------------------------------------------
-            # Phase 3 — Genuine download
-            # ---------------------------------------------------------
-            tmp = str(staging_dir / staging_key)
-            actual_hash = HTTPDownload(uri, tmp)
-            if hash_val and actual_hash != hash_val:
-                os.unlink(tmp)
-                raise RuntimeError(
-                    f"Hash mismatch for {uri}: expected {hash_val}, got {actual_hash}"
-                )
-            self["hash"] = actual_hash
-            hash_val = hash_val or actual_hash
-            pool_path = _pool_path(rv.pool_root, hash_val)
-            pool_path.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(tmp, pool_path)
-            ino = _sync_link(pool_path, dest, rv, hash_val)
-            sz = int(dest.stat().st_size)
-            self["size"] = sz
-            if rv.pool_inv is not None:
-                rv.pool_inv.add(hash_val, ino)
-            self["stats"] = {"hit": 0, "miss": 1, "bytes_tx": sz}
-            log(f"  {'Downloaded':<{LOG_LABEL_W}} {fmt_size(sz):>7}  {path_val}")
-            return [dest]
+                    if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
+                        pool_path = _pool_path(rv.pool_root, hash_val)
+                        _sync_link(pool_path, dest, rv, hash_val)
+                        self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                        label = 'Linked*' if _inv_has else 'Linked'
+                        log(f"  {label:<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
+                        return [dest]
+
+                    # Stat fallback — file exists on disk but neither inventory knew
+                    pool_path = _pool_path(rv.pool_root, hash_val)
+                    if pool_path.exists():
+                        # Update pool inventory with on-disk inode
+                        if rv.pool_inv is not None:
+                            rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
+                        if dest.exists() and dest.stat().st_ino == pool_path.stat().st_ino:
+                            # Already correctly linked — update repo inventory
+                            if rv.inv is not None:
+                                rv.inv.add(hash_val, dest.stat().st_ino)
+                            self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                            log(f"  {'Unchanged*':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
+                            return [dest]
+                        # Stale or missing dest — fix the link
+                        _sync_link(pool_path, dest, rv, hash_val)
+                        self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                        log(f"  {'Linked':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
+                        return [dest]
+
+                # ---------------------------------------------------------
+                # Phase 3 — Genuine download
+                # ---------------------------------------------------------
+                tmp = str(staging_dir / staging_key)
+                actual_hash = HTTPDownload(uri, tmp)
+                if hash_val and actual_hash != hash_val:
+                    os.unlink(tmp)
+                    raise RuntimeError(
+                        f"Hash mismatch for {uri}: expected {hash_val}, got {actual_hash}"
+                    )
+                self["hash"] = actual_hash
+                hash_val = hash_val or actual_hash
+                pool_path = _pool_path(rv.pool_root, hash_val)
+                pool_path.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(tmp, pool_path)
+                ino = _sync_link(pool_path, dest, rv, hash_val)
+                sz = int(dest.stat().st_size)
+                self["size"] = sz
+                if rv.pool_inv is not None:
+                    rv.pool_inv.add(hash_val, ino)
+                self["stats"] = {"hit": 0, "miss": 1, "bytes_tx": sz}
+                log(f"  {'Downloaded':<{LOG_LABEL_W}} {fmt_size(sz):>7}  {path_val}")
+                return [dest]
+            finally:
+                # Decref and prune — runs on every return or raise above.
+                with _staging_locks_lock:
+                    lock, refs = _staging_locks[staging_key]
+                    if refs == 1:
+                        del _staging_locks[staging_key]
+                    else:
+                        _staging_locks[staging_key] = (lock, refs - 1)
 
 
 T = TypeVar("T", bound="Node")

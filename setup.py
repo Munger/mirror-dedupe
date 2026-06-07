@@ -46,7 +46,6 @@ setup(
     entry_points={
         'console_scripts': [
             'mirror-dedupe=mirror_dedupe.cli:main',
-            'mirror-dedupe-scan=mirror_dedupe.scan:main',
         ],
     },
     python_requires=">=3.8",

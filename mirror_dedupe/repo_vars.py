@@ -27,11 +27,10 @@ from .inventory import Inventory
 class RepoVars:
     ## @brief Per-repo variables passed to every node in the schema tree.
     ##
-    ## ``inv``     — the per-repo ``Inventory`` (hash→inode for files
-    ##               hardlinked into this repo's dest directory).
+    ## ``inv``      — the per-repo ``Inventory`` (hash→inode for files
+    ##                hardlinked into this repo's dest directory).
     ## ``pool_inv`` — the global pool ``Inventory`` (hash→inode for every
     ##                file in the content-addressed pool).
-    ## ``ipv6_ok``  — whether IPv6 is enabled for this repo.
     ## ``repo_root`` — root of the repository tree on disk.
     ## ``pool_root`` — root of the content-addressed pool on disk.
     ## ``sync_mode`` — ``True`` during a sync run (set on the specific
@@ -39,7 +38,6 @@ class RepoVars:
 
     inv: Optional[Inventory] = None
     pool_inv: Optional[Inventory] = None
-    ipv6_ok: bool = True
     repo_root: str = ""
     pool_root: str = ""
     sync_mode: bool = False

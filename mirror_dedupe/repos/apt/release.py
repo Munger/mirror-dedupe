@@ -285,7 +285,7 @@ class Release(Schema.Release):
         ## HTTP, or disk depending on mode), then ``list(self.stream(data))``
         ## to materialise the Index tree.
         ##
-        ## @param config  Optional network config dict (ipv6_ok, timeout).
+        ## @param config  Optional config dict (suite/arch/component filters).
         ## @return None
 
         text_bytes = self.fetch(uri=self.get("uri"), config=config)

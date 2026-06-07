@@ -90,7 +90,7 @@ class Repo(Node):
         ## @brief Initialise a Repo root node.
         ##
         ## The Repo itself is a Node whose payload contains all scalar
-        ## repo metadata (upstream, repo_type, IPv6 flags, etc.) plus any
+        ## repo metadata (upstream, repo_type, etc.) plus any
         ## child nodes (Distributions, Vars, etc.) attached by parsers.
         ##
         ## @param upstream_idx  Index into the Upstreams collection.
@@ -109,7 +109,7 @@ class Repo(Node):
 
         super().__init__(data)
 
-        self["params"] = {"ipv6_ok": True}
+        self["params"] = {}
 
         self.distributions = Distributions()
         self._architectures = Architectures()
@@ -256,7 +256,6 @@ class Repo(Node):
         cls,
         upstream: str,
         *,
-        ipv6_ok: bool | None = None,
         repo_type: str | None = None,
         upstream_urls: list[str] | None = None,
         dist_candidates: Optional[list[str]] = None,
@@ -269,7 +268,6 @@ class Repo(Node):
         ## bound to the upstream tree.
         ##
         ## @param upstream        Primary upstream URL.
-        ## @param ipv6_ok         Whether IPv6 is supported.
         ## @param repo_type       Explicit repo type override (e.g. ``"apt"``).
         ## @param upstream_urls   Additional candidate upstream URLs.
         ## @param dist_candidates Optional dist names from config for probing.
@@ -310,8 +308,6 @@ class Repo(Node):
             )
 
         repo = rt_cls(upstreams=upstreams, **data)
-        if ipv6_ok is not None:
-            repo["params"]["ipv6_ok"] = ipv6_ok
 
         return repo
 
@@ -356,7 +352,7 @@ class Repo(Node):
     ## which are submitted in turn.  This lets the download and
     ## discovery phases overlap.
     ##
-    ## @param config  Optional config dict (carries ``ipv6_ok``, etc.).
+    ## @param config  Optional config dict (suite/arch/component filters).
     ## @return None
     ##
         ## All nodes know their full repo-root-relative ``path`` from
@@ -379,14 +375,9 @@ class Repo(Node):
             if pool is not None:
                 self._top_stats: Dict[str, Any] = {}
                 t0 = time.monotonic()
-                ipv6_before = config.get("ipv6_ok", True) if config else True
                 self._sync_content(pool, config=config)
                 self._top_stats["elapsed"] = time.monotonic() - t0
-                self._top_stats["ipv6_fallback"] = (
-                    config.get("ipv6_ok") is False and ipv6_before is not False
-                ) if config else False
                 self._top_stats["removed"] = self._sweep_stale()
-                self._top_stats["ipv6_ok"] = config.get("ipv6_ok", True) if config else True
         finally:
             self._repo_vars.sync_mode = False
 
@@ -527,11 +518,11 @@ class Repo(Node):
         ## Walks ``_tree_iter()`` summing leaf counter stats (hit, miss,
         ## bytes_tx), counting files, computing total/deduped bytes from
         ## node metadata, and merging top-level values from
-        ## ``_top_stats`` (errors, elapsed, ipv6_fallback).
+        ## ``_top_stats`` (errors, elapsed).
         ##
         ## @return Stats dict with keys: file_count, total_bytes,
         ##         deduped_bytes, bytes_transferred, pool_hits,
-        ##         pool_misses, errors, elapsed, ipv6_fallback.
+        ##         pool_misses, errors, elapsed.
 
         file_count = 0
         total_bytes = 0
@@ -567,8 +558,6 @@ class Repo(Node):
             "pool_misses": pool_misses,
             "errors": top.get("errors", 0),
             "elapsed": top.get("elapsed", 0.0),
-            "ipv6_fallback": top.get("ipv6_fallback", False),
-            "ipv6_ok": top.get("ipv6_ok", True),
             "removed": top.get("removed", 0),
         }
 
@@ -636,11 +625,6 @@ class Repo(Node):
         if comps:
             params["components"] = comps if isinstance(comps, list) else [comps]
 
-        mirror_params = mirror_cfg.get("params") or {}
-        ipv6_enabled = mirror_params.get("ipv6_enabled")
-        if ipv6_enabled is not None:
-            params["ipv6_ok"] = ipv6_enabled
-
         if params:
             repo["params"] = params
 
@@ -685,8 +669,7 @@ class Repo(Node):
         params = repo.get("params")
         if not isinstance(params, dict):
             repo["params"] = {}
-        repo["params"].setdefault("ipv6_ok", True)
-
+        
         cls._restore_children(repo, snapshot)
 
         return repo
@@ -886,23 +869,23 @@ class Repos(NodeList[Repo]):
     def from_names(
         cls,
         repo_names: List[str],
-        config_dir: Optional[str] = None,
+        config_path: Optional[str] = None,
     ) -> "Repos":
         ## @brief Build a ``Repos`` instance from a list of enabled repo names.
         ##
-        ## Loads ``{config_dir}/repos-enabled/{name}.conf`` for each name,
-        ## parses with ``yaml.safe_load``, and delegates to
-        ## ``Repo.from_config()``.
+        ## Loads ``<config-dir>/repos-enabled/{name}.conf`` for each name,
+        ## where ``config-dir`` is the parent directory of the config file
+        ## at *config_path*.
         ##
         ## @param repo_names  List of repo names (``*.conf`` filenames without
         ##                    the extension).
-        ## @param config_dir  Override path to the configuration directory.
+        ## @param config_path Path to the configuration file.
         ## @return A ``Repos`` instance containing the resolved repos.
 
-        from ..config import Config, DEFAULT_CONFIG_DIR
+        from ..config import Config
 
-        cfg = Config.load(config_dir)
-        repos_dir = Path(config_dir or cfg._config_dir or DEFAULT_CONFIG_DIR) / "repos-enabled"
+        cfg = Config.load(config_path)
+        repos_dir = Path(cfg.config_dir) / "repos-enabled"
 
         instances = cls()
         for name in repo_names:
@@ -917,7 +900,7 @@ class Repos(NodeList[Repo]):
 
         return instances
 
-    def sync_all(self, config_dir: Optional[str] = None) -> None:
+    def sync_all(self, config_path: Optional[str] = None) -> None:
         ## @brief Sync all repos in this collection.
         ##
         ## Sets ``session_ts``, registers a SIGINT handler that kills
@@ -926,13 +909,13 @@ class Repos(NodeList[Repo]):
         ## NDJSON, and prints a cross-repo summary table.
         ## Pool sweep is handled by the caller.
         ##
-        ## @param config_dir  Override path to the configuration directory
-        ##                    (passed to ``from_names`` if used externally).
+        ## @param config_path  Path to the configuration file (passed to
+        ##                     ``from_names`` if used externally).
         ## @return None
 
         from ..config import Config
 
-        cfg = Config.load(config_dir)
+        cfg = Config.load(config_path)
 
         if not self:
             log("No repos to sync", level="WARN")
@@ -1005,11 +988,9 @@ class Repos(NodeList[Repo]):
                     id=dest_name,
                     path=str(Path(cfg.repo_root) / (dest_name or "")),
                 )
-            params = repo.get("params") or {}
             repo._repo_vars = RepoVars(
                 inv=inv,
                 pool_inv=pool_inv,
-                ipv6_ok=params.get("ipv6_ok", True),
                 repo_root=cfg.repo_root,
                 pool_root=cfg.pool_root,
             )
@@ -1093,7 +1074,7 @@ class Repos(NodeList[Repo]):
             log(f"Syncing repo '{name}' to '{repo.get('dest', '')}'", level="INFO")
             config = repo.get("params")
             if config is None:
-                config = {"ipv6_ok": True}
+                config = {}
                 repo["params"] = config
             with concurrent.futures.ThreadPoolExecutor(
                 max_workers=workers,
@@ -1137,7 +1118,6 @@ class Repos(NodeList[Repo]):
             "errors": s["errors"],
             "pool_hits": s["pool_hits"],
             "pool_misses": s["pool_misses"],
-            "ipv6_fallback": s["ipv6_fallback"],
             "removed": s["removed"],
         }
 
@@ -1164,7 +1144,7 @@ class Repos(NodeList[Repo]):
         ## @brief Print a cross-repo sync summary table to stdout.
         ##
         ## Columns: Repository, Files, Total, Deduped, Transferred, Hit,
-        ## Miss, Err, Time, IPv6, Removed.  A ``Total`` row at the bottom
+        ## Miss, Err, Time, Removed.  A ``Total`` row at the bottom
         ## aggregates all repos.
         ##
         ## @return None
@@ -1231,7 +1211,6 @@ class Repos(NodeList[Repo]):
             ("miss", "Miss", "right"),
             ("errors", "Errors", "right"),
             ("time", "Time", "right"),
-            ("ipv6", "IPv6", "right"),
             ("removed", "Removed", "right"),
         ]
 
@@ -1274,7 +1253,6 @@ class Repos(NodeList[Repo]):
         total_line += _fmt_int(total_misses).rjust(cw["miss"]) + "  "
         total_line += str(total_errors).rjust(cw["errors"]) + "  "
         total_line += fmt_duration(self.session_elapsed).rjust(cw["time"]) + "  "
-        total_line += "".rjust(cw["ipv6"]) + "  "
         total_line += _fmt_int(total_removed).rjust(cw["removed"])
         print(total_line)
         print("")
@@ -1318,7 +1296,6 @@ class Repos(NodeList[Repo]):
             "miss": _fmt_int(s.get("pool_misses", 0)),
             "errors": str(s.get("errors", 0)),
             "time": fmt_duration(s.get("elapsed", 0)),
-            "ipv6": "yes" if s.get("ipv6_ok", True) and not s.get("ipv6_fallback") else "no",
             "removed": _fmt_int(s.get("removed", 0)),
         }
 
@@ -1347,7 +1324,7 @@ class Repos(NodeList[Repo]):
         ## @return Dict mapping column name to minimum pixel width.
         widths = {"name": 20, "files": 8, "total": 10, "deduped": 12,
                   "tx": 12, "hit": 8, "miss": 8, "errors": 6, "time": 11,
-                  "ipv6": 4, "removed": 8}
+                  "removed": 8}
         for r in rows:
             for k, v in r.items():
                 widths[k] = max(widths[k], len(v))

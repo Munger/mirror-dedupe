@@ -66,7 +66,7 @@ class Apt(Schema.Repo):
         ## are computed lazily via properties that aggregate from parsed
         ## distribution metadata.
         ##
-        ## @param config  Optional network config dict (ipv6_ok, timeout).
+        ## @param config  Optional config dict (suite/arch/component filters).
         ## @return None
 
         log(f"[apt] parsing repo class: {type(self).__name__}")
@@ -87,6 +87,22 @@ class Apt(Schema.Repo):
         p = self.params or {}
         self._arch_filter = p.get("architectures")
         self._comp_filter = p.get("components")
+
+        # After discovery, filter upstreams to only those that actually served
+        # distributions.  This ensures generated configs only contain working
+        # URLs, ready for future round-robin sync.
+        if self.distributions:
+            used_upstreams: set[str] = set()
+            for dist in self.distributions:
+                used_upstreams.add(str(dist.upstream))
+            filtered = Schema.Upstreams()
+            for u in self.upstreams:
+                if u.url in used_upstreams:
+                    filtered.append(u)
+            self.upstreams = filtered
+            self["upstream_idx"] = 0
+            if filtered:
+                self["uri"] = filtered[0].url
 
         # Deduplicate suites: distribution names may include a /pocket suffix
         self.suites = Schema.Suites()

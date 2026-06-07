@@ -4,10 +4,14 @@
 ## @brief CLI entry point and management operations for mirror-dedupe.
 ##
 ## Provides the ``main()`` entry point with subcommands for listing,
-## activating, deactivating, testing, and deleting mirrors.
+## activating, deactivating, testing, scanning, and deleting mirrors.
 ##
 ## The ``--sync`` flag drives the schema-based sync pipeline via
 ## ``Repos.from_names().sync_all()``.
+##
+## The ``--scan`` flag discovers upstream repository metadata and
+## generates a config file (replacing the former ``mirror-dedupe-scan``
+## separate executable).
 ##
 ## @copyright Copyright (c) 2025-2026 Tim Hosking
 ## @see https://github.com/munger
@@ -27,7 +31,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from . import __version__
-from .config import Config, DEFAULT_CONFIG_DIR
+from .config import Config, DEFAULT_CONFIG_PATH
 from .lib.log import log
 
 
@@ -197,8 +201,8 @@ def main():
 
     parser.add_argument('--version', '-v', action='version',
                         version=f'mirror-dedupe {__version__}')
-    parser.add_argument('--config', dest='config_dir', default=None,
-                        help='Path to configuration directory (default: /etc/mirror-dedupe)')
+    parser.add_argument('--config', dest='config_path', default=None,
+                        help='Path to config file (default: /etc/mirror-dedupe/mirror-dedupe.conf)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Show what would be done without actually doing it')
     parser.add_argument('--mirror', type=str,
@@ -207,6 +211,8 @@ def main():
                         help='Run the schema-based sync pipeline')
     parser.add_argument('--dedupe-only', action='store_true',
                         help='Only run deduplication phase (skip mirror sync)')
+    parser.add_argument('--scan', action='store_true',
+                        help='Scan an upstream URL and generate repo configuration')
     parser.add_argument('--list', action='store_true',
                         help='List available mirrors (active and inactive)')
     parser.add_argument('--activate', metavar='MIRROR',
@@ -217,6 +223,40 @@ def main():
                         help='Test a mirror configuration and summarise what it will fetch')
     parser.add_argument('--reinitialise', metavar='REPO',
                         help='Snapshot a repo and remove its data directory, leaving activation status unchanged (requires PIN)')
+
+    # Scan-only arguments (ignored unless --scan is used)
+    parser.add_argument('--name',
+                        help='Repository name (required for --scan)')
+    parser.add_argument('--dest',
+                        help='Destination path relative to repo_root (defaults to --name)')
+    parser.add_argument('-U', '--upstream', '--upstreams', dest='upstreams', action='extend', nargs='+',
+                        help='Upstream URL(s) for scanning (may be specified multiple times)')
+    parser.add_argument('-r', '--dist', '--release', action='append', dest='dist',
+                        help='Override distribution/suite (may be specified multiple times)')
+    parser.add_argument('-R', '--releases', dest='releases',
+                        help='Comma-separated list of distributions/suites')
+    parser.add_argument('--arch', action='append', dest='arch',
+                        help='Architecture to include (may be specified multiple times)')
+    parser.add_argument('--architectures', dest='architectures',
+                        help='Comma-separated list of architectures')
+    parser.add_argument('--component', action='append', dest='component',
+                        help='Component to include (may be specified multiple times)')
+    parser.add_argument('--components', dest='components',
+                        help='Comma-separated list of components')
+    parser.add_argument('--repo-type', dest='repo_type',
+                        help='Force a specific Repo type (e.g. "apt")')
+    parser.add_argument('-G', '--gpg-key-url', dest='gpg_key_url',
+                        help='Explicit GPG key URL for this repository')
+    collapse_scan = parser.add_mutually_exclusive_group()
+    collapse_scan.add_argument('--collapse-dists', dest='collapse_dists',
+                               action='store_true',
+                               help='Collapse discovered distributions to base suites')
+    collapse_scan.add_argument('--no-collapse-dists', dest='collapse_dists',
+                               action='store_false',
+                               help='Do not collapse discovered distributions')
+    parser.set_defaults(collapse_dists=None)
+    parser.add_argument('upstream', nargs='?',
+                        help='Upstream repository URL (alternative to --upstream)')
 
     # Modifiers
     parser.add_argument('--force', action='store_true',
@@ -246,12 +286,16 @@ def main():
     parser.add_argument('--sweep-pool', action='store_true',
                         help='Remove orphaned pool entries (st_nlink == 1)')
 
+    # Scan output directory
+    parser.add_argument('--out', dest='out_dir',
+                        help='Output directory for --scan results (required for --scan)')
+
     args = parser.parse_args()
 
-    config_dir = args.config_dir or DEFAULT_CONFIG_DIR
-    cfg_main = Config.load(config_dir)
+    cfg_main = Config.load(args.config_path)
 
     management_ops = [
+        bool(args.scan),
         bool(args.list),
         bool(args.list_repos),
         bool(args.activate),
@@ -270,7 +314,7 @@ def main():
     ]
     if sum(1 for x in management_ops if x) > 1:
         names = [
-            "--list", "--list-repos", "--activate", "--deactivate",
+            "--scan", "--list", "--list-repos", "--activate", "--deactivate",
             "--test", "--reinitialise", "--relink-pool", "--snapshot",
             "--list-snapshots", "--restore-snapshot", "--delete-snapshot",
             "--stats", "--stats-reset", "--migrate", "--sweep-pool",
@@ -285,7 +329,7 @@ def main():
         if args.mirror:
             repo_names.append(args.mirror)
         else:
-            enabled = Path(config_dir) / 'repos-enabled'
+            enabled = Path(cfg_main.config_dir) / 'repos-enabled'
             if enabled.exists():
                 repo_names = sorted(
                     f.stem for f in enabled.glob("*.conf")
@@ -298,13 +342,162 @@ def main():
                 )
                 sys.exit(1)
 
-        repos = Repos.from_names(repo_names, config_dir=args.config_dir)
-        repos.sync_all(config_dir=args.config_dir)
+        repos = Repos.from_names(repo_names, config_path=args.config_path)
+        repos.sync_all(config_path=args.config_path)
         if args.sweep_pool or cfg_main.sweep_pool_after_sync:
             pool_sweep_safe(cfg_main, fail_if_locked=False)
         sys.exit(0)
 
-    config_dir_path = Path(config_dir)
+    # ------------------------------------------------------------------
+    # --scan : discover upstream and generate repo config
+    # ------------------------------------------------------------------
+    if args.scan:
+        if not args.out_dir:
+            log("ERROR: --out <dir> is required for --scan", level="ERROR")
+            sys.exit(1)
+        try:
+            from .scan import scan as scan_repo, generate_config
+
+            # Resolve upstream URLs: positional, --upstream, or error
+            scan_upstreams: List[str] = []
+            if args.upstreams:
+                scan_upstreams = [u for u in args.upstreams if u]
+            elif args.upstream:
+                scan_upstreams = [args.upstream]
+            else:
+                log(
+                    "ERROR: No upstream URL provided for --scan. "
+                    "Pass a URL as a positional argument or via --upstream.",
+                    level="ERROR",
+                )
+                sys.exit(1)
+
+            scan_name = args.name or scan_upstreams[0].split("://")[-1].split("/")[0]
+
+            # Normalise dist/arch/component overrides (same logic as scan.main())
+            def _split_csv(values):
+                items = []
+                for v in values or []:
+                    if not v:
+                        continue
+                    parts = [p.strip() for p in v.split(",")]
+                    items.extend([p for p in parts if p])
+                seen = set()
+                result = []
+                for item in items:
+                    if item not in seen:
+                        seen.add(item)
+                        result.append(item)
+                return result
+
+            arch_override = _split_csv(
+                (args.arch or []) + ([args.architectures] if args.architectures else [])
+            )
+            if not arch_override:
+                arch_override = None
+
+            component_override = _split_csv(
+                (args.component or []) + ([args.components] if args.components else [])
+            )
+            if not component_override:
+                component_override = None
+
+            dist_overrides: Optional[List[str]] = None
+            dist_values: List[str] = []
+            if args.dist:
+                dist_values.extend(args.dist)
+            if args.releases:
+                dist_values.extend(_split_csv([args.releases]))
+            if dist_values:
+                seen_d = set()
+                ordered: List[str] = []
+                for d in dist_values:
+                    if d and d not in seen_d:
+                        seen_d.add(d)
+                        ordered.append(d)
+                dist_overrides = ordered or None
+
+            try:
+                repo = scan_repo(
+                    scan_name,
+                    scan_upstreams,
+                    repo_type=args.repo_type,
+                    dist_overrides=dist_overrides,
+                )
+            except NotImplementedError:
+                log(
+                    f"ERROR: No supported Repo implementation could parse upstream "
+                    f"{scan_upstreams[0]!r}.",
+                    level="ERROR",
+                )
+                sys.exit(1)
+
+            if args.gpg_key_url:
+                repo.gpg_key_url = args.gpg_key_url
+
+            scan_dest = args.dest or scan_name
+
+            global_collapse_dists = bool(cfg_main.collapse_distributions)
+
+            def _normalize_arch_mask(value):
+                if isinstance(value, str):
+                    v = value.strip()
+                    if v.lower() in ("*", "all") or not v:
+                        return None
+                    return [v]
+                if isinstance(value, list):
+                    return value
+                return None
+
+            config = generate_config(
+                repo,
+                scan_dest,
+                gpg_key_url=args.gpg_key_url,
+                dist_overrides=dist_overrides,
+                arch_override=arch_override,
+                component_override=component_override,
+                global_arch_mask=_normalize_arch_mask(cfg_main.architectures),
+                collapse_dists=(
+                    args.collapse_dists
+                    if args.collapse_dists is not None
+                    else global_collapse_dists
+                ),
+            )
+
+            out_dir = Path(args.out_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            config_file = out_dir / f"{repo.name}.conf"
+            config_file.write_text(config)
+
+            try:
+                snapshot_path = out_dir / f"{repo.name}.json"
+                import json
+                snapshot_path.write_text(
+                    json.dumps(repo.snapshot(), indent=2)
+                )
+                log(f"Snapshot saved to: {snapshot_path}")
+            except Exception as e:
+                log(f"Warning: failed to write snapshot: {e}", level="WARN")
+
+            log(f"Configuration saved to: {config_file}")
+            log(
+                f"\nNext steps:\n"
+                f"  # Test the repository configuration before activating it\n"
+                f"  mirror-dedupe --test {repo.name}\n\n"
+                f"  # If the test looks good, activate the repository:\n"
+                f"  To activate, copy to repos-enabled:\n"
+                f"  cp {config_file} "
+                f"{Path(cfg_main.config_dir) / 'repos-enabled' / (repo.name + '.conf')}\n\n"
+                f"  Or from the config directory:\n"
+                f"  cd {Path(cfg_main.config_dir) / 'repos-enabled'}\n"
+                f"  ln -s ../repos-available/{repo.name}.conf .\n"
+            )
+        except KeyboardInterrupt:
+            print("")
+            sys.exit(130)
+        sys.exit(0)
+
+    config_dir_path = Path(cfg_main.config_dir)
     repos_available = config_dir_path / 'repos-available'
     repos_enabled = config_dir_path / 'repos-enabled'
 
@@ -735,7 +928,7 @@ def main():
 
     if args.list:
         if not repos_available.exists() and not repos_enabled.exists():
-            print(f"No repos-available or repos-enabled at {config_dir}")
+            print(f"No repos-available or repos-enabled at {cfg_main.config_dir}")
             sys.exit(1)
 
         available: Dict[str, Path] = {}
@@ -757,7 +950,7 @@ def main():
             print("No mirrors defined")
             sys.exit(0)
 
-        print(f"Mirrors in {config_dir}:")
+        print(f"Mirrors in {cfg_main.config_dir}:")
         print("")
         for i, name in enumerate(all_repos):
             if name in available:
@@ -972,7 +1165,7 @@ def main():
         sys.exit(0)
 
     log("Use `mirror-dedupe --sync` to run the sync pipeline,", level="INFO")
-    log("`mirror-dedupe-scan` to discover and configure repos,", level="INFO")
+    log("`mirror-dedupe --scan` to discover and configure repos,", level="INFO")
     log("or `--list`/`--activate`/`--deactivate`/`--test`/`--reinitialise`", level="INFO")
     log("to manage existing configurations.", level="INFO")
     sys.exit(0)

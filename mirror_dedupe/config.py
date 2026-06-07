@@ -21,68 +21,70 @@ from typing import Dict, List
 from mirror_dedupe.lib.log import log, setup_log_colours
 
 
-DEFAULT_CONFIG_DIR = "/etc/mirror-dedupe"
+DEFAULT_CONFIG_PATH = "/etc/mirror-dedupe/mirror-dedupe.conf"
 
 
 class Config:
     ## @brief Singleton-style loader for global config with attribute access.
 
     _instance: "Config | None" = None
-    _config_dir: str | None = None
+    _config_path: str | None = None
 
     @classmethod
-    def load(cls, config_dir: str = DEFAULT_CONFIG_DIR) -> "Config":
-        ## @brief Load (or return cached) Config for *config_dir*.
+    def load(cls, config_path: str | None = None) -> "Config":
+        ## @brief Load (or return cached) Config for *config_path*.
         ##
-        ## Returns the cached instance if one exists for any loaded
-        ## directory when called without an explicit override (i.e. the
-        ## default).  When an explicit *config_dir* is given, reloads if
-        ## different from the cached directory.
+        ## Returns the cached instance if one exists for the default
+        ## path when called without an explicit override.  When an
+        ## explicit *config_path* is given, reloads if different from
+        ## the cached path.
         ##
-        ## @param config_dir  Path to the configuration directory.
+        ## @param config_path  Path to the configuration file.
         ## @return A Config instance.
 
-        config_dir_resolved = str(Path(config_dir or DEFAULT_CONFIG_DIR).resolve())
+        config_path_resolved = str(Path(config_path or DEFAULT_CONFIG_PATH).resolve())
         if cls._instance is not None:
-            if config_dir is None or config_dir == DEFAULT_CONFIG_DIR:
+            if config_path is None or config_path == DEFAULT_CONFIG_PATH:
                 return cls._instance
-            if cls._config_dir == config_dir_resolved:
+            if cls._config_path == config_path_resolved:
                 return cls._instance
-        cls._instance = cls(config_dir_resolved)
-        cls._config_dir = config_dir_resolved
+        cls._instance = cls(config_path_resolved)
+        cls._config_path = config_path_resolved
         return cls._instance
 
-    def __init__(self, config_dir_resolved: str) -> None:
-        ## @brief Initialise Config from a resolved directory path.
+    def __init__(self, config_file_resolved: str) -> None:
+        ## @brief Initialise Config from a resolved config file path.
         ##
-        ## Loads ``mirror-dedupe.conf`` from *config_dir_resolved* and
-        ## extracts global settings (``disable_ipv6``, ``repo_root``,
-        ## ``pool_root``, ``architectures``, ``collapse_distributions``,
-        ## ``buffer_size``, ``parallel_downloads``, ``curl_timeout``,
-        ## ``max_retries``, ``progress_interval``) into
-        ## named attributes on the instance.
+        ## Loads *config_file_resolved* and extracts global settings
+        ## (``disable_ipv6``, ``repo_root``, ``pool_root``,
+        ## ``architectures``, ``collapse_distributions``, ``buffer_size``,
+        ## ``parallel_downloads``, ``curl_timeout``, ``max_retries``,
+        ## ``progress_interval``) into named attributes on the instance.
+        ##
+        ## ``disable_ipv6`` is a global flag only — per-mirror override was
+        ## removed since curl's built-in Happy Eyeballs (RFC 8305) handles
+        ## transparent IPv6/IPv4 fallback at the transport layer.
         ##
         ## Iterates ``repos-enabled/*.conf`` for mirror definitions,
-        ## resolves relative ``dest`` paths against ``repo_root``, and
-        ## applies per-mirror ``disable_ipv6`` inheritance.  Applies a
-        ## global architecture mask to each mirror's architecture list;
-        ## mirrors with no surviving architectures after the mask are
-        ## warned but keep their original list.
+        ## resolves relative ``dest`` paths against ``repo_root``.
+        ## Applies a global architecture mask to each mirror's
+        ## architecture list; mirrors with no surviving architectures
+        ## after the mask are warned but keep their original list.
         ##
         ## Finally synchronises all attributes back into ``self._data`` so
         ## that both attribute and dict-style access return identical
         ## values.
         ##
-        ## @param config_dir_resolved  Absolute path to the configuration
-        ##                             directory.
+        ## @param config_file_resolved  Absolute path to the configuration
+        ##                              file.
 
-        self._config_dir = config_dir_resolved
-        main_config_path = Path(config_dir_resolved) / 'mirror-dedupe.conf'
+        self._config_file = config_file_resolved
+        self._config_dir = str(Path(config_file_resolved).parent)
         try:
-            with open(main_config_path, 'r') as f:
+            with open(config_file_resolved, 'r') as f:
                 self._data = yaml.safe_load(f) or {}
         except Exception as e:
-            log(f"Error loading configuration from {config_dir_resolved}: {e}", level="ERROR")
+            log(f"Error loading configuration from {config_file_resolved}: {e}", level="ERROR")
             sys.exit(1)
 
         global_disable_ipv6 = self._data.get('disable_ipv6', False)
@@ -96,6 +98,7 @@ class Config:
         self.buffer_size = self._data.get('buffer_size', 1048576)
         self.parallel_downloads = self._data.get('parallel_downloads', 10)
         self.max_concurrent_syncs = self._data.get('max_concurrent_syncs', 2)
+        self.connect_timeout = self._data.get('connect_timeout', 10)
         self.curl_timeout = self._data.get('curl_timeout', 900)
         self.max_retries = self._data.get('max_retries', 3)
         self.progress_interval = self._data.get('progress_interval', 1000)
@@ -110,7 +113,7 @@ class Config:
                     if not os.path.isabs(adest):
                         adest = os.path.join(self.repo_root, adest)
                     self.additional_repos[aname] = adest
-        repos_dir = Path(config_dir_resolved) / 'repos-enabled'
+        repos_dir = Path(self._config_dir) / 'repos-enabled'
         mirrors: list[dict] = []
 
         if repos_dir.exists() and repos_dir.is_dir():
@@ -124,7 +127,6 @@ class Config:
                             # Resolve relative dest paths against repo_root
                             if not os.path.isabs(dest):
                                 mirror['dest'] = os.path.join(repo_root, dest)
-                            mirror['disable_ipv6'] = mirror.get('disable_ipv6', global_disable_ipv6)
                             mirrors.append(mirror)
                 except Exception as e:
                     log(f"Warning: Failed to load {repo_file}: {e}", level="WARN")
@@ -177,6 +179,7 @@ class Config:
         self._data['buffer_size'] = self.buffer_size
         self._data['parallel_downloads'] = self.parallel_downloads
         self._data['max_concurrent_syncs'] = self.max_concurrent_syncs
+        self._data['connect_timeout'] = self.connect_timeout
         self._data['curl_timeout'] = self.curl_timeout
         self._data['max_retries'] = self.max_retries
         self._data['progress_interval'] = self.progress_interval
@@ -191,6 +194,12 @@ class Config:
             self._data['log_colour_bg'],
             mirrors,
         )
+
+    @property
+    def config_dir(self) -> str:
+        ## @brief Return the configuration directory (parent of the config file).
+        ## @return Absolute path to the config directory.
+        return self._config_dir
 
     def __getitem__(self, key):
         ## @brief Dict-style access to config values.

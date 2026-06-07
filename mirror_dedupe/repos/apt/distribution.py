@@ -189,7 +189,7 @@ class Distribution(Schema.Distribution):
         ## Architecture/component filters from the parent Repo are set on
         ## the child Release for index filtering.
         ##
-        ## @param config  Optional network config dict (ipv6_ok, timeout).
+        ## @param config  Optional config dict (suite/arch/component filters).
         ## @return None
 
         repo = getattr(self, "_repo", None)
