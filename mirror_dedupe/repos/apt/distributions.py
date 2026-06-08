@@ -34,7 +34,7 @@ class DistributionsParser:
         ## @return None
 
         self.repo = repo
-        self.upstream_index = int(repo.get("upstream_idx", 0))
+        self.upstream_index = int(repo.get("upstream_idx", 0))  # prefer the mirror used during scan
         self._candidates: List[str] = candidates or []
 
     def parse(self):
@@ -55,7 +55,7 @@ class DistributionsParser:
         ## @return A ``Distributions`` NodeList.
 
         upstreams_list = [u.url for u in self.repo.upstreams if u.url]
-        upstream = upstreams_list[self.upstream_index] if upstreams_list else ""
+        upstream = upstreams_list[self.upstream_index] if upstreams_list else ""  # consistent mirror avoids skew
         root = self.repo.INDEX_ROOT_DIR
         anchor = self.repo.INDEX_ANCHOR_FILENAME
 

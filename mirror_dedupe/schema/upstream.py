@@ -2,9 +2,9 @@
 ##
 ## @brief Upstream endpoint descriptor and collection.
 ##
-## An ``Upstream`` captures the base URL, preferred sync method, and
-## optional metadata for a single remote source. ``Upstreams`` is the
-## corresponding ``NodeList`` wrapper.
+## An ``Upstream`` captures the base URL and optional metadata for a
+## single remote source. The URL scheme alone determines the sync
+## protocol. ``Upstreams`` is the corresponding ``NodeList`` wrapper.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -24,13 +24,10 @@ class Upstream(Node):
     ## Core fields capture the information needed by scan/discovery and
     ## sync policy:
     ##
-    ## * ``url``         — base HTTP/HTTPS URL for discovery and sync
-    ## * ``sync_method`` — preferred sync method (e.g. ``"https"``, ``"http"``)
+    ## * ``url`` — base HTTP/HTTPS URL for discovery and sync
     ##
     ## An open-ended metadata mapping is also provided so callers can
     ## attach additional per-upstream details without changing the schema.
-    ##
-    ## IPv6 control is global (``Config.disable_ipv6``), not per-upstream.
 
     class Metadata(Node):
         ## @brief Opaque per-upstream metadata container.
@@ -50,20 +47,16 @@ class Upstream(Node):
         self,
         *,
         url: str,
-        sync_method: str | None = "https",
         metadata: "Upstream.Metadata" | None = None,
     ) -> None:
         ## @brief Initialise an Upstream endpoint descriptor.
         ##
-        ## @param url          Base HTTP/HTTPS URL for discovery and sync.
-        ## @param sync_method  Preferred sync method (default ``"https"``).
-        ## @param metadata     Optional per-upstream metadata.
+        ## @param url       Base HTTP/HTTPS URL for discovery and sync.
+        ## @param metadata  Optional per-upstream metadata.
         ## @return None
         data: Dict[str, Any] = {
             "url": url,
         }
-        if sync_method is not None:
-            data["sync_method"] = sync_method
         if metadata is not None:
             data["metadata"] = metadata
         super().__init__(data)

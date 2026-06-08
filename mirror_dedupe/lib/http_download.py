@@ -1,11 +1,13 @@
 ## @file http_download.py
 ##
-## @brief Unified HTTP fetch and download with subprocess tracking.
+## @brief Unified HTTP fetch and download.
 ##
 ## Provides two public functions:
 ##
 ## * ``HTTPFetch``  — fetch a URI into memory (bytes).
 ## * ``HTTPDownload`` — download a URI to a local file, returning SHA-256.
+##
+## Subprocess tracking lives in ``mirror_dedupe.lib.subproc``.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -15,105 +17,11 @@ from __future__ import annotations
 
 import os
 import platform
-import subprocess
-import threading
 import time
-from typing import Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Tuple
 
 from ..config import Config
-
-# -- subprocess tracking (Ctrl-C support) ------------------------------------
-
-_active_procs: set[subprocess.Popen] = set()
-_active_lock = threading.Lock()
-
-
-def _register(proc: subprocess.Popen) -> None:
-    ## @brief Track a subprocess for Ctrl-C kill.
-    ## @param proc  ``subprocess.Popen`` instance to track.
-    ## @return None
-    with _active_lock:
-        _active_procs.add(proc)
-
-
-def _unregister(proc: subprocess.Popen) -> None:
-    ## @brief Stop tracking a subprocess (already finished).
-    ## @param proc  ``subprocess.Popen`` instance to unregister.
-    ## @return None
-    with _active_lock:
-        _active_procs.discard(proc)
-
-
-def kill_active_subprocesses() -> None:
-    ## @brief Kill all tracked subprocesses (called on Ctrl-C).
-    ##
-    ## Iterates a snapshot of the active set so concurrent modifications
-    ## during kill don't race.  Silently ignores ``OSError`` for processes
-    ## that already exited.
-    ##
-    ## @return None
-    with _active_lock:
-        _kill_all_no_lock()
-
-
-def _kill_all_no_lock() -> None:
-    ## @brief Iterate and kill all tracked processes (no lock held).
-    ##
-    ## Separated so the signal handler can call it with a non-blocking
-    ## lock attempt — acquiring a ``threading.Lock`` from a signal handler
-    ## risks deadlock if another thread holds it at the moment of the
-    ## interrupt.
-    ##
-    ## @return None
-    for p in list(_active_procs):
-        try:
-            p.kill()
-        except OSError:
-            pass
-    _active_procs.clear()
-
-
-def kill_active_subprocesses_signal_safe() -> None:
-    ## @brief Signal-handler-safe variant of ``kill_active_subprocesses``.
-    ##
-    ## Attempts a non-blocking lock acquisition and bails if the lock is
-    ## held (the other thread will finish quickly and the process is about
-    ## to exit anyway).  Call this from a SIGINT handler before
-    ## ``os._exit()``.
-    ##
-    ## @return None
-    if _active_lock.acquire(blocking=False):
-        try:
-            _kill_all_no_lock()
-        finally:
-            _active_lock.release()
-
-
-def _run_subprocess(args: List[str]) -> Tuple[int, Optional[bytes], bytes]:
-    ## @brief Run a subprocess with stdout/stderr capture and Ctrl-C safety.
-    ##
-    ## Registers the process so that a SIGINT kills it immediately,
-    ## then unregisters once ``communicate()`` returns.  If the Python
-    ## process is interrupted mid-communicate the ``except`` block
-    ## kills the child before re-raising.
-    ##
-    ## @param args  Argument list for ``subprocess.Popen``.
-    ## @return Tuple of ``(returncode, stdout_bytes, stderr_bytes)``.
-    stdout_dest: int | None = subprocess.PIPE
-    proc = subprocess.Popen(args, stdout=stdout_dest, stderr=subprocess.PIPE)
-    _register(proc)
-    try:
-        out, err = proc.communicate()
-    except:  # noqa: E722
-        try:
-            proc.kill()
-        except OSError:
-            pass
-        proc.wait()
-        raise
-    finally:
-        _unregister(proc)
-    return proc.returncode, out, err
+from .subproc import run_subprocess
 
 
 # -- public API ---------------------------------------------------------------
@@ -151,9 +59,8 @@ def HTTPFetch(uri: str) -> bytes:
     ## Uses ``--connect-timeout`` from ``Config.connect_timeout`` (default
     ## 10) so the probe doesn't hang forever on an unresponsive upstream.
     ##
-    ## Respects ``Config.disable_ipv6`` — passes ``-4`` to curl when
-    ## set, otherwise relies on curl's built-in Happy Eyeballs (RFC 8305)
-    ## for transparent IPv6/IPv4 fallback.
+    ## curl's built-in Happy Eyeballs (RFC 8305) handles transparent
+    ## IPv6/IPv4 fallback.
     ##
     ## @param uri  Fully-qualified URL to fetch.
     ## @return Raw response bytes.
@@ -162,9 +69,7 @@ def HTTPFetch(uri: str) -> bytes:
         raise RuntimeError("No URI provided")
     config = Config.load()
     args = ["curl", "-s", "-L", "--connect-timeout", str(config.connect_timeout), uri]
-    if config.disable_ipv6:
-        args.insert(1, "-4")
-    rc, out, err = _run_subprocess(args)
+    rc, out, err = run_subprocess(args)
     if rc != 0:
         msg = err.decode("utf-8", errors="replace").strip() if err else ""
         raise RuntimeError(f"FAILED {uri} - curl exit {rc} {msg}".strip())
@@ -186,9 +91,8 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
     ## The partial staging file is preserved for ``-C -`` resume across
     ## retry attempts.
     ##
-    ## Respects ``Config.disable_ipv6`` — passes ``-4`` to curl when
-    ## set, otherwise relies on curl's built-in Happy Eyeballs (RFC 8305)
-    ## for transparent IPv6/IPv4 fallback.
+    ## curl's built-in Happy Eyeballs (RFC 8305) handles transparent
+    ## IPv6/IPv4 fallback.
     ##
     ## @param uri          Fully-qualified URL to download.
     ## @param output_path  Path to write the downloaded content.
@@ -198,17 +102,12 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
     output_str = str(output_path)
 
     _TRANSIENT_EXITS: Tuple[int, ...] = (7, 18, 35, 52, 55, 56)
-    _cfg = Config.load()
-    _ipv4_only = _cfg.disable_ipv6
-    _connect_timeout = str(_cfg.connect_timeout)
+    _connect_timeout = str(Config.load().connect_timeout)
 
     def _curl_args() -> List[str]:
-        ## @brief Build curl argument list, adding ``-4`` when IPv6 is disabled.
+        ## @brief Build curl argument list.
         ## @return Argument list for ``subprocess.Popen``.
-        args = ["curl", "-s", "-L", "--connect-timeout", _connect_timeout, "-C", "-", "-w", "%{http_code}", "-o", output_str, uri]
-        if _ipv4_only:
-            args.insert(1, "-4")
-        return args
+        return ["curl", "-s", "-L", "--connect-timeout", _connect_timeout, "-C", "-", "-w", "%{http_code}", "-o", output_str, uri]
 
     def _compute_hash() -> str:
         ## @brief Compute the SHA-256 hash of *output_str*.
@@ -217,10 +116,10 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
         ## (macOS).  Raises ``RuntimeError`` if neither tool is found.
         ##
         ## @return SHA-256 hex digest as a 64-character string.
-        rc, out, _ = _run_subprocess(["sha256sum", output_str])
+        rc, out, _ = run_subprocess(["sha256sum", output_str])
         if rc == 0:
             return out.decode("utf-8").split()[0]
-        rc, out, _ = _run_subprocess(["shasum", "-a", "256", output_str])
+        rc, out, _ = run_subprocess(["shasum", "-a", "256", output_str])
         if rc == 0:
             return out.decode("utf-8").split()[0]
         raise RuntimeError(
@@ -230,7 +129,7 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
     _range_retried = False
 
     for attempt in range(1 + retries):
-        rc, out, err = _run_subprocess(_curl_args())
+        rc, out, err = run_subprocess(_curl_args())
         if rc == 0:
             if out:
                 try:

@@ -83,7 +83,7 @@ def _timestamp() -> str:
     ##
     ## @return A compact timestamp string.
 
-    from .lib import fmt_compact_ts
+    from .lib.datetimeutils import fmt_compact_ts
     return fmt_compact_ts()
 
 
@@ -194,6 +194,19 @@ def _snapshot_size(snapshot_path: Path) -> str:
 def main():
     ## @brief Main entry point for mirror-dedupe.
     ## @return None
+
+    # SIGINT kills tracked curl subprocesses immediately — avoids
+    # KeyboardInterrupt corrupting Python's import state during cleanup.
+    import signal as _signal
+
+    from .lib.subproc import kill_active_subprocesses_signal_safe
+    _signal.signal(
+        _signal.SIGINT,
+        lambda signum, frame: (
+            kill_active_subprocesses_signal_safe(),
+            os._exit(130),
+        ),
+    )
 
     parser = argparse.ArgumentParser(
         description='Mirror repository with global deduplication',

@@ -56,14 +56,14 @@ class Config:
         ## @brief Initialise Config from a resolved config file path.
         ##
         ## Loads *config_file_resolved* and extracts global settings
-        ## (``disable_ipv6``, ``repo_root``, ``pool_root``,
-        ## ``architectures``, ``collapse_distributions``, ``buffer_size``,
-        ## ``parallel_downloads``, ``curl_timeout``, ``max_retries``,
-        ## ``progress_interval``) into named attributes on the instance.
+        ## (``repo_root``, ``pool_root``,
+        ## ``architectures``, ``collapse_distributions``,
+        ## ``parallel_downloads``, ``connect_timeout``,
+        ## ``sweep_pool_after_sync``) into named attributes.
         ##
-        ## ``disable_ipv6`` is a global flag only — per-mirror override was
-        ## removed since curl's built-in Happy Eyeballs (RFC 8305) handles
-        ## transparent IPv6/IPv4 fallback at the transport layer.
+        ## Validates that ``repo_root`` and ``pool_root`` are on the same
+        ## filesystem (``st_dev`` comparison) — hardlink deduplication
+        ## requires both directories to reside on the same logical volume.
         ##
         ## Iterates ``repos-enabled/*.conf`` for mirror definitions,
         ## resolves relative ``dest`` paths against ``repo_root``.
@@ -87,21 +87,36 @@ class Config:
             log(f"Error loading configuration from {config_file_resolved}: {e}", level="ERROR")
             sys.exit(1)
 
-        global_disable_ipv6 = self._data.get('disable_ipv6', False)
-        self.disable_ipv6 = global_disable_ipv6
-
         self.repo_root = self._data.get('repo_root', '/srv/mirror/repos')
         self.pool_root = self._data.get('pool_root', '/srv/mirror/pool')
 
+        # Verify pool and repo are on the same filesystem (hardlinks required)
+        try:
+            pool_dev = os.stat(self.pool_root).st_dev
+            repo_dev = os.stat(self.repo_root).st_dev
+        except OSError as e:
+            log(
+                f"ERROR: Cannot access pool_root or repo_root: {e}",
+                level="ERROR"
+            )
+            sys.exit(1)
+        if pool_dev != repo_dev:
+            log(
+                "ERROR: pool_root and repo_root are on different filesystems. "
+                "mirror-dedupe requires pool and repository to reside on the same "
+                "logical volume for hardlink-based deduplication. "
+                f"pool st_dev={pool_dev}, repo st_dev={repo_dev}. "
+                "Use LVM to place both directories on the same volume, or "
+                "adjust pool_root/repo_root in mirror-dedupe.conf.",
+                level="ERROR"
+            )
+            sys.exit(1)
+
         self.architectures = self._data.get('architectures', '*')
         self.collapse_distributions = self._data.get('collapse_distributions', False)
-        self.buffer_size = self._data.get('buffer_size', 1048576)
         self.parallel_downloads = self._data.get('parallel_downloads', 10)
         self.max_concurrent_syncs = self._data.get('max_concurrent_syncs', 2)
         self.connect_timeout = self._data.get('connect_timeout', 10)
-        self.curl_timeout = self._data.get('curl_timeout', 900)
-        self.max_retries = self._data.get('max_retries', 3)
-        self.progress_interval = self._data.get('progress_interval', 1000)
         self.sweep_pool_after_sync = bool(self._data.get('sweep_pool_after_sync', False))
         raw_additional = self._data.get('additional_repos', []) or []
         self.additional_repos: Dict[str, str] = {}
@@ -171,18 +186,13 @@ class Config:
                     )
 
         self.mirrors = mirrors
-        self._data['disable_ipv6'] = self.disable_ipv6
         self._data['repo_root'] = self.repo_root
         self._data['pool_root'] = self.pool_root
         self._data['architectures'] = self.architectures
         self._data['collapse_distributions'] = self.collapse_distributions
-        self._data['buffer_size'] = self.buffer_size
         self._data['parallel_downloads'] = self.parallel_downloads
         self._data['max_concurrent_syncs'] = self.max_concurrent_syncs
         self._data['connect_timeout'] = self.connect_timeout
-        self._data['curl_timeout'] = self.curl_timeout
-        self._data['max_retries'] = self.max_retries
-        self._data['progress_interval'] = self.progress_interval
         self._data['sweep_pool_after_sync'] = self.sweep_pool_after_sync
         self._data['mirrors'] = self.mirrors
         self._data['additional_repos'] = self.additional_repos

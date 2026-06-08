@@ -58,7 +58,7 @@ def scan(name: str, upstreams: List[str],
         repo.name = name
 
     if dist_overrides:
-        repo.dist_candidates = dist_overrides
+        object.__setattr__(repo, "dist_candidates", dist_overrides)
 
     repo = repo.analyse()
 
@@ -109,10 +109,8 @@ def generate_config(repo: Repo, dest: str,
 
     log(f"  {next_step_label()} Examining discovered repository structure...")
 
-    upstream_index = repo.upstream_idx
+    upstream_index = repo.upstream_idx  # which upstream was used for discovery
     upstream_node = repo.upstreams[upstream_index] if repo.upstreams else None
-
-    sync_method = upstream_node.sync_method if upstream_node else None
 
     discovered: List[str] = []
     if repo.distributions:
@@ -215,64 +213,60 @@ def generate_config(repo: Repo, dest: str,
     upstream_index = repo.upstream_idx
     upstream_entries = []
     for u in repo.upstreams:
-        entry = {"url": u.url}
-        if u.sync_method is not None:
-            entry["sync_method"] = u.sync_method
-        upstream_entries.append(entry)
+        upstream_entries.append({"url": u.url})
 
-    from .lib import fmt_date
+    from .lib.datetimeutils import fmt_datetime
 
-    scan_parts = ["mirror-dedupe", "--scan"]
-    scan_parts.append(f"--name {name}")
+    cmd_parts = ["mirror-dedupe", "--scan", f"--name {name}"]
     if dest != name:
-        scan_parts.append(f"--dest {dest}")
+        cmd_parts.append(f"--dest {dest}")
     for u in repo.upstreams:
-        scan_parts.append(f"-U {u.url}")
-    if gpg_key_url:
-        scan_parts.append(f"--gpg-key-url {gpg_key_url}")
-    if dist_overrides:
-        for d in dist_overrides:
-            scan_parts.append(f"--release {d}")
-    if arch_override:
-        for a in arch_override:
-            scan_parts.append(f"--arch {a}")
-    if component_override:
-        scan_parts.append(f"--components {' '.join(component_override)}")
-    if collapse_dists is True:
-        scan_parts.append("--collapse-dists")
-    elif collapse_dists is False:
-        scan_parts.append("--no-collapse-dists")
-    scan_cmd = " ".join(scan_parts)
+        cmd_parts.append(f"-U {u.url}")
+    cmd = " ".join(cmd_parts)
 
     config_lines = [
-        f"# Generated {fmt_date()} by '{scan_cmd}'",
-        f"# {name} repository",
-        "",
-        f"name: {name}",
-        f"dest: {dest}",
-        f"repo_type: {repo.get('repo_type', repo.REPO_TYPE)}",
+        f"# Generated: {fmt_datetime()}",
+        f"# Command: {cmd}",
     ]
+    config_lines.append("")
+
+    config_lines.append(f"name: {name}")
+    config_lines.append(f"dest: {dest}")
+    config_lines.append(f"repo_type: {repo.get('repo_type', repo.REPO_TYPE)}")
 
     if upstream_entries:
+        config_lines.append("")
+        config_lines.append("# During sync the first healthy upstream is used for each file.")
+        config_lines.append("# Comment out an entry to disable that mirror.")
         config_lines.append("upstreams:")
         for upstream in upstream_entries:
             config_lines.append("  - url: " + upstream["url"])
-            if "sync_method" in upstream:
-                config_lines.append(f"    sync_method: {upstream['sync_method']}")
-        config_lines.append(f"upstream_idx: {upstream_index}")
+        config_lines.append(f"upstream_idx: {upstream_index}  # prefer this mirror on sync — avoids mirror skew")
 
     if gpg_key_url:
+        config_lines.append("")
+        config_lines.append("# GPG key URL for Release file signature verification.")
         config_lines.append(f"gpg_key_url: {gpg_key_url}")
         log(f"      GPG key URL (user-supplied): {gpg_key_url}")
 
+    config_lines.append("")
+    config_lines.append("# Architectures to fetch.  Removing an architecture reduces")
+    config_lines.append("# download size — only the listed ones are synced.")
     config_lines.append("architectures:")
     for arch in architectures:
         config_lines.append(f"  - {arch}")
 
+    config_lines.append("")
+    config_lines.append("# Package components to mirror.  Comment out or remove any")
+    config_lines.append("# that are not needed (e.g. \"non-free\", \"contrib\").")
     config_lines.append("components:")
     for comp in components:
         config_lines.append(f"  - {comp}")
 
+    config_lines.append("")
+    config_lines.append("# Distribution(s) / suites to mirror.  Each name corresponds to a")
+    config_lines.append("# Release file on the upstream server.  Comment out a line to exclude")
+    config_lines.append("# that suite from sync.")
     config_lines.append("distributions:")
     if all_dists_mode:
         for dist in discovered:
@@ -281,11 +275,21 @@ def generate_config(repo: Repo, dest: str,
         for dist in distributions:
             config_lines.append(f"  - {dist}")
         if collapsed_from_all or (len(distributions) == 1 and distributions[0] not in ['stable', 'unstable', 'testing']):
-            config_lines.append("# Distribution auto-expands to include variants (e.g., -updates, -security)")
+            config_lines.append("# Distribution auto-expands to include variants (e.g. -updates, -security)")
 
     if (all_dists_mode and not collapse_dists) or (len(distributions) == 1 and distributions[0] == 'stable'):
         config_lines.append("expand_distributions: false")
 
+    config_lines.append("")
+    config_lines.append("# Per-repo parameter overrides.  The defaults from --scan are shown;")
+    config_lines.append("# uncomment and change only what you need.")
+    config_lines.append("#")
+    config_lines.append("#   discovery_method    How upstream layout was discovered: \"html_bfs\"")
+    config_lines.append("#                       (HTML index crawl) or \"explicit\" (dists/).")
+    config_lines.append("#   log_colour          ANSI colour for this repo's log label.")
+    config_lines.append("#   log_colour_bg       ANSI background colour for the label.")
+    config_lines.append("#   parallel_downloads  Per-repo worker pool size.  Inherits the global")
+    config_lines.append("#                       default when commented out.")
     config_lines.append("params:")
     params = repo.get("params") or {}
     method = params.get("discovery_method", "html_bfs")
@@ -295,7 +299,7 @@ def generate_config(repo: Repo, dest: str,
         config_lines.append("  nobrowse: true")
     config_lines.append(f"  log_colour: {params.get('log_colour', 'DEFAULT')}")
     config_lines.append(f"  log_colour_bg: {params.get('log_colour_bg', 'NONE')}")
-    config_lines.append(f"  # parallel_downloads: N  # per-repo override; inherits global value if omitted")
+    config_lines.append(f"  # parallel_downloads: N")
 
     config_lines.append("")
 
