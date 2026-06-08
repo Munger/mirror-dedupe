@@ -56,6 +56,16 @@ class Inventory:
         self._lock = threading.Lock()
         self.id: str = id
         self.path: str = path
+        ## @brief Paths found on disk during the pre-sync ``from_repos`` scan.
+        ##
+        ## Populated once by ``from_repos`` with every file path (relative to
+        ## ``repo_root``) present in this repo's destination directory before
+        ## the sync begins.  During sync, each node removes its own path via
+        ## ``Node.sync()`` as soon as it is declared wanted.  Whatever remains
+        ## when ``_sweep_stale`` runs is a file that exists on disk but was
+        ## never wanted — safe to delete.  Only meaningful on per-repo
+        ## inventories; the pool inventory leaves this empty.
+        self.stale_paths: set[str] = set()
 
     # -- readers ----------------------------------------------------------
 
@@ -246,6 +256,13 @@ class Inventory:
             inv = result.get(dest_name)
             if inv is None:
                 continue
+
+            # Record every path we find — pool-linked or not.  Release,
+            # InRelease, Packages, and Sources files all land here even
+            # though they have no pool hash.  Node.sync() removes a path
+            # from this set the moment it is declared wanted, so anything
+            # left after the sync is stale and safe to delete.
+            inv.stale_paths.add(rel)
 
             h = pool_inv.get_hash(ino)
             if h is not None:

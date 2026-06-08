@@ -467,52 +467,58 @@ class Repo(Node):
         self._top_stats["errors"] = errors
 
     def _sweep_stale(self) -> int:
-        ## @brief Remove files in the repo destination not in the tree.
+        ## @brief Delete pre-sync paths that were never declared as wanted.
         ##
-        ## Walks the repo's destination directory on disk and deletes any
-        ## file whose path (relative to ``repo_root``) is not present in
-        ## the in-memory node tree.  Empty directories are pruned
-        ## bottom-up.
+        ## ``Inventory.from_repos`` captures every file path in the repo
+        ## destination into ``rv.inv.stale_paths`` before the sync begins.
+        ## During the sync, ``Node.sync()`` removes each path from that set
+        ## the moment the node is processed — whether it ends up being an
+        ## inventory hit, a pool re-link, or a fresh download.  By the time
+        ## the work queue drains, ``stale_paths`` contains only files that
+        ## existed on disk but were never wanted: old package versions, dropped
+        ## architectures, removed distributions.
+        ##
+        ## No disk walk is needed here — the stale set was built for free
+        ## during the startup ``find`` pass.  The removed count is returned
+        ## so the caller can store it in ``_top_stats["removed"]``, which
+        ## feeds the per-repo stats record, NDJSON log, and summary table.
+        ##
+        ## Empty directories are pruned bottom-up after deletions.
         ##
         ## @return Number of stale files removed.
 
         from ..lib import fmt_size, LOG_LABEL_W
         from ..lib.log import log
 
-        repo_root = self._repo_vars.repo_root
-        tree_paths: set[str] = set()
-        for node in self._tree_iter():
-            p = node.get("path")
-            if p:
-                tree_paths.add(p)
+        rv = self._repo_vars
+        if rv.inv is None or not rv.inv.stale_paths:
+            return 0
 
+        repo_root = rv.repo_root
         dest = self.get("dest", "")
-        if not dest:
-            return 0
-        dest_path = Path(repo_root) / dest
-        if not dest_path.exists():
-            return 0
-
         removed = 0
-        for f in dest_path.rglob("*"):
-            if f.is_file():
-                rel = str(f.relative_to(Path(repo_root)))
-                if rel not in tree_paths:
-                    sz = f.stat().st_size
-                    f.unlink()
-                    removed += 1
-                    log(f"  {'Removing':<{LOG_LABEL_W}} {fmt_size(sz):>7}  {rel}", level="INFO")
 
-        for dirpath, dirnames, filenames in os.walk(str(dest_path), topdown=False):
+        for rel in rv.inv.stale_paths:
+            f = Path(repo_root) / rel
             try:
-                dp = Path(dirpath)
-                if not any(dp.iterdir()):
-                    dp.rmdir()
+                sz = f.stat().st_size
+                f.unlink()
+                removed += 1
+                log(f"  {'Removing':<{LOG_LABEL_W}} {fmt_size(sz):>7}  {rel}", level="INFO")
             except OSError:
                 continue
 
         if removed:
             log(f"Repo sweep: removed {removed} stale files from '{dest}'", level="INFO")
+            if dest:
+                dest_path = Path(repo_root) / dest
+                if dest_path.exists():
+                    for dirpath, _, _ in os.walk(str(dest_path), topdown=False):
+                        try:
+                            if not any(Path(dirpath).iterdir()):
+                                Path(dirpath).rmdir()
+                        except OSError:
+                            continue
 
         return removed
 
