@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.html_helpers import build_url
 from mirror_dedupe.lib.log import log
-from mirror_dedupe.schema.node import Node
+from mirror_dedupe.schema.mdnode import MDNode as Node
 from .discovery import _iter_href_names, probe_any_suite
 from .distributions import DistributionsParser
 

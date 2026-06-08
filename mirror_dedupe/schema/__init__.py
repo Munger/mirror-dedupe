@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from .node import Node
+from .mdnode import MDNode as Node
 from .repo import Repo, Repos
 from .architecture import Architecture, Architectures
 from .component import Component, Components

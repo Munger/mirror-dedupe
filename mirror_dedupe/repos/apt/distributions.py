@@ -69,7 +69,7 @@ class DistributionsParser:
             for path in self._candidates:
                 release_url = build_url(upstream, root, path, anchor)
                 log(f"  {path}: fetching Release")
-                from mirror_dedupe.schema.node import Node
+                from mirror_dedupe.schema.mdnode import MDNode as Node
 
                 text_bytes = Node.probe_url(release_url)
                 if text_bytes is None:

@@ -283,7 +283,7 @@ def main():
                         help='Truncate stats.ndjson for a repo dest or ALL (requires PIN)')
     parser.add_argument('--migrate', action='store_true',
                         help='Migrate a legacy mirror-dedupe repo tree to the current layout (not yet implemented)')
-    parser.add_argument('--sweep-pool', action='store_true',
+    parser.add_argument('--sweep', action='store_true',
                         help='Remove orphaned pool entries (st_nlink == 1)')
 
     # Scan output directory
@@ -310,14 +310,14 @@ def main():
         bool(args.stats),
         bool(args.stats_reset),
         bool(args.migrate),
-        bool(args.sweep_pool),
+        bool(args.sweep),
     ]
     if sum(1 for x in management_ops if x) > 1:
         names = [
             "--scan", "--list", "--list-repos", "--activate", "--deactivate",
             "--test", "--reinitialise", "--relink-pool", "--snapshot",
             "--list-snapshots", "--restore-snapshot", "--delete-snapshot",
-            "--stats", "--stats-reset", "--migrate", "--sweep-pool",
+            "--stats", "--stats-reset", "--migrate", "--sweep",
         ]
         log(f"ERROR: Only one management flag may be used at a time. Choose one of: {', '.join(names)}", level="ERROR")
         sys.exit(1)
@@ -344,7 +344,7 @@ def main():
 
         repos = Repos.from_names(repo_names, config_path=args.config_path)
         repos.sync_all(config_path=args.config_path)
-        if args.sweep_pool or cfg_main.sweep_pool_after_sync:
+        if args.sweep or cfg_main.sweep_pool_after_sync:
             pool_sweep_safe(cfg_main, fail_if_locked=False)
         sys.exit(0)
 
@@ -914,9 +914,9 @@ def main():
         sys.exit(0)
 
     # ------------------------------------------------------------------
-    # --sweep-pool : remove orphaned pool entries
+    # --sweep : remove orphaned pool entries
     # ------------------------------------------------------------------
-    if args.sweep_pool:
+    if args.sweep:
         from .schema.repo import pool_sweep_safe
         if not pool_sweep_safe(cfg_main, fail_if_locked=True):
             sys.exit(1)

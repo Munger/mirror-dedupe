@@ -19,7 +19,7 @@ from typing import Dict, Iterable, List, Tuple
 from mirror_dedupe.lib.codenames import apt_codenames
 from mirror_dedupe.lib.html_helpers import build_url, extract_href
 from mirror_dedupe.lib.log import log
-from mirror_dedupe.schema.node import Node
+from mirror_dedupe.schema.mdnode import MDNode as Node
 
 
 class _LRUCache:

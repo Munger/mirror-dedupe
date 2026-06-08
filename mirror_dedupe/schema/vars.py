@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
-from .node import Node
+from .mdnode import MDNode as Node
 
 
 class Vars(Node):
