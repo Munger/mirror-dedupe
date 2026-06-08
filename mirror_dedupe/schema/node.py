@@ -804,6 +804,14 @@ class Node(dict):
                 f"sync() called on {path_val} without _repo_vars"
             )
 
+        # Declare this path as wanted before any I/O.  Removes it from the
+        # pre-sync stale set so _sweep_stale() does not delete a file we are
+        # about to create or confirm — regardless of whether we end up hitting
+        # the inventory fast path, re-linking from the pool, or downloading.
+        # set.discard() is GIL-atomic in CPython; no separate lock needed.
+        if rv.inv is not None:
+            rv.inv.stale_paths.discard(path_val)
+
         dest = Path(rv.repo_root) / path_val
         hash_val = self.checksum
 
