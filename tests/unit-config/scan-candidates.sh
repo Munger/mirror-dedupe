@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
-#
-# scan-candidates.sh : Local-only scanner tests for mirror-dedupe
-#
-# This script is NOT installed or shipped. It is intended for interactive
-# experimentation only.
-#
-# Usage:
-#   bash tests/unit-config/scan-candidates.sh --outdir <dir> [--config <path>]
-#
-# The --outdir argument specifies a directory for output. When --config is
-# omitted, a minimal mirror-dedupe.conf is generated at <outdir>/.  The
-# script runs --scan for each YAML candidate under scan_candidates/,
-# writing results to <outdir>/<name>.conf.
-#
-# No repos, pool, or data directories are needed — scanning is purely
-# in-memory HTTP discovery.
-#
+## @file scan-candidates.sh
+##
+## @brief Run mirror-dedupe --scan against all YAML candidates in scan_candidates/.
+##
+## Iterates every YAML file under tests/unit-config/scan_candidates/, converts
+## each to CLI arguments via a small Python snippet, and calls
+## ``mirror-dedupe --scan`` to perform live HTTP discovery against the upstream
+## URL defined in the YAML.  Results are written to ``<outdir>/<name>.conf``
+## and ``<outdir>/<name>.json``.
+##
+## This script is NOT installed or shipped.  It is intended for interactive
+## testing of the scanner against real upstream repositories.  No repos,
+## pool, or data directories are needed — scanning is purely in-memory HTTP
+## discovery.
+##
+## Usage:
+##   bash tests/unit-config/scan-candidates.sh --outdir <dir> [--config <path>]
+##
+## Options:
+##   --outdir <dir>    Output directory for scan results (created if absent).
+##   --config <path>   Path to mirror-dedupe.conf.  If omitted a minimal
+##                     config is generated at <outdir>/mirror-dedupe.conf.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 set -uo pipefail
 
 trap 'echo "" >&2; echo "Aborted by user." >&2; exit 130' INT

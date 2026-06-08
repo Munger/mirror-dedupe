@@ -45,35 +45,75 @@ class AptIndex(Schema.Index):
 
         kind = self.get("kind")
         if kind not in ("packages", "sources"):
-            self.packages = Packages()
             return iter([])
 
         dest = self._dest
         uri = self.get("uri", "")
         base = uri.split("/dists/", 1)[0] if "/dists/" in uri else ""
-        packages = Packages()
 
-        stanza_lines: List[str] = []
-        for line in self._iter_lines(data):
-            if not line and stanza_lines:
-                stanza: Dict[str, str] = {}
+        def _generate():
+            ## @brief True generator: yield one Package per parsed stanza.
+            ##
+            ## Packages are yielded as each stanza is parsed so the
+            ## coordinator receives them one at a time rather than receiving
+            ## all packages from this index in a single burst.  The
+            ## pre-built ``packages`` list and ``self.packages`` assignment
+            ## are gone — stats are accumulated by ``SyncStats`` in
+            ## ``Node.sync()`` and stale paths are discarded there too, so
+            ## nothing needs to walk a retained package list after streaming.
+            ##
+            ## @yield Package child nodes.
+            stanza_lines: List[str] = []
+            for line in self._iter_lines(data):
+                if not line and stanza_lines:
+                    stanza: Dict[str, str] = {}
+                    for sl in stanza_lines:
+                        if sl and sl[0] in (" ", "\t"):
+                            continue
+                        if ":" in sl:
+                            k, v = sl.split(":", 1)
+                            stanza[k.strip()] = v.strip()
+
+                    filename = stanza.get("Filename")
+                    sha256_val = stanza.get("SHA256")
+                    size_str = stanza.get("Size")
+
+                    if filename and sha256_val and size_str:
+                        try:
+                            size_int = int(size_str)
+                        except ValueError:
+                            stanza_lines = []
+                            continue
+                        pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
+                        pkg_path = f"{dest}/{filename}" if dest else filename
+                        pkg = Package(
+                            path=pkg_path,
+                            hash=sha256_val,
+                            size=size_int,
+                            uri=pkg_uri,
+                        )
+                        pkg._repo_vars = self._repo_vars
+                        yield pkg
+                    stanza_lines = []
+                elif line:
+                    stanza_lines.append(line)
+
+            if stanza_lines:
+                stanza = {}
                 for sl in stanza_lines:
                     if sl and sl[0] in (" ", "\t"):
                         continue
                     if ":" in sl:
                         k, v = sl.split(":", 1)
                         stanza[k.strip()] = v.strip()
-
                 filename = stanza.get("Filename")
                 sha256_val = stanza.get("SHA256")
                 size_str = stanza.get("Size")
-
                 if filename and sha256_val and size_str:
                     try:
                         size_int = int(size_str)
                     except ValueError:
-                        stanza_lines = []
-                        continue
+                        return
                     pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
                     pkg_path = f"{dest}/{filename}" if dest else filename
                     pkg = Package(
@@ -83,38 +123,6 @@ class AptIndex(Schema.Index):
                         uri=pkg_uri,
                     )
                     pkg._repo_vars = self._repo_vars
-                    packages.append(pkg)
-                stanza_lines = []
-            elif line:
-                stanza_lines.append(line)
+                    yield pkg
 
-        if stanza_lines:
-            stanza = {}
-            for sl in stanza_lines:
-                if sl and sl[0] in (" ", "\t"):
-                    continue
-                if ":" in sl:
-                    k, v = sl.split(":", 1)
-                    stanza[k.strip()] = v.strip()
-            filename = stanza.get("Filename")
-            sha256_val = stanza.get("SHA256")
-            size_str = stanza.get("Size")
-            if filename and sha256_val and size_str:
-                try:
-                    size_int = int(size_str)
-                except ValueError:
-                    pass
-                else:
-                    pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
-                    pkg_path = f"{dest}/{filename}" if dest else filename
-                    pkg = Package(
-                        path=pkg_path,
-                        hash=sha256_val,
-                        size=size_int,
-                        uri=pkg_uri,
-                    )
-                    pkg._repo_vars = self._repo_vars
-                    packages.append(pkg)
-
-        self.packages = packages
-        return iter(packages)
+        return _generate()

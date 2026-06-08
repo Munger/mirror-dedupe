@@ -815,20 +815,43 @@ class Node(dict):
         dest = Path(rv.repo_root) / path_val
         hash_val = self.checksum
 
+        def _record(*, hit: int = 0, miss: int = 0, bytes_tx: int = 0) -> None:
+            ## @brief Forward one sync outcome to the repo-level SyncStats.
+            ##
+            ## The node no longer carries a per-node stats dict — outcomes
+            ## go directly to the shared accumulator on RepoVars so the
+            ## coordinator's post-sync tree walk is eliminated.  Called at
+            ## every return point in sync(); closes over ``rv``, ``self``,
+            ## and ``hash_val`` (read at call time, so phase-3 updates to
+            ## hash_val are reflected correctly).
+            ##
+            ## @param hit      1 if served from pool, else 0.
+            ## @param miss     1 if downloaded, else 0.
+            ## @param bytes_tx Bytes transferred.
+            ## @return None
+            if rv.stats is not None:
+                rv.stats.record(
+                    hit=hit,
+                    miss=miss,
+                    bytes_tx=bytes_tx,
+                    size=self.get("size", 0) or 0,
+                    hash_val=hash_val,
+                )
+
         # ---------------------------------------------------------
         # Phase 1 — Inventory fast path (no disk beyond link)
         # ---------------------------------------------------------
         if hash_val:
             _inv_has = rv.inv is not None and rv.inv.has(hash_val)
             if _inv_has and dest.exists():
-                self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                _record(hit=1)
                 log(f"  {'Unchanged':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                 return [dest]
 
             if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
                 pool_path = _pool_path(rv.pool_root, hash_val)
                 _sync_link(pool_path, dest, rv, hash_val)
-                self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                _record(hit=1)
                 label = 'Linked*' if _inv_has else 'Linked'
                 log(f"  {label:<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                 return [dest]
@@ -850,14 +873,14 @@ class Node(dict):
                     # Recheck inventories after lock (another thread may have raced)
                     _inv_has = rv.inv is not None and rv.inv.has(hash_val)
                     if _inv_has and dest.exists():
-                        self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                        _record(hit=1)
                         log(f"  {'Unchanged':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                         return [dest]
 
                     if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
                         pool_path = _pool_path(rv.pool_root, hash_val)
                         _sync_link(pool_path, dest, rv, hash_val)
-                        self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                        _record(hit=1)
                         label = 'Linked*' if _inv_has else 'Linked'
                         log(f"  {label:<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                         return [dest]
@@ -872,12 +895,12 @@ class Node(dict):
                             # Already correctly linked — update repo inventory
                             if rv.inv is not None:
                                 rv.inv.add(hash_val, dest.stat().st_ino)
-                            self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                            _record(hit=1)
                             log(f"  {'Unchanged*':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                             return [dest]
                         # Stale or missing dest — fix the link
                         _sync_link(pool_path, dest, rv, hash_val)
-                        self["stats"] = {"hit": 1, "miss": 0, "bytes_tx": 0}
+                        _record(hit=1)
                         log(f"  {'Linked':<{LOG_LABEL_W}} {fmt_size(self.get('size') or 0):>7}  {path_val}")
                         return [dest]
 
@@ -901,7 +924,7 @@ class Node(dict):
                 self["size"] = sz
                 if rv.pool_inv is not None:
                     rv.pool_inv.add(hash_val, ino)
-                self["stats"] = {"hit": 0, "miss": 1, "bytes_tx": sz}
+                _record(miss=1, bytes_tx=sz)
                 log(f"  {'Downloaded':<{LOG_LABEL_W}} {fmt_size(sz):>7}  {path_val}")
                 return [dest]
             finally:
