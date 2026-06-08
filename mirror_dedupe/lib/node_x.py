@@ -113,8 +113,8 @@ class Node(dict):
         reserved: set[str] = set()
 
         for base in cls.mro():
-            for name, value in getattr(base, "__dict__", {}).items():
-                if not name.startswith("_") and not isinstance(value, property):
+            for name in getattr(base, "__dict__", {}):
+                if not name.startswith("_"):
                     reserved.add(name)
 
             for name in getattr(base, "__annotations__", {}).keys():
@@ -228,13 +228,18 @@ class Node(dict):
     def __setitem__(self, key: Any, value: Any) -> None:
         ## @brief Validate value, check frozen, then store under lock.
         ##
-        ## @param key    The payload key (must not be in ``_reserved``).
+        ## @param key    The payload key.  Keys that are method or class
+        ##               variable names (non-property ``_reserved`` entries)
+        ##               are rejected; property-backed keys are allowed since
+        ##               the property reads directly from the dict.
         ## @param value  The value to store (validated by
         ##               ``_validate_value``).
         ## @return None
-        ## @raise KeyError  If *key* is in ``_reserved``.
+        ## @raise KeyError  If *key* is a reserved non-property name.
 
-        if key in type(self)._reserved:
+        if key in type(self)._reserved and not isinstance(
+            getattr(type(self), key, None), property
+        ):
             raise KeyError(
                 f"Cannot set reserved attribute {key!r} in Node payload."
             )
@@ -430,17 +435,13 @@ class Node(dict):
             recurse(val)
 
     def merge(
-        self, other: Dict[str, Any] | Node, *, extend_lists: bool = False
+        self, other: Dict[str, Any] | Node
     ) -> Node:
         ## @brief Merge another mapping or Node into this one recursively.
         ##
-        ## Node fields are merged recursively, plain dicts are merged
-        ## shallowly, lists are overwritten (or extended when
-        ## ``extend_lists`` is ``True``), and scalars are overwritten.
+        ## Node fields are merged recursively; scalars are overwritten.
         ##
-        ## @param other         The mapping to merge from.
-        ## @param extend_lists  Whether to extend lists instead of
-        ##                      overwriting.
+        ## @param other  The mapping to merge from.
         ## @return This node (for chaining).
         ## @raise TypeError  If *other* is not a mapping.
 
@@ -457,19 +458,8 @@ class Node(dict):
                 self._validate_value(value)
                 if key in self:
                     current = self[key]
-                    if isinstance(current, Node) and isinstance(
-                        value, (Node, dict)
-                    ):
-                        current.merge(value, extend_lists=extend_lists)
-                    elif isinstance(current, dict) and isinstance(value, dict):
-                        for k, v in value.items():
-                            current[k] = v
-                    elif (
-                        extend_lists
-                        and isinstance(current, list)
-                        and isinstance(value, list)
-                    ):
-                        current.extend(value)
+                    if isinstance(current, Node) and isinstance(value, Node):
+                        current.merge(value)
                     else:
                         self[key] = value
                 else:
@@ -742,7 +732,7 @@ class StreamMixin:
         ## raw bytes in scan mode; in sync mode it is ``None`` and
         ## the implementation reads from disk.
         ##
-        ## The default implementation returns an empty iterator.
+        ## The default implementation yields nothing.
         ## Override this method to parse the node's content format
         ## and yield child nodes as they are discovered.
         ##
@@ -750,7 +740,7 @@ class StreamMixin:
         ##              sync mode (read from disk instead).
         ## @yield Child ``Node`` instances discovered from content.
 
-        return iter([])
+        yield from ()
 
 
 # ============================================================================
@@ -794,7 +784,8 @@ class Serialisable:
 
         def convert(value: Any) -> Any:
             if isinstance(value, Node):
-                return {k: convert(v) for k, v in value.items()}
+                with value._lock:
+                    return {k: convert(v) for k, v in value.items()}
             if isinstance(value, list):
                 return [convert(v) for v in value]
             if isinstance(value, dict):
@@ -965,7 +956,10 @@ class Serialisable:
             dict.__setitem__(new, k, clone_value(v))
 
         for attr, val in self.__dict__.items():
-            object.__setattr__(new, attr, val)
+            if attr == "_lock":
+                object.__setattr__(new, "_lock", threading.RLock())
+            else:
+                object.__setattr__(new, attr, val)
 
         return new
 
