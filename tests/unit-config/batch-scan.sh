@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-## @file scan-candidates.sh
+## @file batch-scan.sh
 ##
 ## @brief Run mirror-dedupe --scan against all YAML candidates in scan_candidates/.
 ##
@@ -15,7 +15,7 @@
 ## discovery.
 ##
 ## Usage:
-##   bash tests/unit-config/scan-candidates.sh --outdir <dir> [--config <path>]
+##   bash tests/unit-config/batch-scan.sh --outdir <dir> [--config <path>]
 ##
 ## Options:
 ##   --outdir <dir>    Output directory for scan results (created if absent).

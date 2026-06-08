@@ -87,7 +87,10 @@ class DistributionsParser:
                 dist._repo = self.repo
                 distributions.append(dist)
 
-            self.repo.setdefault("params", {})["discovery_method"] = "explicit"
+            p = self.repo.setdefault("params", {})
+            p["discovery_method"] = "explicit"
+            p.setdefault("log_colour", "DEFAULT")
+            p.setdefault("log_colour_bg", "NONE")
             return distributions
 
         # --- 2/3. HTML BFS + child prefix resolution --------------------
@@ -137,6 +140,8 @@ class DistributionsParser:
         else:
             params["discovery_method"] = "html_bfs"
             params["nobrowse"] = False
+        params.setdefault("log_colour", "DEFAULT")
+        params.setdefault("log_colour_bg", "NONE")
 
         # --- Build Distribution nodes -----------------------------------
 

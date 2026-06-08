@@ -13,6 +13,7 @@
 
 import sys
 import argparse
+import datetime
 from typing import List, Optional
 import json
 from pathlib import Path
@@ -219,7 +220,32 @@ def generate_config(repo: Repo, dest: str,
             entry["sync_method"] = u.sync_method
         upstream_entries.append(entry)
 
+    from .lib import fmt_date
+
+    scan_parts = ["mirror-dedupe", "--scan"]
+    scan_parts.append(f"--name {name}")
+    if dest != name:
+        scan_parts.append(f"--dest {dest}")
+    for u in repo.upstreams:
+        scan_parts.append(f"-U {u.url}")
+    if gpg_key_url:
+        scan_parts.append(f"--gpg-key-url {gpg_key_url}")
+    if dist_overrides:
+        for d in dist_overrides:
+            scan_parts.append(f"--release {d}")
+    if arch_override:
+        for a in arch_override:
+            scan_parts.append(f"--arch {a}")
+    if component_override:
+        scan_parts.append(f"--components {' '.join(component_override)}")
+    if collapse_dists is True:
+        scan_parts.append("--collapse-dists")
+    elif collapse_dists is False:
+        scan_parts.append("--no-collapse-dists")
+    scan_cmd = " ".join(scan_parts)
+
     config_lines = [
+        f"# Generated {fmt_date()} by '{scan_cmd}'",
         f"# {name} repository",
         "",
         f"name: {name}",
@@ -261,13 +287,15 @@ def generate_config(repo: Repo, dest: str,
         config_lines.append("expand_distributions: false")
 
     config_lines.append("params:")
-    params = repo.get("params")
-    if params:
-        method = params.get("discovery_method", "html_bfs")
-        config_lines.append(f"  discovery_method: {method}")
-        nobrowse = params.get("nobrowse", False)
-        if nobrowse:
-            config_lines.append("  nobrowse: true")
+    params = repo.get("params") or {}
+    method = params.get("discovery_method", "html_bfs")
+    config_lines.append(f"  discovery_method: {method}")
+    nobrowse = params.get("nobrowse", False)
+    if nobrowse:
+        config_lines.append("  nobrowse: true")
+    config_lines.append(f"  log_colour: {params.get('log_colour', 'DEFAULT')}")
+    config_lines.append(f"  log_colour_bg: {params.get('log_colour_bg', 'NONE')}")
+    config_lines.append(f"  # parallel_downloads: N  # per-repo override; inherits global value if omitted")
 
     config_lines.append("")
 

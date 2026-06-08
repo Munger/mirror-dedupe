@@ -11,11 +11,54 @@
 
 from __future__ import annotations
 
-from datetime import datetime as _datetime
+from datetime import datetime as _datetime, timezone as _timezone
 
 ## @brief Column width for sync status labels (Downloaded, Unchanged, etc.).
 ## Paths start at a fixed offset regardless of label length.
 LOG_LABEL_W = 12
+
+
+def fmt_date(dt: _datetime = None) -> str:
+    ## @brief Return an ISO date string like ``"2026-06-08"``.
+    ##
+    ## If *dt* is ``None``, the current UTC date is used.
+    ##
+    ## @param dt  Optional ``datetime`` instance.
+    ## @return ISO date string.
+
+    if dt is None:
+        return _datetime.now(_timezone.utc).strftime("%Y-%m-%d")
+    return dt.strftime("%Y-%m-%d")
+
+
+def fmt_isotimestamp(dt: _datetime = None) -> str:
+    ## @brief Return an ISO-8601 timestamp like ``"2026-06-08T13:47:04.123456"``.
+    ##
+    ## If *dt* is ``None``, the current UTC time is used.
+    ## Equivalent to ``datetime.isoformat()`` but always UTC.
+    ##
+    ## @param dt  Optional ``datetime`` instance.
+    ## @return ISO-8601 timestamp string.
+
+    if dt is None:
+        dt = _datetime.now(_timezone.utc)
+    return dt.isoformat()
+
+
+def fmt_compact_ts(dt: _datetime = None) -> str:
+    ## @brief Return a compact timestamp like ``"20260608T134704"`` safe for
+    ##        directory names.
+    ##
+    ## If *dt* is ``None``, the current UTC time is used.
+    ## No colons, no spaces, no timezone — safe in filenames on all
+    ## platforms.
+    ##
+    ## @param dt  Optional ``datetime`` instance.
+    ## @return Compact timestamp string.
+
+    if dt is None:
+        dt = _datetime.now(_timezone.utc)
+    return dt.strftime("%Y%m%dT%H%M%S")
 
 
 def fmt_datetime(dt: _datetime) -> str:

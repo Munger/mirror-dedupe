@@ -416,6 +416,12 @@ class Repo(Node):
         ## @return None
 
         futures: Dict[concurrent.futures.Future, Node] = {}
+        # Thread-safety: _tree_iter() is unprotected, but the static tree
+        # skeleton (Release → Distribution → Suite → Index) is fully built
+        # by _build_sync_tree() before this method runs.  Worker threads
+        # only update node payloads (path, hash, size, etc.) via the
+        # protected Node.__setitem__; they never add or remove structural
+        # children, so the snapshot here is stable.
         stack = list(self._tree_iter())
         rv = self._repo_vars
 
@@ -952,8 +958,10 @@ class Repos(NodeList[Repo]):
             kill_active_subprocesses_signal_safe()
             os._exit(130)
 
+        from ..lib import fmt_isotimestamp
+
         self.session_start = datetime.now(timezone.utc)
-        self.session_ts = self.session_start.isoformat()
+        self.session_ts = fmt_isotimestamp(self.session_start)
         original_sigint = signal.signal(signal.SIGINT, _sigint_handler)
         faulthandler.register(signal.SIGINFO)
 
@@ -975,6 +983,9 @@ class Repos(NodeList[Repo]):
         # Enforce repo name uniqueness — names map to directories under
         # repo_root, so duplicates would cause two workers to fight over
         # the same destination tree, stale_paths set, and inventory file.
+        # Thread-safety: these iterations over `self` (a NodeList) run in
+        # the coordinator thread before the repo_pool executor is started,
+        # so no concurrent modifications to the list are possible here.
         seen_names: set[str] = set()
         for repo in self:
             name = repo.get("name", "")
@@ -1017,6 +1028,8 @@ class Repos(NodeList[Repo]):
         # own inventory lazily from the tmpfs path file when its sync slot
         # opens (in _sync_one), so only max_concurrent_syncs inventories
         # are in memory at once rather than all of them simultaneously.
+        # Thread-safety: still in the coordinator thread; no concurrent
+        # access to `self` or any individual repo node yet.
         for repo in self:
             repo._repo_vars = RepoVars(
                 pool_inv=pool_inv,
@@ -1031,6 +1044,11 @@ class Repos(NodeList[Repo]):
                 max_workers=min(max_concurrent, len(self)),
                 thread_name_prefix="sync",
             ) as repo_pool:
+                # Thread-safety: `self` is iterated here in the coordinator
+                # thread only — workers receive individual repo references and
+                # never modify the Repos NodeList.  Each repo is dispatched to
+                # exactly one worker, so there is no concurrent access to any
+                # individual Repo node until its worker starts.
                 futures = {}
                 for repo in self:
                     name = repo.get("name", "unknown")
@@ -1125,6 +1143,10 @@ class Repos(NodeList[Repo]):
 
         with RepoLock(cfg.repo_root, name):
             log(f"Syncing repo '{name}' to '{repo.get('dest', '')}'", level="INFO")
+            # Thread-safety: each repo is processed by exactly one worker
+            # thread (_sync_one is never submitted twice for the same repo),
+            # so this read-modify-write on repo["params"] is safe without an
+            # explicit lock.
             config = repo.get("params")
             if config is None:
                 config = {}
@@ -1159,10 +1181,12 @@ class Repos(NodeList[Repo]):
         stats_dir.mkdir(parents=True, exist_ok=True)
         stats_file = stats_dir / "stats.ndjson"
 
+        from ..lib import fmt_isotimestamp
+
         s = repo.stats()
         record = {
             "session_ts": self.session_ts,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": fmt_isotimestamp(),
             "elapsed": round(s["elapsed"], 2),
             "file_count": s["file_count"],
             "total_bytes": s["total_bytes"],
