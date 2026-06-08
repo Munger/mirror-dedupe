@@ -16,10 +16,78 @@
 ##     Serialisable            — snapshot/restore/clone mixin
 ##     SerialisableNodeList    — NodeList + snapshot/restore
 ##     NodeTransaction         — ordered multi-node lock acquisition
+##     ReadWriteMixin          — opt-in readers-writer lock for safe iteration
 ##
-## All mutation operations on ``Node`` and ``NodeList`` are protected by
-## a per-instance ``threading.RLock``.  Nested acquisition (e.g. a method
-## on a child called from a method on the parent) is safe.
+## Thread-safety contract
+## ======================
+##
+## Protected without caller synchronisation
+## -----------------------------------------
+## All Node payload mutations — ``__setitem__``, ``__delitem__``,
+## ``update``, ``pop``, ``clear``, ``popitem``, ``merge``, ``freeze``,
+## ``thaw`` — acquire the per-instance ``RLock`` before modifying
+## state.  The same applies to all ``NodeList`` mutations (``append``,
+## ``extend``, ``insert``, ``pop``, ``remove``, ``clear``, ``reverse``,
+## ``sort``, ``__setitem__``, ``__delitem__``, ``freeze``, ``thaw``) and
+## to the ``Serialisable.to_plain()`` / ``snapshot()`` /
+## ``to_pretty_json()`` family.  Subclasses inherit this protection
+## automatically for any fields written via normal attribute or item
+## assignment.
+##
+## Not protected — callers must synchronise explicitly
+## ----------------------------------------------------
+## **Reads** — ``node["key"]``, ``node.key``, ``node.get()``,
+## ``node.items()``, and iterating a ``NodeList`` are not protected.
+## In CPython the GIL makes isolated reads practically safe, but a
+## read-modify-write sequence is not atomic::
+##
+##     # NOT safe under concurrent writes — use node.lock explicitly:
+##     v = node["counter"]
+##     node["counter"] = v + 1
+##
+## Subclasses that need safe iteration can opt into ``ReadWriteMixin``,
+## which makes writers block transparently while a ``reading()`` context
+## is active — no special handling required in writer code::
+##
+##     with node.reading():
+##         for k, v in node.items():   # writers block until here exits
+##             ...
+##
+## **Tree walks** — ``_tree_iter()`` and ``_walk_child_nodes()``
+## acquire no locks.  Concurrent structural modifications (adding or
+## removing children) can produce torn results.  See the ``@warning``
+## on each method.
+##
+## **Cross-node operations** — reading from one node and writing to
+## another is not atomic.  Use ``NodeTransaction`` to acquire all
+## relevant locks in a stable, deadlock-free order::
+##
+##     with NodeTransaction(node_a, node_b):
+##         val = node_a["x"]        # read
+##         node_b["y"] = val        # write
+##
+## Read-modify-write atomicity
+## ----------------------------
+## Hold ``node.lock`` explicitly for any pattern of the form::
+##
+##     with node.lock:
+##         v = node["counter"]      # read
+##         node["counter"] = v + 1  # write
+##
+## ``NodeTransaction`` acquires locks in ``id()``-sorted order and
+## therefore avoids ABBA deadlock between concurrent acquisitions on
+## different node pairs.
+##
+## freeze() / thaw() / merge() deadlock safety
+## ---------------------------------------------
+## All three recursive operations use the same snapshot-then-release
+## strategy: direct writes to ``self`` are performed under
+## ``self._lock``; child nodes to recurse into are collected while the
+## lock is held and then processed after it is released.  No two locks
+## are ever held simultaneously, so ABBA deadlock cannot occur
+## regardless of tree depth or concurrent access patterns.  These
+## operations are safe to call from any thread without extra
+## coordination.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -29,6 +97,7 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
 from typing import (
     Any,
     Callable,
@@ -36,6 +105,7 @@ from typing import (
     Dict,
     Generic,
     Iterable,
+    Iterator,
     List,
     Optional,
     Tuple,
@@ -44,6 +114,60 @@ from typing import (
 )
 
 T = TypeVar("T", bound="Node")
+
+
+# ============================================================================
+# _RWLock  (internal)
+# ============================================================================
+
+
+class _RWLock:
+    ## @brief Readers-writer lock used internally by ``ReadWriteMixin``.
+    ##
+    ## Multiple concurrent readers are allowed simultaneously.  A writer
+    ## blocks until every active reader has exited.  The write side is
+    ## re-entrant for the same thread so that methods which call other
+    ## mutating methods internally (e.g. ``merge()`` calling
+    ## ``__setitem__``) do not self-deadlock.
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition(threading.Lock())
+        self._readers: int = 0
+        self._writing: bool = False
+        self._write_thread: Optional[threading.Thread] = None
+        self._write_depth: int = 0
+
+    def acquire_read(self) -> None:
+        with self._cond:
+            while self._writing and self._write_thread is not threading.current_thread():
+                self._cond.wait()
+            self._readers += 1
+
+    def release_read(self) -> None:
+        with self._cond:
+            self._readers -= 1
+            if self._readers == 0:
+                self._cond.notify_all()
+
+    def acquire_write(self) -> None:
+        current = threading.current_thread()
+        with self._cond:
+            if self._write_thread is current:
+                self._write_depth += 1
+                return
+            while self._readers > 0 or self._writing:
+                self._cond.wait()
+            self._writing = True
+            self._write_thread = current
+            self._write_depth = 1
+
+    def release_write(self) -> None:
+        with self._cond:
+            self._write_depth -= 1
+            if self._write_depth == 0:
+                self._writing = False
+                self._write_thread = None
+                self._cond.notify_all()
 
 
 # ============================================================================
@@ -164,7 +288,7 @@ class Node(dict):
         ## @raise TypeError  If ``_frozen`` is ``True``.
         ## @return None
 
-        if getattr(self, "_frozen", False):
+        if self._frozen:
             raise TypeError(
                 f"{type(self).__name__} is frozen and cannot be modified."
             )
@@ -176,6 +300,20 @@ class Node(dict):
 
         with self._lock:
             return func()
+
+    @contextmanager
+    def _write_guard(self) -> Iterator[None]:
+        ## @brief Context manager acquired before every mutation.
+        ##
+        ## The base implementation is a no-op; ``ReadWriteMixin``
+        ## overrides it to block writers while a ``reading()`` context
+        ## is active.  All mutation methods acquire ``_write_guard``
+        ## *before* ``_lock`` to preserve a consistent lock ordering and
+        ## prevent deadlock.
+        ##
+        ## @return Context manager yielding ``None``.
+
+        yield
 
     @property
     def lock(self) -> threading.RLock:
@@ -213,6 +351,9 @@ class Node(dict):
         ## payload keys through ``__setitem__`` after acquiring the lock
         ## and checking the frozen flag.
         ##
+        ## ``_write_guard`` is acquired before ``_lock`` to maintain the
+        ## consistent lock ordering required by ``ReadWriteMixin``.
+        ##
         ## @param name   The attribute name.
         ## @param value  The value to store.
         ## @return None
@@ -220,10 +361,10 @@ class Node(dict):
         if name.startswith("_") or name in type(self)._reserved:
             object.__setattr__(self, name, value)
         else:
-            def op() -> None:
-                self._check_frozen()
-                self[name] = value
-            self._with_lock(op)
+            with self._write_guard():
+                with self._lock:
+                    self._check_frozen()
+                    self[name] = value
 
     def __setitem__(self, key: Any, value: Any) -> None:
         ## @brief Validate value, check frozen, then store under lock.
@@ -244,33 +385,39 @@ class Node(dict):
                 f"Cannot set reserved attribute {key!r} in Node payload."
             )
 
-        def op() -> None:
-            self._check_frozen()
-            self._validate_value(value)
-            super(Node, self).__setitem__(key, value)
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                self._validate_value(value)
+                super(Node, self).__setitem__(key, value)
 
     def __delitem__(self, key: Any) -> None:
         ## @brief Delete a payload key after checking frozen state.
         ## @param key  The key to remove.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            super(Node, self).__delitem__(key)
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                super(Node, self).__delitem__(key)
 
     def clear(self) -> None:
         ## @brief Remove all items from the payload under lock.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            super(Node, self).clear()
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                super(Node, self).clear()
 
     def pop(self, key: Any, *args: Any) -> Any:
         ## @brief Remove and return a payload item under lock.
@@ -278,21 +425,25 @@ class Node(dict):
         ## @param args   Optional default if *key* is not found.
         ## @return The value for *key*, or the default if provided.
 
-        def op() -> Any:
-            self._check_frozen()
-            return super(Node, self).pop(key, *args)
-
-        return self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                return super(Node, self).pop(key, *args)
 
     def popitem(self) -> Any:
         ## @brief Remove and return the last-inserted payload item.
         ## @return A ``(key, value)`` tuple.
 
-        def op() -> Any:
-            self._check_frozen()
-            return super(Node, self).popitem()
-
-        return self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                return super(Node, self).popitem()
 
     def update(self, *args: Any, **kwargs: Any) -> None:
         ## @brief Merge keys into the payload, validating all values.
@@ -300,23 +451,25 @@ class Node(dict):
         ## @param kwargs  Additional key/value pairs.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            if args:
-                if len(args) > 1:
-                    raise TypeError("update expected at most 1 argument.")
-                other = args[0]
-                if hasattr(other, "items"):
-                    for v in other.values():
-                        self._validate_value(v)
-                else:
-                    for _, v in other:
-                        self._validate_value(v)
-            for v in kwargs.values():
-                self._validate_value(v)
-            super(Node, self).update(*args, **kwargs)
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                if args:
+                    if len(args) > 1:
+                        raise TypeError("update expected at most 1 argument.")
+                    other = args[0]
+                    if hasattr(other, "items"):
+                        for v in other.values():
+                            self._validate_value(v)
+                    else:
+                        for _, v in other:
+                            self._validate_value(v)
+                for v in kwargs.values():
+                    self._validate_value(v)
+                super(Node, self).update(*args, **kwargs)
 
     def _validate_value(self, value: Any) -> None:
         ## @brief Ensure *value* is safe to store in a Node payload.
@@ -327,11 +480,20 @@ class Node(dict):
         ## Raw ``list`` and ``dict`` are rejected — use ``NodeList``
         ## or a ``Node`` subclass respectively.
         ##
+        ## Scalars are checked first as they are the most common payload
+        ## type.  Error cases (plain list, plain dict) are last.
+        ##
         ## @param value  The value to check.
         ## @return None
         ## @raise TypeError  If *value* is a plain list or dict.
 
+        if value is None or isinstance(value, (str, int, float, bool, bytes)):
+            return
         if isinstance(value, (Node, NodeList)):
+            return
+        if isinstance(value, tuple):
+            for item in value:
+                self._validate_value(item)
             return
         if isinstance(value, list):
             raise TypeError(
@@ -341,12 +503,6 @@ class Node(dict):
             raise TypeError(
                 "Node cannot contain raw dicts. Wrap in a Node subclass."
             )
-        if value is None or isinstance(value, (str, int, float, bool, bytes)):
-            return
-        if isinstance(value, tuple):
-            for item in value:
-                self._validate_value(item)
-            return
         raise TypeError(
             f"Node cannot safely contain {type(value).__name__}."
         )
@@ -354,36 +510,57 @@ class Node(dict):
     def freeze(self, *, deep: bool = True) -> None:
         ## @brief Mark this node (and optionally its subtree) as frozen.
         ##
-        ## When *deep* is ``True``, recurses into ``_walk_child_nodes``
-        ## to freeze every descendant Node and NodeList.
+        ## When *deep* is ``True``, every descendant Node and NodeList is
+        ## also frozen.  The implementation snapshots the immediate payload
+        ## under ``self._lock``, then releases the lock before recursing
+        ## into children.  Because ``self`` is frozen at snapshot time no
+        ## new children can be written after the snapshot, so two locks are
+        ## never held simultaneously and ABBA deadlock cannot occur.
         ##
         ## @param deep  Whether to recursively freeze children.
         ## @return None
 
-        def op() -> None:
+        with self._lock:
             object.__setattr__(self, "_frozen", True)
-            if deep:
-                self._walk_child_nodes(
-                    lambda n: n.freeze(deep=True),
-                    lambda lst: lst.freeze(deep=False),
-                )
+            if not deep:
+                return
+            payload = list(self.values())
 
-        self._with_lock(op)
+        def _freeze(value: Any) -> None:
+            if isinstance(value, (Node, NodeList)):
+                value.freeze(deep=True)
+            elif isinstance(value, tuple):
+                for item in value:
+                    _freeze(item)
+
+        for val in payload:
+            _freeze(val)
 
     def thaw(self, *, deep: bool = True) -> None:
         ## @brief Restore mutability on this node (and optionally subtree).
+        ##
+        ## Uses the same snapshot-then-release pattern as ``freeze()``:
+        ## the payload is snapshotted under ``self._lock``, the lock is
+        ## released, then children are thawed without any parent lock held.
+        ##
         ## @param deep  Whether to recursively thaw children.
         ## @return None
 
-        def op() -> None:
+        with self._lock:
             object.__setattr__(self, "_frozen", False)
-            if deep:
-                self._walk_child_nodes(
-                    lambda n: n.thaw(deep=True),
-                    lambda lst: lst.thaw(deep=False),
-                )
+            if not deep:
+                return
+            payload = list(self.values())
 
-        self._with_lock(op)
+        def _thaw(value: Any) -> None:
+            if isinstance(value, (Node, NodeList)):
+                value.thaw(deep=True)
+            elif isinstance(value, tuple):
+                for item in value:
+                    _thaw(item)
+
+        for val in payload:
+            _thaw(val)
 
     def _walk_child_nodes(
         self,
@@ -415,6 +592,9 @@ class Node(dict):
         ## @param list_func  Optional callable applied to each descendant
         ##                   ``NodeList``.
         ## @return None
+        ## @warning Not thread-safe for the same reasons as
+        ##          ``_tree_iter()``.  Confine calls to a single thread
+        ##          or freeze the tree before invoking.
 
         def recurse(value: Any) -> None:
             if isinstance(value, Node):
@@ -440,39 +620,60 @@ class Node(dict):
         ## @brief Merge another mapping or Node into this one recursively.
         ##
         ## Node fields are merged recursively; scalars are overwritten.
+        ## Uses the same snapshot-then-release strategy as ``freeze()``:
+        ## scalar and NodeList writes are performed atomically under
+        ## ``self._lock``, Node-into-Node sub-merges are collected while
+        ## the lock is held and then executed after it is released, so
+        ## no two locks are ever held simultaneously and ABBA deadlock
+        ## cannot occur.
         ##
         ## @param other  The mapping to merge from.
         ## @return This node (for chaining).
         ## @raise TypeError  If *other* is not a mapping.
 
-        def op() -> Node:
-            self._check_frozen()
-            try:
-                items = other.items()
-            except AttributeError as exc:
-                raise TypeError(
-                    f"Node.merge() expected a mapping, got {type(other)!r}."
-                ) from exc
+        try:
+            incoming = list(other.items())
+        except AttributeError as exc:
+            raise TypeError(
+                f"Node.merge() expected a mapping, got {type(other)!r}."
+            ) from exc
 
-            for key, value in items:
-                self._validate_value(value)
-                if key in self:
-                    current = self[key]
-                    if isinstance(current, Node) and isinstance(value, Node):
-                        current.merge(value)
+        deferred: List[tuple[Node, Node]] = []
+
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                for key, value in incoming:
+                    self._validate_value(value)
+                    if key in self:
+                        current = self[key]
+                        if isinstance(current, Node) and isinstance(value, Node):
+                            deferred.append((current, value))
+                        else:
+                            self[key] = value
                     else:
                         self[key] = value
-                else:
-                    self[key] = value
-            return self
 
-        return self._with_lock(op)
+        for current, value in deferred:
+            current.merge(value)
+
+        return self
 
     def _tree_iter(self) -> Iterable[Node]:
         ## @brief Depth-first generator over this node and its children.
         ##
         ## Walks all attributes named in ``_children`` recursively.
         ## Each node (including self) is yielded exactly once.
+        ##
+        ## @warning Not thread-safe.  No locks are acquired during
+        ##          traversal.  Concurrent structural modifications
+        ##          (adding or removing items from ``_children`` lists
+        ##          or reassigning child attributes) can cause nodes to
+        ##          be skipped or visited twice.  Confine tree walks to
+        ##          a single thread, or freeze the tree first.
         ##
         ## @yield ``Node`` instances in depth-first order.
 
@@ -517,7 +718,7 @@ class NodeList(list, Generic[T]):
         ## @brief Raise if this list has been frozen.
         ## @raise TypeError  If ``_frozen`` is ``True``.
 
-        if getattr(self, "_frozen", False):
+        if self._frozen:
             raise TypeError(
                 f"{type(self).__name__} is frozen and cannot be modified."
             )
@@ -530,33 +731,68 @@ class NodeList(list, Generic[T]):
         with self._lock:
             return func()
 
+    @contextmanager
+    def _write_guard(self) -> Iterator[None]:
+        ## @brief Context manager acquired before every mutation.
+        ##
+        ## The base implementation is a no-op; ``ReadWriteMixin``
+        ## overrides it to block writers while a ``reading()`` context
+        ## is active.  All mutation methods acquire ``_write_guard``
+        ## *before* ``_lock`` to preserve a consistent lock ordering.
+        ##
+        ## @return Context manager yielding ``None``.
+
+        yield
+
+    @property
+    def lock(self) -> threading.RLock:
+        ## @brief Expose the instance RLock for external callers.
+        ##
+        ## Mirrors the same property on ``Node``.  Used by
+        ## ``NodeTransaction`` and callers that need to hold the lock
+        ## across multiple operations.
+        ##
+        ## @return The per-instance ``threading.RLock``.
+
+        return self._lock
+
     def freeze(self, *, deep: bool = True) -> None:
         ## @brief Mark this list (and optionally its children) as frozen.
+        ##
+        ## Snapshots the list contents under ``self._lock``, releases the
+        ## lock, then recurses into child Nodes — matching the deadlock-free
+        ## pattern used by ``Node.freeze()``.
+        ##
         ## @param deep  Whether to recursively freeze child Nodes.
         ## @return None
 
-        def op() -> None:
+        with self._lock:
             object.__setattr__(self, "_frozen", True)
-            if deep:
-                for item in self:
-                    if isinstance(item, Node):
-                        item.freeze(deep=True)
+            if not deep:
+                return
+            items = list(self)
 
-        self._with_lock(op)
+        for item in items:
+            if isinstance(item, Node):
+                item.freeze(deep=True)
 
     def thaw(self, *, deep: bool = True) -> None:
         ## @brief Restore mutability on this list (and optionally children).
+        ##
+        ## Uses the same snapshot-then-release pattern as ``freeze()``.
+        ##
         ## @param deep  Whether to recursively thaw child Nodes.
         ## @return None
 
-        def op() -> None:
+        with self._lock:
             object.__setattr__(self, "_frozen", False)
-            if deep:
-                for item in self:
-                    if isinstance(item, Node):
-                        item.thaw(deep=True)
+            if not deep:
+                return
+            items = list(self)
 
-        self._with_lock(op)
+        for item in items:
+            if isinstance(item, Node):
+                item.thaw(deep=True)
 
     def append(self, __object: T) -> None:
         ## @brief Append a Node to this list under lock.
@@ -564,32 +800,36 @@ class NodeList(list, Generic[T]):
         ## @return None
         ## @raise TypeError  If *__object* is not a ``Node``.
 
-        def op() -> None:
-            self._check_frozen()
-            if not isinstance(__object, Node):
-                raise TypeError(
-                    f"{type(self).__name__} only accepts Node elements."
-                )
-            super(NodeList, self).append(__object)
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                if not isinstance(__object, Node):
+                    raise TypeError(
+                        f"{type(self).__name__} only accepts Node elements."
+                    )
+                super(NodeList, self).append(__object)
 
     def extend(self, __iterable: Iterable[T]) -> None:
         ## @brief Extend this list with Nodes from an iterable.
         ## @param __iterable  Iterable of Node instances.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            items = list(__iterable)
-            for item in items:
-                if not isinstance(item, Node):
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
                     raise TypeError(
-                        f"{type(self).__name__} only accepts Node elements."
+                        f"{type(self).__name__} is frozen and cannot be modified."
                     )
-            super(NodeList, self).extend(items)
-
-        self._with_lock(op)
+                items = list(__iterable)
+                for item in items:
+                    if not isinstance(item, Node):
+                        raise TypeError(
+                            f"{type(self).__name__} only accepts Node elements."
+                        )
+                super(NodeList, self).extend(items)
 
     def insert(self, __index: int, __object: T) -> None:
         ## @brief Insert a Node at a given index under lock.
@@ -597,68 +837,80 @@ class NodeList(list, Generic[T]):
         ## @param __object  The Node instance to insert.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            if not isinstance(__object, Node):
-                raise TypeError(
-                    f"{type(self).__name__} only accepts Node elements."
-                )
-            super(NodeList, self).insert(__index, __object)
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                if not isinstance(__object, Node):
+                    raise TypeError(
+                        f"{type(self).__name__} only accepts Node elements."
+                    )
+                super(NodeList, self).insert(__index, __object)
 
     def pop(self, __index: int = -1) -> T:
         ## @brief Remove and return the Node at *__index* under lock.
         ## @param __index  The index to pop (default -1, last element).
         ## @return The removed Node instance.
 
-        def op() -> T:
-            self._check_frozen()
-            return super(NodeList, self).pop(__index)
-
-        return self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                return super(NodeList, self).pop(__index)
 
     def remove(self, __value: T) -> None:
         ## @brief Remove the first occurrence of *__value* under lock.
         ## @param __value  The Node instance to remove.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            super(NodeList, self).remove(__value)
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                super(NodeList, self).remove(__value)
 
     def clear(self) -> None:
         ## @brief Remove all elements under lock.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            super(NodeList, self).clear()
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                super(NodeList, self).clear()
 
     def reverse(self) -> None:
         ## @brief Reverse this list in place under lock.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            super(NodeList, self).reverse()
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                super(NodeList, self).reverse()
 
     def sort(self, **kwargs: Any) -> None:
         ## @brief Sort this list in place under lock.
         ## @param kwargs  Keyword arguments forwarded to ``list.sort()``.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            super(NodeList, self).sort(**kwargs)
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                super(NodeList, self).sort(**kwargs)
 
     def __setitem__(
         self, __key: int | slice, __value: T | Iterable[T]
@@ -668,37 +920,41 @@ class NodeList(list, Generic[T]):
         ## @param __value  Node instance (or iterable for slices).
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            if isinstance(__key, slice):
-                items = list(__value)  # type: ignore[arg-type]
-                for item in items:
-                    if not isinstance(item, Node):
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                if isinstance(__key, slice):
+                    items = list(__value)  # type: ignore[arg-type]
+                    for item in items:
+                        if not isinstance(item, Node):
+                            raise TypeError(
+                                f"{type(self).__name__} only accepts "
+                                "Node elements."
+                            )
+                    super(NodeList, self).__setitem__(__key, items)
+                else:
+                    if not isinstance(__value, Node):
                         raise TypeError(
                             f"{type(self).__name__} only accepts "
                             "Node elements."
                         )
-                super(NodeList, self).__setitem__(__key, items)
-            else:
-                if not isinstance(__value, Node):
-                    raise TypeError(
-                        f"{type(self).__name__} only accepts "
-                        "Node elements."
-                    )
-                super(NodeList, self).__setitem__(__key, __value)
-
-        self._with_lock(op)
+                    super(NodeList, self).__setitem__(__key, __value)
 
     def __delitem__(self, __key: int | slice) -> None:
         ## @brief Delete element at index or slice under lock.
         ## @param __key  Index or slice.
         ## @return None
 
-        def op() -> None:
-            self._check_frozen()
-            super(NodeList, self).__delitem__(__key)
-
-        self._with_lock(op)
+        with self._write_guard():
+            with self._lock:
+                if self._frozen:
+                    raise TypeError(
+                        f"{type(self).__name__} is frozen and cannot be modified."
+                    )
+                super(NodeList, self).__delitem__(__key)
 
     def iter(self) -> Iterable[T]:
         ## @brief Iterate over the contained Node instances.
@@ -823,10 +1079,7 @@ class Serialisable:
             else:
                 scalars[key] = value
 
-        ordered: Dict[str, Any] = {}
-        ordered.update(scalars)
-        ordered.update(nested)
-        return ordered
+        return {**scalars, **nested}
 
     @classmethod
     def restore(cls, snapshot: Any) -> Any:
@@ -1003,15 +1256,14 @@ class SerialisableNodeList(NodeList[T], Generic[T]):
         ## @return A reconstructed ``SerialisableNodeList``.
 
         lst: SerialisableNodeList[T] = cls()
+        restore_func = getattr(item_type, "restore", None)
         for snap in snapshots:
             if isinstance(snap, item_type):
                 lst.append(snap)
+            elif restore_func:
+                lst.append(restore_func(snap))
             else:
-                restore_func = getattr(item_type, "restore", None)
-                if restore_func:
-                    lst.append(restore_func(snap))
-                else:
-                    lst.append(item_type(snap))
+                lst.append(item_type(snap))
         return lst
 
     def to_pretty_json(self, indent: int = 2) -> str:
@@ -1033,35 +1285,54 @@ class SerialisableNodeList(NodeList[T], Generic[T]):
 class NodeTransaction:
     ## @brief Ordered multi-node lock acquisition.
     ##
-    ## Acquires one or more ``Node`` locks in a stable order (sorted by
-    ## ``id()``) to prevent deadlock when performing cross-node
-    ## operations.  Locks are released in reverse order.
+    ## Acquires one or more ``Node`` or ``NodeList`` locks in a stable
+    ## order (sorted by ``id()``) to prevent deadlock when performing
+    ## cross-node operations.  Any object that exposes a ``lock``
+    ## property returning a ``threading.RLock`` is accepted.
+    ## Locks are released in reverse order.
     ##
     ## Usage::
     ##
     ##     with NodeTransaction(node_a, node_b, node_c):
     ##         # safe: locks held in id order
     ##         node_a["ref"] = node_b["id"]
+    ##
+    ##     with NodeTransaction(parent_node, some_nodelist):
+    ##         for item in some_nodelist:   # safe: lock held
+    ##             ...
 
-    def __init__(self, *nodes: Node) -> None:
-        ## @brief Accept one or more ``Node`` instances to manage.
+    def __init__(self, *nodes: Any) -> None:
+        ## @brief Accept one or more lockable instances to manage.
         ##
         ## Nodes are sorted by ``id()`` for deterministic ordering.
+        ## Any object with a ``.lock`` property is accepted
+        ## (``Node``, ``NodeList``, or ``ReadWriteMixin`` subclasses).
         ##
-        ## @param nodes  One or more ``Node`` instances.
+        ## @param nodes  One or more lockable instances.
 
         self._nodes = sorted(set(nodes), key=id)
 
     def __enter__(self) -> NodeTransaction:
-        ## @brief Acquire all node locks in sorted order.
+        ## @brief Acquire all locks in sorted order.
+        ##
+        ## If any acquisition raises, all previously-acquired locks are
+        ## released before the exception propagates so no locks are leaked.
+        ##
         ## @return This transaction instance.
 
-        for n in self._nodes:
-            n.lock.acquire()
+        acquired = []
+        try:
+            for n in self._nodes:
+                n.lock.acquire()
+                acquired.append(n)
+        except BaseException:
+            for n in reversed(acquired):
+                n.lock.release()
+            raise
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        ## @brief Release all node locks in reverse order.
+        ## @brief Release all locks in reverse order.
         ## @param exc_type  Exception type (unused).
         ## @param exc       Exception value (unused).
         ## @param tb        Traceback (unused).
@@ -1070,6 +1341,104 @@ class NodeTransaction:
         for n in reversed(self._nodes):
             n.lock.release()
         return False
+
+
+# ============================================================================
+# ReadWriteMixin
+# ============================================================================
+
+
+class ReadWriteMixin:
+    ## @brief Opt-in mixin that adds readers-writer lock semantics to a
+    ##        ``Node`` or ``NodeList``.
+    ##
+    ## By default, ``Node`` and ``NodeList`` protect mutations but not
+    ## reads.  This mixin adds a ``reading()`` context manager that
+    ## callers wrap iteration in.  Any mutation that arrives while one
+    ## or more readers are active blocks transparently until every
+    ## reader has exited — no special handling is required in writer
+    ## code.
+    ##
+    ## Usage::
+    ##
+    ##     class LiveList(ReadWriteMixin, NodeList[MyNode]):
+    ##         pass
+    ##
+    ##     lst = LiveList()
+    ##
+    ##     # reader (e.g. coordinator iterating):
+    ##     with lst.reading():
+    ##         for item in lst:          # writers block until here exits
+    ##             process(item)
+    ##
+    ##     # writer (e.g. worker appending) — no changes needed:
+    ##     lst.append(new_node)          # blocks if a reader is active
+    ##
+    ## The mixin is compatible with both ``Node`` and ``NodeList``.
+    ## Multiple concurrent readers are allowed; writers are serialised
+    ## and block until all readers finish.  The write lock is re-entrant
+    ## for the same thread so that methods which call other mutating
+    ## methods internally (e.g. ``merge()`` calling ``__setitem__``)
+    ## do not self-deadlock.
+    ##
+    ## Lock ordering: ``_write_guard`` (readers-writer layer) is always
+    ## acquired *before* the per-instance ``_lock`` (RLock layer).
+    ## ``reading()`` does not acquire ``_lock``, so there is no
+    ## circular dependency between the two layers.
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        ## @brief Initialise the readers-writer lock alongside the base
+        ##        ``Node`` or ``NodeList`` state.
+        ## @param args    Forwarded to the base class ``__init__``.
+        ## @param kwargs  Forwarded to the base class ``__init__``.
+        ## @return None
+
+        object.__setattr__(self, "_rw_lock", _RWLock())
+        super().__init__(*args, **kwargs)
+
+    @contextmanager
+    def reading(self) -> Iterator[None]:
+        ## @brief Context manager that marks this object as being read.
+        ##
+        ## Mutations (``__setitem__``, ``append``, etc.) block until
+        ## every active ``reading()`` context has exited.  Multiple
+        ## concurrent readers are allowed simultaneously.
+        ##
+        ## Usage::
+        ##
+        ##     with node.reading():
+        ##         for k, v in node.items():   # safe
+        ##             ...
+        ##
+        ##     with nodelist.reading():
+        ##         for item in nodelist:       # safe
+        ##             ...
+        ##
+        ## @yield Control to the caller while the read lock is held.
+
+        rw: _RWLock = object.__getattribute__(self, "_rw_lock")
+        rw.acquire_read()
+        try:
+            yield
+        finally:
+            rw.release_read()
+
+    @contextmanager
+    def _write_guard(self) -> Iterator[None]:
+        ## @brief Override of the base no-op: acquires the write lock.
+        ##
+        ## Blocks until all active ``reading()`` contexts have exited,
+        ## then yields.  Re-entrant: the same thread may acquire the
+        ## write lock multiple times without deadlocking.
+        ##
+        ## @return Context manager yielding ``None``.
+
+        rw: _RWLock = object.__getattribute__(self, "_rw_lock")
+        rw.acquire_write()
+        try:
+            yield
+        finally:
+            rw.release_write()
 
 
 # ============================================================================
@@ -1083,4 +1452,5 @@ __all__ = [
     "Serialisable",
     "SerialisableNodeList",
     "NodeTransaction",
+    "ReadWriteMixin",
 ]

@@ -83,7 +83,8 @@ def _timestamp() -> str:
     ##
     ## @return A compact timestamp string.
 
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    from .lib import fmt_compact_ts
+    return fmt_compact_ts()
 
 
 def _pin_confirm(action_desc: str, force: bool) -> bool:
