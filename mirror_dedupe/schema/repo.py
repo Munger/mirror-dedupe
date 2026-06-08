@@ -45,7 +45,7 @@ from ..schema.upstream import Upstream, Upstreams
 from ..lib.log import log
 from ..lib.http_download import kill_active_subprocesses, kill_active_subprocesses_signal_safe
 from ..inventory import Inventory
-from ..repo_vars import RepoVars
+from ..repo_vars import RepoVars, SyncStats
 
 
 class Repo(Node):
@@ -377,11 +377,11 @@ class Repo(Node):
         try:
             self._build_sync_tree(config=config)
             if pool is not None:
-                self._top_stats: Dict[str, Any] = {}
+                self._repo_vars.stats = SyncStats()
                 t0 = time.monotonic()
                 self._sync_content(pool, config=config)
-                self._top_stats["elapsed"] = time.monotonic() - t0
-                self._top_stats["removed"] = self._sweep_stale()
+                self._repo_vars.stats.elapsed = time.monotonic() - t0
+                self._repo_vars.stats.removed = self._sweep_stale()
         finally:
             self._repo_vars.sync_mode = False
 
@@ -416,7 +416,7 @@ class Repo(Node):
 
         futures: Dict[concurrent.futures.Future, Node] = {}
         stack = list(self._tree_iter())
-        errors = 0
+        rv = self._repo_vars
 
         while (stack or futures) and not _ABORT_SYNC:
             while stack and not _ABORT_SYNC:
@@ -427,16 +427,14 @@ class Repo(Node):
                 h = node.checksum
                 if (
                     h
-                    and self._repo_vars.pool_inv is not None
-                    and self._repo_vars.pool_inv.has(h)
+                    and rv.pool_inv is not None
+                    and rv.pool_inv.has(h)
                 ):
                     try:
                         node.sync(config=config)
                     except Exception as e:
-                        errors += 1
-                        if "stats" not in node:
-                            node["stats"] = {"hit": 0, "miss": 0, "bytes_tx": 0}
-                        node["stats"]["error"] = str(e)
+                        if rv.stats is not None:
+                            rv.stats.add_error()
                         log(f"  {e}")
                     for child in node.stream():
                         stack.append(child)
@@ -456,15 +454,11 @@ class Repo(Node):
                 try:
                     future.result()
                 except Exception as e:
-                    errors += 1
-                    if "stats" not in node:
-                        node["stats"] = {"hit": 0, "miss": 0, "bytes_tx": 0}
-                    node["stats"]["error"] = str(e)
+                    if rv.stats is not None:
+                        rv.stats.add_error()
                     log(f"  {e}")
                 for child in node.stream():
                     stack.append(child)
-
-        self._top_stats["errors"] = errors
 
     def _sweep_stale(self) -> int:
         ## @brief Delete pre-sync paths that were never declared as wanted.
@@ -523,53 +517,30 @@ class Repo(Node):
         return removed
 
     def stats(self) -> Dict[str, Any]:
-        ## @brief Aggregate per-node stats from the full tree into a single dict.
+        ## @brief Return the sync statistics for this repo.
         ##
-        ## Walks ``_tree_iter()`` summing leaf counter stats (hit, miss,
-        ## bytes_tx), counting files, computing total/deduped bytes from
-        ## node metadata, and merging top-level values from
-        ## ``_top_stats`` (errors, elapsed).
+        ## Reads directly from the ``SyncStats`` accumulator on
+        ## ``_repo_vars`` — updated in real time by ``Node.sync()`` during
+        ## the sync run, with ``elapsed`` and ``removed`` set by the
+        ## coordinator after the work queue drains.  No post-sync tree walk
+        ## needed; the accumulator replaces both the per-node ``node["stats"]``
+        ## dict and the old ``_top_stats`` coordinator dict.
+        ##
+        ## Returns all-zero values when called outside a sync run (e.g.
+        ## during ``--list`` or before the first sync).
         ##
         ## @return Stats dict with keys: file_count, total_bytes,
         ##         deduped_bytes, bytes_transferred, pool_hits,
-        ##         pool_misses, errors, elapsed.
+        ##         pool_misses, errors, elapsed, removed.
 
-        file_count = 0
-        total_bytes = 0
-        deduped_bytes = 0
-        bytes_transferred = 0
-        pool_hits = 0
-        pool_misses = 0
-        seen_hashes: set[str] = set()
-
-        for node in self._tree_iter():
-            s = node.get("stats")
-            if s is not None:
-                pool_hits += s.get("hit", 0)
-                pool_misses += s.get("miss", 0)
-                bytes_transferred += s.get("bytes_tx", 0)
-
-            if node.get("uri") and node.get("path"):
-                sz = node.get("size", 0) or 0
-                h = node.get("hash", "") or ""
-                file_count += 1
-                total_bytes += sz
-                if h and h not in seen_hashes:
-                    seen_hashes.add(h)
-                    deduped_bytes += sz
-
-        top = getattr(self, "_top_stats", {}) or {}
-        return {
-            "file_count": file_count,
-            "total_bytes": total_bytes,
-            "deduped_bytes": deduped_bytes,
-            "bytes_transferred": bytes_transferred,
-            "pool_hits": pool_hits,
-            "pool_misses": pool_misses,
-            "errors": top.get("errors", 0),
-            "elapsed": top.get("elapsed", 0.0),
-            "removed": top.get("removed", 0),
-        }
+        rv = self._repo_vars
+        if rv is None or rv.stats is None:
+            return {
+                "file_count": 0, "total_bytes": 0, "deduped_bytes": 0,
+                "bytes_transferred": 0, "pool_hits": 0, "pool_misses": 0,
+                "errors": 0, "elapsed": 0.0, "removed": 0,
+            }
+        return rv.stats.to_dict()
 
     @classmethod
     def from_config(cls, mirror_cfg: Dict[str, Any], cfg: "Config") -> "Repo":
@@ -782,6 +753,37 @@ def _pool_sweep(pool_root: str) -> None:
         log(f"Pool sweep: removed {removed} orphaned files (st_nlink == 1)", level="INFO")
 
 
+def _build_repo_path_files(repo_root: str, dest_names: List[str]) -> None:
+    ## @brief Run build-repo-paths.sh to write per-repo pre-sync path lists.
+    ##
+    ## Calls the bash helper which performs a single sequential find pass
+    ## over all managed repo directories and routes path+inode pairs into
+    ## per-repo files at /tmp/mirror-dedupe/<dest_name>.paths.
+    ##
+    ## Must complete before any sync worker starts so the disk scan does
+    ## not compete with concurrent hardlink and download I/O.
+    ##
+    ## @param repo_root   Root of the repository tree on disk.
+    ## @param dest_names  First-level directory names under repo_root to scan.
+    ## @return None
+
+    if not dest_names:
+        return
+
+    script = Path(__file__).resolve().parents[2] / "scripts" / "build-repo-paths.sh"
+    if not script.exists():
+        log(f"WARNING: build-repo-paths.sh not found at {script} — falling back to in-process repo scan", level="WARN")
+        return
+
+    try:
+        subprocess.run(
+            ["bash", str(script), repo_root] + dest_names,
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        log(f"WARNING: build-repo-paths.sh failed (exit {e.returncode}) — per-repo inventories will be empty", level="WARN")
+
+
 def _check_any_sync_lock(repo_root: str, repo_names: list[str]) -> str | None:
     ## @brief Check if any named repo has an active sync lock.
     ##
@@ -969,37 +971,53 @@ class Repos(NodeList[Repo]):
             )
             sys.exit(1)
 
+        # Enforce repo name uniqueness — names map to directories under
+        # repo_root, so duplicates would cause two workers to fight over
+        # the same destination tree, stale_paths set, and inventory file.
+        seen_names: set[str] = set()
+        for repo in self:
+            name = repo.get("name", "")
+            if name in seen_names:
+                log(
+                    f"ERROR: duplicate repo name '{name}' — each repo must "
+                    "have a unique name since it maps to a distinct directory "
+                    "under repo_root.",
+                    level="ERROR",
+                )
+                sys.exit(1)
+            seen_names.add(name)
+
         log("Checking inventory...", level="INFO")
         try:
             pool_inv = Inventory.from_pool(cfg.pool_root)
         except RuntimeError as e:
             sys.exit(e.args[0] if e.args else "gfind not found")
-        managed_dests: set[str] = set()
-        for repo in self:
-            dest = repo.get("dest", "")
-            if dest.startswith(cfg.repo_root.rstrip("/") + "/"):
-                managed_dests.add(dest[len(cfg.repo_root.rstrip("/")) + 1:].split("/", 1)[0])
-            else:
-                managed_dests.add(repo.get("name", ""))
-        try:
-            repo_invs = Inventory.from_repos(cfg.repo_root, pool_inv, managed_dests)
-        except RuntimeError as e:
-            sys.exit(e.args[0] if e.args else "gfind not found")
 
-        for repo in self:
+        # Determine the dest directory name for each repo.
+        # This is the first-level subdirectory under repo_root and is used
+        # as the key for per-repo path files and inventory objects.
+        def _dest_name(repo: Repo) -> str:
             dest = repo.get("dest", "")
-            if dest.startswith(cfg.repo_root.rstrip("/") + "/"):
-                dest_name = dest[len(cfg.repo_root.rstrip("/")) + 1:].split("/", 1)[0]
-            else:
-                dest_name = repo.get("name", "")
-            inv = repo_invs.get(dest_name) if repo_invs else None
-            if inv is None:
-                inv = Inventory(
-                    id=dest_name,
-                    path=str(Path(cfg.repo_root) / (dest_name or "")),
-                )
+            prefix = cfg.repo_root.rstrip("/") + "/"
+            if dest.startswith(prefix):
+                return dest[len(prefix):].split("/", 1)[0]
+            return repo.get("name", "")
+
+        managed_dests = [_dest_name(r) for r in self]
+
+        # Single find pass: build-repo-paths.sh scans all managed repo
+        # directories in one sequential sweep and writes per-repo
+        # path+inode lists to /tmp/mirror-dedupe/<dest_name>.paths.
+        # Completing this before sync workers start keeps disk access
+        # sequential and avoids competing with hardlink and download I/O.
+        _build_repo_path_files(cfg.repo_root, managed_dests)
+
+        # Assign RepoVars without per-repo inventory — each repo loads its
+        # own inventory lazily from the tmpfs path file when its sync slot
+        # opens (in _sync_one), so only max_concurrent_syncs inventories
+        # are in memory at once rather than all of them simultaneously.
+        for repo in self:
             repo._repo_vars = RepoVars(
-                inv=inv,
                 pool_inv=pool_inv,
                 repo_root=cfg.repo_root,
                 pool_root=cfg.pool_root,
@@ -1070,7 +1088,16 @@ class Repos(NodeList[Repo]):
         repo: Repo,
         cfg: "Config",
     ) -> None:
-        ## @brief Sync a single repo: metadata, packages, stats.
+        ## @brief Sync a single repo: load inventory, sync content, record stats.
+        ##
+        ## The per-repo inventory is loaded here — lazily, when this repo's
+        ## sync slot opens — rather than upfront for all repos.  This bounds
+        ## peak memory to ``max_concurrent_syncs`` inventories at once.
+        ##
+        ## ``Inventory.from_path_file()`` opens the tmpfs path file written
+        ## by ``build-repo-paths.sh``, unlinks it immediately, and builds
+        ## ``stale_paths`` plus the hash index against the already-complete
+        ## pool inventory.
         ##
         ## @param repo  The ``Repo`` instance to sync.
         ## @param cfg   Global ``Config`` singleton.
@@ -1079,6 +1106,21 @@ class Repos(NodeList[Repo]):
         threading.current_thread().name = f"{name} 0"
         params = repo.get("params") or {}
         workers = params.get("parallel_downloads", cfg.parallel_downloads)
+
+        # Determine dest_name (first-level subdir under repo_root)
+        dest = repo.get("dest", "")
+        prefix = cfg.repo_root.rstrip("/") + "/"
+        dest_name = dest[len(prefix):].split("/", 1)[0] if dest.startswith(prefix) else name
+
+        # Load this repo's pre-sync path list from tmpfs and build its
+        # inventory.  The file is unlinked on open so it cannot leak.
+        rv = repo._repo_vars
+        rv.inv = Inventory.from_path_file(
+            f"/tmp/mirror-dedupe/{dest_name}.paths",
+            rv.pool_inv,
+            dest_name,
+            cfg.repo_root,
+        )
 
         with RepoLock(cfg.repo_root, name):
             log(f"Syncing repo '{name}' to '{repo.get('dest', '')}'", level="INFO")
@@ -1129,6 +1171,7 @@ class Repos(NodeList[Repo]):
             "pool_hits": s["pool_hits"],
             "pool_misses": s["pool_misses"],
             "removed": s["removed"],
+            "peak_rss_mb": self._get_peak_rss_mb(),
         }
 
         # Deltas from previous record
@@ -1346,20 +1389,25 @@ class Repos(NodeList[Repo]):
         return widths
 
     @staticmethod
-    def _print_rss() -> None:
-        ## @brief Print peak RSS to stdout.
+    def _get_peak_rss_mb() -> int:
+        ## @brief Return peak RSS in MB, or 0 if unavailable.
         ##
-        ## macOS returns bytes, Linux returns KB.  Both are converted to MB.
+        ## macOS ``ru_maxrss`` is in bytes; Linux is in KB.
         ##
-        ## @return None
+        ## @return Peak RSS in MB as an integer.
         try:
             import resource
             rss_raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             if platform.system() == "Darwin":
-                peak_rss = rss_raw // (1024 * 1024)
-            else:
-                peak_rss = rss_raw // 1024
+                return rss_raw // (1024 * 1024)
+            return rss_raw // 1024
         except (ImportError, AttributeError):
-            return
+            return 0
+
+    @staticmethod
+    def _print_rss() -> None:
+        ## @brief Print peak RSS to stdout.
+        ## @return None
+        peak_rss = Repos._get_peak_rss_mb()
         if peak_rss:
             print(f"Peak RSS: {peak_rss}MB")

@@ -26,12 +26,12 @@
 
 from __future__ import annotations
 
-import platform
-import shutil
-import subprocess
+import os
 import threading
 from pathlib import Path
 from typing import Dict
+
+from .lib.find import find_binary, find_stream
 
 
 class Inventory:
@@ -45,7 +45,6 @@ class Inventory:
     ## the object is shared, they can write directly to the private dicts
     ## without acquiring the lock.
 
-    _find_cmd: str | None = None
 
     def __init__(self, id: str = "", path: str = "") -> None:
         ## @brief Initialise an empty inventory.
@@ -122,50 +121,86 @@ class Inventory:
             for h, ino in entries.items():
                 self._rev[ino] = h
 
-    # -- find binary ------------------------------------------------------
-
-    @classmethod
-    def _find_binary(cls) -> str:
-        ## @brief Resolve the ``find`` command, preferring GNU find.
-        ##
-        ## On macOS the BSD ``find`` lacks ``-printf``, so we require
-        ## ``gfind`` from Homebrew's ``findutils``.  On Linux the system
-        ## ``find`` is GNU find and works directly.
-        ##
-        ## The resolved path is cached on the class so that the lookup
-        ## runs only once per process.
-        ##
-        ## @return The path to the ``find`` executable.
-        ## @raise RuntimeError  If GNU ``find`` is not available.
-        if cls._find_cmd is not None:
-            return cls._find_cmd
-
-        if platform.system() == "Darwin":
-            gfind = shutil.which("gfind")
-            if gfind is None:
-                raise RuntimeError(
-                    "gfind not found.  Install with: brew install findutils"
-                )
-            cls._find_cmd = gfind
-        else:
-            cls._find_cmd = "find"
-
-        return cls._find_cmd
-
     # -- factories --------------------------------------------------------
+
+    @staticmethod
+    def from_path_file(
+        path_file: str,
+        pool_inv: "Inventory",
+        dest_name: str,
+        repo_root: str,
+    ) -> "Inventory":
+        ## @brief Build a per-repo Inventory from a pre-sync path list file.
+        ##
+        ## Called lazily from ``_sync_one()`` when a repo's sync slot opens,
+        ## not upfront for all repos.  The path file is written by
+        ## ``build-repo-paths.sh`` during the startup find pass and lives
+        ## under ``/tmp/mirror-dedupe/<dest_name>.paths``.
+        ##
+        ## The file is unlinked immediately after opening so it vanishes
+        ## even if this process subsequently crashes — the kernel keeps the
+        ## inode alive via the open file descriptor until it is closed.
+        ##
+        ## File format: null-delimited ``rel_path\0inode\0`` pairs, where
+        ## ``rel_path`` is relative to ``repo_root`` (includes the repo
+        ## prefix, e.g. ``postgresql/dists/focal/Release``).
+        ##
+        ## @param path_file   Path to the pre-sync paths file.
+        ## @param pool_inv    Complete pool inventory for inode-to-hash lookup.
+        ## @param dest_name   Repo dest directory name (used as inventory id).
+        ## @param repo_root   Root of the repository tree on disk.
+        ## @return A populated ``Inventory``.
+
+        inv = Inventory(id=dest_name, path=str(Path(repo_root) / dest_name))
+
+        try:
+            fd = os.open(path_file, os.O_RDONLY)
+        except OSError:
+            return inv  ## path file absent — empty inventory, no stale sweep
+
+        ## Unlink while the fd is still open.  The file disappears from the
+        ## directory immediately; the kernel frees the inode when the fd closes.
+        try:
+            os.unlink(path_file)
+        except OSError:
+            pass
+
+        try:
+            with os.fdopen(fd, "rb") as f:
+                data = f.read()
+        except OSError:
+            return inv
+
+        ## Parse null-delimited pairs written by build-repo-paths.sh
+        parts = data.split(b"\0")
+        for i in range(0, len(parts) - 1, 2):
+            rel = parts[i].decode()
+            ino_str = parts[i + 1].decode().strip()
+            if not rel or not ino_str:
+                continue
+            ino = int(ino_str)
+
+            ## Every path found on disk is a stale candidate until Node.sync()
+            ## discards it by declaring the path wanted.
+            inv.stale_paths.add(rel)
+
+            ## Cross-reference against pool inventory to build hash index.
+            h = pool_inv.get_hash(ino)
+            if h is not None:
+                inv._dict[h] = ino
+                inv._rev[ino] = h
+
+        return inv
 
     @staticmethod
     def from_pool(pool_root: str) -> "Inventory":
         ## @brief Build an inventory by scanning the content-addressed pool.
         ##
-        ## Uses ``find -printf`` via the resolved ``find`` binary (GNU
-        ## ``find`` on Linux, ``gfind`` on macOS).  The pool subdirectory
-        ## structure is ``by-hash/SHA256/{2-char-prefix}/{2-char-suffix}/{hash}``,
-        ## so the filename itself is the SHA-256 hash.  ``%f`` extracts the
-        ## filename (the hash) and ``%i`` the inode.
-        ##
-        ## Both forward and reverse dicts are populated from the single
-        ## ``find`` pass.
+        ## Streams ``find`` output via ``find_stream()`` so the process
+        ## never buffers more than one read chunk regardless of pool size.
+        ## The pool subdirectory structure is
+        ## ``by-hash/SHA256/{ab}/{cd}/{hash}``, so ``%f`` (filename) is
+        ## the SHA-256 hash and ``%i`` the inode.
         ##
         ## No lock is needed during construction — the inventory is not
         ## shared before this method returns.
@@ -179,23 +214,13 @@ class Inventory:
 
         inv = Inventory(id="_pool_", path=pool_root)
         try:
-            data = subprocess.check_output(
-                [
-                    Inventory._find_binary(), str(pool_dir), "-type", "f",
-                    "-printf", "%f\\0%i\\0",
-                ],
-                timeout=30,
-                stderr=subprocess.DEVNULL,
-            )
-        except (subprocess.CalledProcessError, OSError):
-            return inv
-
-        parts = data.split(b"\0")
-        for i in range(0, len(parts) - 1, 2):
-            h = parts[i].decode()
-            ino = int(parts[i + 1])
-            inv._dict[h] = ino
-            inv._rev[ino] = h
+            it = find_stream(str(pool_dir), r"%f\0%i\0")
+            for h, ino_str in zip(it, it):
+                ino = int(ino_str)
+                inv._dict[h] = ino
+                inv._rev[ino] = h
+        except (RuntimeError, OSError):
+            pass
 
         return inv
 
@@ -236,37 +261,27 @@ class Inventory:
             return result
 
         try:
-            data = subprocess.check_output(
-                [
-                    Inventory._find_binary(), str(root), "-xdev", "-type", "f",
-                    "-printf", "%P\\0%i\\0",
-                ],
-                timeout=60,
-                stderr=subprocess.DEVNULL,
-            )
-        except (subprocess.CalledProcessError, OSError):
-            return result
+            it = find_stream(str(root), r"%P\0%i\0", extra_args=["-xdev"])
+            for rel, ino_str in zip(it, it):
+                ino = int(ino_str)
+                dest_name = rel.split("/", 1)[0]
 
-        parts = data.split(b"\0")
-        for i in range(0, len(parts) - 1, 2):
-            rel = parts[i].decode()
-            ino = int(parts[i + 1])
-            dest_name = rel.split("/", 1)[0]
+                inv = result.get(dest_name)
+                if inv is None:
+                    continue
 
-            inv = result.get(dest_name)
-            if inv is None:
-                continue
+                # Record every path we find — pool-linked or not.  Release,
+                # InRelease, Packages, and Sources files all land here even
+                # though they have no pool hash.  Node.sync() removes a path
+                # from this set the moment it is declared wanted, so anything
+                # left after the sync is stale and safe to delete.
+                inv.stale_paths.add(rel)
 
-            # Record every path we find — pool-linked or not.  Release,
-            # InRelease, Packages, and Sources files all land here even
-            # though they have no pool hash.  Node.sync() removes a path
-            # from this set the moment it is declared wanted, so anything
-            # left after the sync is stale and safe to delete.
-            inv.stale_paths.add(rel)
-
-            h = pool_inv.get_hash(ino)
-            if h is not None:
-                inv._dict[h] = ino
-                inv._rev[ino] = h
+                h = pool_inv.get_hash(ino)
+                if h is not None:
+                    inv._dict[h] = ino
+                    inv._rev[ino] = h
+        except (RuntimeError, OSError):
+            pass
 
         return result

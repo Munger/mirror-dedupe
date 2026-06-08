@@ -86,7 +86,6 @@ class Index(Node):
         ## @param data  Optional bytes to parse (scan mode).
         ## @yield Package child nodes.
 
-        self.packages = Packages()
         return iter([])
 
     def parse(self, **kwargs: Any) -> "Index":  # type: ignore[override]
@@ -159,7 +158,6 @@ class VariantIndex(Index):
         ## @param data  Ignored.
         ## @return Empty iterator.
 
-        self.packages = Packages()
         return iter([])
 
 
