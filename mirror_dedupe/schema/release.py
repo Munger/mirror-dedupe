@@ -16,7 +16,8 @@ from __future__ import annotations
 from typing import Any, Dict
 import hashlib
 
-from .node import Node, NodeList
+from .mdnode import MDNode as Node
+from ..lib.node_x import SerialisableNodeList as NodeList
 
 
 class Release(Node):

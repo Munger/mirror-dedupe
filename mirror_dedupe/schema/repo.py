@@ -33,7 +33,8 @@ from datetime import datetime, timezone
 
 import yaml
 
-from .node import Node, NodeList
+from .mdnode import MDNode as Node
+from ..lib.node_x import SerialisableNodeList as NodeList
 from ..schema.architecture import Architecture, Architectures
 from ..schema.component import Component, Components
 from ..schema.suite import Suite, Suites
