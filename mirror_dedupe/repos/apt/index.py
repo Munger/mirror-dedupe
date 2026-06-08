@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.schema.package import Package, Packages
@@ -84,7 +85,7 @@ class AptIndex(Schema.Index):
                         except ValueError:
                             stanza_lines = []
                             continue
-                        pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
+                        pkg_uri = f"{base.rstrip('/')}/{quote(filename, safe='/')}" if base else ""
                         pkg_path = f"{dest}/{filename}" if dest else filename
                         pkg = Package(
                             path=pkg_path,
