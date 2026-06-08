@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..lib import fmt_size, LOG_LABEL_W
-from ..lib.http_download import HTTPFetch, HTTPDownload, kill_active_subprocesses
+from ..lib.http_download import HTTPFetch, HTTPDownload
+from ..lib.subproc import kill_active_subprocesses
 from ..lib.log import log
 from ..lib.node_x import Node, NodeList, Serialisable, StreamMixin
 from ..repo_vars import RepoVars

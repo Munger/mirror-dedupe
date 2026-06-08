@@ -44,7 +44,7 @@ from ..schema.release import Release, Releases
 from ..schema.vars import Vars
 from ..schema.upstream import Upstream, Upstreams
 from ..lib.log import log
-from ..lib.http_download import kill_active_subprocesses, kill_active_subprocesses_signal_safe
+from ..lib.subproc import kill_active_subprocesses_signal_safe
 from ..inventory import Inventory
 from ..repo_vars import RepoVars, SyncStats
 
@@ -98,7 +98,8 @@ class Repo(Node):
         ## repo metadata (upstream, repo_type, etc.) plus any
         ## child nodes (Distributions, Vars, etc.) attached by parsers.
         ##
-        ## @param upstream_idx  Index into the Upstreams collection.
+        ## @param upstream_idx  Index of upstream used during scan — persisted
+        ##                       so the same mirror is preferred on sync
         ## @param name          Human-friendly repo name.
         ## @param repo_type     Repo type string (e.g. ``"apt"``).
         ## @param gpg_key_url   Optional GPG key URL for verification.
@@ -278,15 +279,9 @@ class Repo(Node):
         ## @param dist_candidates Optional dist names from config for probing.
         ## @return A fully wired Repo instance.
 
-        data: Dict[str, Any] = {"upstream_idx": 0}
+        data: Dict[str, Any] = {"upstream_idx": 0}  # updated after discovery
         if repo_type is not None:
             data["repo_type"] = repo_type
-
-        sync_hint = None
-        if upstream.startswith("https://"):
-            sync_hint = "https"
-        elif upstream.startswith("http://"):
-            sync_hint = "http"
 
         urls: list[str] = [upstream, *(upstream_urls or [])]
         rt_cls, _used_url = cls.get_type_for_urls(data, urls, extra_suites=dist_candidates)
@@ -302,15 +297,8 @@ class Repo(Node):
             seen.add(u)
             ordered.append(u)
 
-        for idx, url in enumerate(ordered):
-            upstreams.append(
-                Upstream(
-                    url=url,
-                    sync_method=sync_hint
-                    if url.split(":", 1)[0] == upstream.split(":", 1)[0]
-                    else None,
-                )
-            )
+        for url in ordered:
+            upstreams.append(Upstream(url=url))
 
         repo = rt_cls(upstreams=upstreams, **data)
 
@@ -575,15 +563,13 @@ class Repo(Node):
         for u in upstreams_raw:
             if isinstance(u, dict):
                 url = u.get("url", "")
-                sync_method = u.get("sync_method")
             else:
                 url = str(u) if u else ""
-                sync_method = None
             if not url or url in seen:
                 continue
             seen.add(url)
             ordered.append(url)
-            upstream_objs.append(Upstream(url=url, sync_method=sync_method))
+            upstream_objs.append(Upstream(url=url))
 
         releases = mirror_cfg.get("releases") or mirror_cfg.get("distributions") or []
 
@@ -958,27 +944,12 @@ class Repos(NodeList[Repo]):
             kill_active_subprocesses_signal_safe()
             os._exit(130)
 
-        from ..lib import fmt_isotimestamp
+        from ..lib.datetimeutils import fmt_isotimestamp
 
         self.session_start = datetime.now(timezone.utc)
         self.session_ts = fmt_isotimestamp(self.session_start)
         original_sigint = signal.signal(signal.SIGINT, _sigint_handler)
         faulthandler.register(signal.SIGINFO)
-
-        # Verify pool and repo are on the same filesystem (hardlinks required)
-        pool_dev = os.stat(cfg.pool_root).st_dev
-        repo_dev = os.stat(cfg.repo_root).st_dev
-        if pool_dev != repo_dev:
-            log(
-                "ERROR: pool_root and repo_root are on different filesystems. "
-                "mirror-dedupe requires pool and repo to reside on the same "
-                "logical volume for hardlink-based deduplication. "
-                f"pool st_dev={pool_dev}, repo st_dev={repo_dev}. "
-                "Use LVM to place both directories on the same volume, or "
-                "adjust pool_root/repo_root in mirror-dedupe.conf.",
-                level="ERROR"
-            )
-            sys.exit(1)
 
         # Enforce repo name uniqueness — names map to directories under
         # repo_root, so duplicates would cause two workers to fight over
@@ -1181,7 +1152,7 @@ class Repos(NodeList[Repo]):
         stats_dir.mkdir(parents=True, exist_ok=True)
         stats_file = stats_dir / "stats.ndjson"
 
-        from ..lib import fmt_isotimestamp
+        from ..lib.datetimeutils import fmt_isotimestamp
 
         s = repo.stats()
         record = {
@@ -1232,7 +1203,8 @@ class Repos(NodeList[Repo]):
         ##
         ## @return None
 
-        from ..lib import fmt_datetime, fmt_duration
+        from ..lib.datetimeutils import fmt_datetime
+        from ..lib import fmt_duration
 
         rows: List[Dict[str, str]] = []
         for repo in self:
