@@ -63,7 +63,7 @@ class Repo(Node):
     ## ``Repo()``), both of which silently shadow the dict-based
     ## implementations inherited from ``Node``.
 
-    _children = ["distributions"]
+    _children = ("distributions",)
 
     REPO_TYPE: ClassVar[str] = "abstract"
 
@@ -973,7 +973,7 @@ class Repos(NodeList[Repo]):
         log("Checking inventory...", level="INFO")
         try:
             pool_inv = Inventory.from_pool(cfg.pool_root)
-        except RuntimeError as e:
+        except ExceptionMsg as e:
             sys.exit(e.args[0] if e.args else "gfind not found")
 
         # Determine the dest directory name for each repo.

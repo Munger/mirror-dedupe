@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from mirror_dedupe import schema as Schema
+from mirror_dedupe.lib.exceptions import ExceptionMsg
 from mirror_dedupe.lib.html_helpers import build_url
 from .index import AptIndex
 
@@ -23,7 +24,7 @@ from .index import AptIndex
 class Release(Schema.Release):
     ## @brief APT-specific Release node that can parse its own indices.
 
-    _children = ["indices"]
+    _children = ("indices",)
     ## @brief Base ``Node.parse()`` recurses into the child Index list
     ##        after ``on_parse()`` completes.
 
@@ -290,7 +291,9 @@ class Release(Schema.Release):
 
         text_bytes = self.fetch(uri=self.get("uri"), config=config)
         if text_bytes is None:
-            raise RuntimeError(f"No content for Release at {self.get('uri', 'unknown')}")
+            raise ExceptionMsg(0,
+                f"No content for Release at {self.get('uri', 'unknown')}",
+            )
         list(self.stream(data=text_bytes))
 
 

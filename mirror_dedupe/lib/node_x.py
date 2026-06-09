@@ -175,6 +175,26 @@ class _RWLock:
 # ============================================================================
 
 
+def _compute_reserved(cls: type) -> set[str]:
+    """Compute reserved-name set for a Node/NodeList subclass.
+
+    Walks the MRO collecting every public (non-underscore) name
+    defined as a method, class attribute, or annotated field.
+    Also reserves ``_frozen``, ``_reserved``, and ``_lock`` so they
+    cannot be accidentally stored as payload keys.
+    """
+    reserved: set[str] = set()
+    for base in cls.mro():
+        for name in getattr(base, "__dict__", {}):
+            if not name.startswith("_"):
+                reserved.add(name)
+        for name in getattr(base, "__annotations__", {}).keys():
+            if not name.startswith("_"):
+                reserved.add(name)
+    reserved.update({"_frozen", "_reserved", "_lock"})
+    return reserved
+
+
 class Node(dict):
     ## @brief Thread-safe dict-backed tree node.
     ##
@@ -196,7 +216,7 @@ class Node(dict):
     ## that add public methods or properties do not need to maintain
     ## ``_reserved`` manually.
     ##
-    ## ``_children`` is a list of attribute names whose values are
+    ## ``_children`` is a tuple of attribute names whose values are
     ## Node or NodeList instances that form the structural tree.
     ## ``_tree_iter()`` walks these names to yield the full subtree.
     ## ``_walk_child_nodes()`` applies a callable to every descendant.
@@ -213,10 +233,12 @@ class Node(dict):
     ## @brief Attribute names treated as real object attributes rather
     ##        than payload keys.  Populated automatically.
 
-    _children: ClassVar[List[str]] = []
+    _children: ClassVar[Tuple[str, ...]] = ()
     ## @brief Names of payload fields that hold child Node/NodeList
     ##        instances.  Used by ``_tree_iter()`` and
-    ##        ``_walk_child_nodes()``.
+    ##        ``_walk_child_nodes()``.  Immutable so that a subclass
+    ##        which omits its own ``_children`` declaration cannot
+    ##        accidentally mutate the base-class tuple.
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         ## @brief Collect reserved attribute names for each subclass.
@@ -234,19 +256,7 @@ class Node(dict):
         ## @return None
 
         super().__init_subclass__(**kwargs)
-        reserved: set[str] = set()
-
-        for base in cls.mro():
-            for name in getattr(base, "__dict__", {}):
-                if not name.startswith("_"):
-                    reserved.add(name)
-
-            for name in getattr(base, "__annotations__", {}).keys():
-                if not name.startswith("_"):
-                    reserved.add(name)
-
-        reserved.update({"_frozen", "_reserved", "_lock"})
-        cls._reserved = reserved
+        cls._reserved = _compute_reserved(cls)
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         ## @brief Construct a Node with optional initial payload.
@@ -267,8 +277,8 @@ class Node(dict):
         if args:
             if len(args) > 1:
                 raise TypeError(
-                    "Node accepts at most one positional mapping "
-                    "payload argument."
+                    f"Node accepts at most 1 positional argument "
+                    f"(a mapping), got {len(args)}."
                 )
             initial = args[0]
             if isinstance(initial, dict):
@@ -276,21 +286,24 @@ class Node(dict):
                     self[k] = v
             else:
                 raise TypeError(
-                    f"Positional argument to Node must be a "
-                    f"dict-like mapping, got {type(initial)!r}."
+                    f"Positional argument to Node must be a mapping "
+                    f"(dict or Node), got {type(initial).__name__}."
                 )
 
         for key, value in kwargs.items():
             setattr(self, key, value)
 
-    def _check_frozen(self) -> None:
+    def _check_frozen(self, context: str = "modify") -> None:
         ## @brief Raise if this node has been frozen.
+        ## @param context  Description of the attempted operation, shown in the
+        ##                 error message (e.g. ``"set key 'foo'"``).
         ## @raise TypeError  If ``_frozen`` is ``True``.
         ## @return None
 
         if self._frozen:
             raise TypeError(
-                f"{type(self).__name__} is frozen and cannot be modified."
+                f"Cannot {context} on frozen {type(self).__name__}. "
+                f"Call thaw() to restore mutability."
             )
 
     def _with_lock(self, func: Callable[[], Any]) -> Any:
@@ -363,7 +376,7 @@ class Node(dict):
         else:
             with self._write_guard():
                 with self._lock:
-                    self._check_frozen()
+                    self._check_frozen(f"set attribute {name!r}")
                     self[name] = value
 
     def __setitem__(self, key: Any, value: Any) -> None:
@@ -382,15 +395,14 @@ class Node(dict):
             getattr(type(self), key, None), property
         ):
             raise KeyError(
-                f"Cannot set reserved attribute {key!r} in Node payload."
+                f"Key {key!r} is reserved on {type(self).__name__} -- it "
+                f"conflicts with a method or property name. "
+                f"Use a different key."
             )
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen(f"set key {key!r}")
                 self._validate_value(value)
                 super(Node, self).__setitem__(key, value)
 
@@ -401,10 +413,7 @@ class Node(dict):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen(f"delete key {key!r}")
                 super(Node, self).__delitem__(key)
 
     def clear(self) -> None:
@@ -413,10 +422,7 @@ class Node(dict):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("clear all items")
                 super(Node, self).clear()
 
     def pop(self, key: Any, *args: Any) -> Any:
@@ -427,10 +433,7 @@ class Node(dict):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen(f"pop key {key!r}")
                 return super(Node, self).pop(key, *args)
 
     def popitem(self) -> Any:
@@ -439,37 +442,64 @@ class Node(dict):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("pop last item")
                 return super(Node, self).popitem()
 
     def update(self, *args: Any, **kwargs: Any) -> None:
-        ## @brief Merge keys into the payload, validating all values.
+        ## @brief Merge keys into the payload, validating all keys and values.
+        ##
+        ## All reserved-name and value-type checks are performed before any
+        ## state is mutated, so the update is all-or-nothing.
+        ##
         ## @param args    Optional single mapping or iterable of pairs.
         ## @param kwargs  Additional key/value pairs.
         ## @return None
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("update payload")
                 if args:
                     if len(args) > 1:
-                        raise TypeError("update expected at most 1 argument.")
+                        raise TypeError(
+                            f"Node.update() accepts at most 1 positional "
+                            f"argument, got {len(args)}."
+                        )
                     other = args[0]
-                    if hasattr(other, "items"):
-                        for v in other.values():
-                            self._validate_value(v)
-                    else:
-                        for _, v in other:
-                            self._validate_value(v)
-                for v in kwargs.values():
+                    pairs: list = (
+                        list(other.items()) if hasattr(other, "items")
+                        else list(other)
+                    )
+                else:
+                    pairs = []
+
+                # Validate all keys and values before writing anything.
+                cls = type(self)
+                for k, v in pairs:
+                    if k in cls._reserved and not isinstance(
+                        getattr(cls, k, None), property
+                    ):
+                        raise KeyError(
+                            f"Key {k!r} is reserved on {cls.__name__} -- it "
+                            f"conflicts with a method or property name. "
+                            f"Use a different key."
+                        )
                     self._validate_value(v)
-                super(Node, self).update(*args, **kwargs)
+                for k, v in kwargs.items():
+                    if k in cls._reserved and not isinstance(
+                        getattr(cls, k, None), property
+                    ):
+                        raise KeyError(
+                            f"Key {k!r} is reserved on {cls.__name__} -- it "
+                            f"conflicts with a method or property name. "
+                            f"Use a different key."
+                        )
+                    self._validate_value(v)
+
+                # All checks passed; write directly to the underlying dict.
+                for k, v in pairs:
+                    super(Node, self).__setitem__(k, v)
+                for k, v in kwargs.items():
+                    super(Node, self).__setitem__(k, v)
 
     def _validate_value(self, value: Any) -> None:
         ## @brief Ensure *value* is safe to store in a Node payload.
@@ -504,7 +534,9 @@ class Node(dict):
                 "Node cannot contain raw dicts. Wrap in a Node subclass."
             )
         raise TypeError(
-            f"Node cannot safely contain {type(value).__name__}."
+            f"Node cannot store {type(value).__name__}. "
+            f"Allowed types: Node, NodeList, None, str, int, float, "
+            f"bool, bytes, tuple."
         )
 
     def freeze(self, *, deep: bool = True) -> None:
@@ -635,17 +667,15 @@ class Node(dict):
             incoming = list(other.items())
         except AttributeError as exc:
             raise TypeError(
-                f"Node.merge() expected a mapping, got {type(other)!r}."
+                f"Node.merge() expected a mapping (dict or Node), "
+                f"got {type(other).__name__}."
             ) from exc
 
         deferred: List[tuple[Node, Node]] = []
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("merge")
                 for key, value in incoming:
                     self._validate_value(value)
                     if key in self:
@@ -670,7 +700,7 @@ class Node(dict):
         ##
         ## @warning Not thread-safe.  No locks are acquired during
         ##          traversal.  Concurrent structural modifications
-        ##          (adding or removing items from ``_children`` lists
+        ##          (reassigning ``_children`` tuples or the child
         ##          or reassigning child attributes) can cause nodes to
         ##          be skipped or visited twice.  Confine tree walks to
         ##          a single thread, or freeze the tree first.
@@ -689,9 +719,12 @@ class Node(dict):
                 yield from children._tree_iter()
 
 
+# Initialise reserved names for Node itself.
+Node._reserved = _compute_reserved(Node)
+
+
 # ============================================================================
 # NodeList
-# ============================================================================
 
 
 class NodeList(list, Generic[T]):
@@ -713,14 +746,24 @@ class NodeList(list, Generic[T]):
         object.__setattr__(self, "_lock", threading.RLock())
         object.__setattr__(self, "_frozen", False)
         super().__init__(*args, **kwargs)
+        for item in self:
+            if not isinstance(item, Node):
+                raise TypeError(
+                    f"{type(self).__name__} only accepts Node instances, "
+                    f"got {type(item).__name__}. "
+                    f"Wrap plain values in a Node subclass."
+                )
 
-    def _check_frozen(self) -> None:
+    def _check_frozen(self, context: str = "modify") -> None:
         ## @brief Raise if this list has been frozen.
+        ## @param context  Description of the attempted operation, shown in the
+        ##                 error message (e.g. ``"append element"``).
         ## @raise TypeError  If ``_frozen`` is ``True``.
 
         if self._frozen:
             raise TypeError(
-                f"{type(self).__name__} is frozen and cannot be modified."
+                f"Cannot {context} on frozen {type(self).__name__}. "
+                f"Call thaw() to restore mutability."
             )
 
     def _with_lock(self, func: Callable[[], Any]) -> Any:
@@ -802,13 +845,12 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("append element")
                 if not isinstance(__object, Node):
                     raise TypeError(
-                        f"{type(self).__name__} only accepts Node elements."
+                        f"{type(self).__name__} only accepts Node instances, "
+                        f"got {type(__object).__name__}. "
+                        f"Wrap plain values in a Node subclass."
                     )
                 super(NodeList, self).append(__object)
 
@@ -819,15 +861,14 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("extend list")
                 items = list(__iterable)
                 for item in items:
                     if not isinstance(item, Node):
                         raise TypeError(
-                            f"{type(self).__name__} only accepts Node elements."
+                            f"{type(self).__name__} only accepts Node instances, "
+                            f"got {type(item).__name__}. "
+                            f"Wrap plain values in a Node subclass."
                         )
                 super(NodeList, self).extend(items)
 
@@ -839,13 +880,12 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("insert element")
                 if not isinstance(__object, Node):
                     raise TypeError(
-                        f"{type(self).__name__} only accepts Node elements."
+                        f"{type(self).__name__} only accepts Node instances, "
+                        f"got {type(__object).__name__}. "
+                        f"Wrap plain values in a Node subclass."
                     )
                 super(NodeList, self).insert(__index, __object)
 
@@ -856,10 +896,7 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("pop element")
                 return super(NodeList, self).pop(__index)
 
     def remove(self, __value: T) -> None:
@@ -869,10 +906,7 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("remove element")
                 super(NodeList, self).remove(__value)
 
     def clear(self) -> None:
@@ -881,10 +915,7 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("clear all elements")
                 super(NodeList, self).clear()
 
     def reverse(self) -> None:
@@ -893,10 +924,7 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("reverse list")
                 super(NodeList, self).reverse()
 
     def sort(self, **kwargs: Any) -> None:
@@ -906,10 +934,7 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen("sort list")
                 super(NodeList, self).sort(**kwargs)
 
     def __setitem__(
@@ -922,24 +947,23 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen(f"set index {__key!r}")
                 if isinstance(__key, slice):
                     items = list(__value)  # type: ignore[arg-type]
                     for item in items:
                         if not isinstance(item, Node):
                             raise TypeError(
                                 f"{type(self).__name__} only accepts "
-                                "Node elements."
+                                f"Node instances, got {type(item).__name__}. "
+                                f"Wrap plain values in a Node subclass."
                             )
                     super(NodeList, self).__setitem__(__key, items)
                 else:
                     if not isinstance(__value, Node):
                         raise TypeError(
                             f"{type(self).__name__} only accepts "
-                            "Node elements."
+                            f"Node instances, got {type(__value).__name__}. "
+                            f"Wrap plain values in a Node subclass."
                         )
                     super(NodeList, self).__setitem__(__key, __value)
 
@@ -950,17 +974,8 @@ class NodeList(list, Generic[T]):
 
         with self._write_guard():
             with self._lock:
-                if self._frozen:
-                    raise TypeError(
-                        f"{type(self).__name__} is frozen and cannot be modified."
-                    )
+                self._check_frozen(f"delete index {__key!r}")
                 super(NodeList, self).__delitem__(__key)
-
-    def iter(self) -> Iterable[T]:
-        ## @brief Iterate over the contained Node instances.
-        ## @return An iterator over elements.
-
-        return iter(self)
 
 
 # ============================================================================
@@ -971,11 +986,11 @@ class NodeList(list, Generic[T]):
 class StreamMixin:
     ## @brief Mixin that adds lazy child-discovery to a ``Node``.
     ##
-    ## Callers walk the static tree skeleton (``_children`` /
-    ## ``_tree_iter``) and then call ``stream()`` on each node to
-    ## discover dynamic children derived from the node's content
-    ## (e.g. packages parsed from an archive file, indices parsed
-    ## from a Release file).
+    ## Callers walk the static tree skeleton via ``_tree_iter()`` and
+    ## call ``stream()`` on each node to discover children whose
+    ## existence is not known until the node's content is examined.
+    ## This allows the tree to be populated incrementally rather than
+    ## all at once.
     ##
     ## The base implementation is a no-op.  Subclasses override to
     ## yield child ``Node`` instances on demand.
@@ -983,17 +998,17 @@ class StreamMixin:
     def stream(self, data: Optional[bytes] = None) -> Iterable[Node]:
         ## @brief Yield dynamically-discovered child nodes.
         ##
-        ## Called after a node's content has been synchronised (or
-        ## fetched into memory in scan mode).  *data* carries the
-        ## raw bytes in scan mode; in sync mode it is ``None`` and
-        ## the implementation reads from disk.
+        ## When *data* is supplied the implementation may parse those
+        ## bytes to produce children.  When *data* is ``None`` the
+        ## implementation is responsible for obtaining its own source
+        ## (e.g. reading a file, querying a resource).
         ##
-        ## The default implementation yields nothing.
-        ## Override this method to parse the node's content format
-        ## and yield child nodes as they are discovered.
+        ## The default implementation yields nothing.  Override this
+        ## method to parse the node's content and yield children as
+        ## they are discovered.
         ##
-        ## @param data  Optional raw bytes (scan mode).  ``None`` in
-        ##              sync mode (read from disk instead).
+        ## @param data  Optional bytes for the implementation to parse.
+        ##              ``None`` when no in-memory payload is provided.
         ## @yield Child ``Node`` instances discovered from content.
 
         yield from ()
@@ -1102,16 +1117,18 @@ class Serialisable:
                 node = cls(snapshot)
             except TypeError as exc:
                 raise TypeError(
-                    f"{cls.__name__}.restore() could not call "
-                    f"{cls.__name__}.__init__.  Either set "
-                    "`_restore_via_payload = True` or provide a "
-                    "custom restore() implementation."
+                    f"{cls.__name__}.restore() failed -- __init__ raised "
+                    f"{type(exc).__name__}({exc}). "
+                    f"Set _restore_via_payload = True if the snapshot "
+                    f"already contains all fields, or provide a custom "
+                    f"restore() implementation."
                 ) from exc
             return node
 
         raise TypeError(
-            f"{cls.__name__}.restore() expected a mapping payload, "
-            f"got {type(snapshot)!r}."
+            f"{cls.__name__}.restore() expected a mapping (dict), "
+            f"got {type(snapshot).__name__}. Snapshots are produced "
+            f"by calling snapshot() on a Node instance."
         )
 
     @classmethod
@@ -1120,14 +1137,19 @@ class Serialisable:
         ##        invoking ``__init__``.
         ##
         ## Creates the instance via ``__new__`` then initialises the
-        ## dict portion via ``Node.__init__``.  Used during snapshot
-        ## restore when the payload already contains all fields.
+        ## dict portion via ``dict.__init__``, bypassing validation
+        ## and side effects.  Safe because *payload* already came from
+        ## a ``snapshot()`` which has been validated.
         ##
         ## @param payload  Plain dict of field values.
         ## @return A new instance of ``cls``.
 
         instance = cls.__new__(cls)
-        Node.__init__(instance, payload)
+        dict.__init__(instance, payload)
+        object.__setattr__(instance, "_lock", threading.RLock())
+        object.__setattr__(instance, "_frozen", False)
+        if issubclass(cls, ReadWriteMixin):
+            object.__setattr__(instance, "_rw_lock", _RWLock())
         return instance
 
     @classmethod
@@ -1183,15 +1205,16 @@ class Serialisable:
 
         if not isinstance(self, dict):
             raise TypeError(
-                "Node subclass must remain dict-backed for "
-                "clone() to work."
+                f"Node subclass {type(self).__name__} is not dict-backed -- "
+                f"clone() requires dict in the MRO. "
+                f"Do not remove dict from the class hierarchy."
             )
 
         obj_id = id(self)
         if obj_id in memo:
             return memo[obj_id]
 
-        new = object.__new__(type(self))
+        new = type(self).__new__(type(self))
         memo[obj_id] = new
         dict.__init__(new, {})
 
@@ -1199,6 +1222,17 @@ class Serialisable:
             clone_func = getattr(value, "_clone_recursive", None)
             if clone_func:
                 return clone_func(memo)
+            if isinstance(value, NodeList):
+                nl_clone = type(value).__new__(type(value))
+                for attr, val in getattr(value, "__dict__", {}).items():
+                    if attr == "_lock":
+                        object.__setattr__(nl_clone, "_lock", threading.RLock())
+                    elif attr == "_rw_lock":
+                        object.__setattr__(nl_clone, "_rw_lock", _RWLock())
+                    else:
+                        object.__setattr__(nl_clone, attr, val)
+                list.__init__(nl_clone, [clone_value(v) for v in value])
+                return nl_clone
             if isinstance(value, list):
                 return [clone_value(v) for v in value]
             if isinstance(value, dict):
@@ -1211,6 +1245,8 @@ class Serialisable:
         for attr, val in self.__dict__.items():
             if attr == "_lock":
                 object.__setattr__(new, "_lock", threading.RLock())
+            elif attr == "_rw_lock":
+                object.__setattr__(new, "_rw_lock", _RWLock())
             else:
                 object.__setattr__(new, attr, val)
 
@@ -1291,6 +1327,11 @@ class NodeTransaction:
     ## property returning a ``threading.RLock`` is accepted.
     ## Locks are released in reverse order.
     ##
+    ## ``ReadWriteMixin`` nodes are fully supported: ``_write_guard``
+    ## is entered before ``_lock`` for each node (matching the documented
+    ## lock ordering), so concurrent ``reading()`` contexts are blocked
+    ## for the duration of the transaction.
+    ##
     ## Usage::
     ##
     ##     with NodeTransaction(node_a, node_b, node_c):
@@ -1310,29 +1351,51 @@ class NodeTransaction:
         ##
         ## @param nodes  One or more lockable instances.
 
-        self._nodes = sorted(set(nodes), key=id)
+        seen: set[int] = set()
+        unique: list[Any] = []
+        for n in nodes:
+            nid = id(n)
+            if nid not in seen:
+                seen.add(nid)
+                unique.append(n)
+        self._nodes = sorted(unique, key=id)
+        self._guards: List[Any] = []
 
     def __enter__(self) -> NodeTransaction:
-        ## @brief Acquire all locks in sorted order.
+        ## @brief Acquire all write guards and locks in sorted order.
         ##
-        ## If any acquisition raises, all previously-acquired locks are
-        ## released before the exception propagates so no locks are leaked.
+        ## For each node, ``_write_guard`` is entered before ``_lock``
+        ## to maintain the correct lock ordering.  For plain ``Node``
+        ## and ``NodeList`` instances ``_write_guard`` is a no-op.
+        ## For ``ReadWriteMixin`` nodes it acquires the write side of
+        ## the readers-writer lock, blocking any concurrent readers.
+        ##
+        ## If any acquisition raises, all previously-acquired guards
+        ## and locks are released before the exception propagates.
         ##
         ## @return This transaction instance.
 
-        acquired = []
+        acquired_guards: List[Any] = []
+        acquired_locks: List[Any] = []
         try:
             for n in self._nodes:
+                guard = n._write_guard()
+                guard.__enter__()
+                acquired_guards.append(guard)
+            for n in self._nodes:
                 n.lock.acquire()
-                acquired.append(n)
+                acquired_locks.append(n)
         except BaseException:
-            for n in reversed(acquired):
+            for n in reversed(acquired_locks):
                 n.lock.release()
+            for guard in reversed(acquired_guards):
+                guard.__exit__(None, None, None)
             raise
+        self._guards = acquired_guards
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
-        ## @brief Release all locks in reverse order.
+        ## @brief Release all locks then write guards in reverse order.
         ## @param exc_type  Exception type (unused).
         ## @param exc       Exception value (unused).
         ## @param tb        Traceback (unused).
@@ -1340,6 +1403,8 @@ class NodeTransaction:
 
         for n in reversed(self._nodes):
             n.lock.release()
+        for guard in reversed(self._guards):
+            guard.__exit__(exc_type, exc, tb)
         return False
 
 

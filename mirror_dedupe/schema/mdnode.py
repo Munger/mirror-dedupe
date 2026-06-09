@@ -33,6 +33,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..lib.exceptions import ExceptionMsg
 from ..lib import fmt_size, LOG_LABEL_W
 from ..lib.http_download import HTTPFetch, HTTPDownload
 from ..lib.subproc import kill_active_subprocesses
@@ -198,7 +199,7 @@ class MDNode(Node, StreamMixin, Serialisable):
             return None
         try:
             return HTTPFetch(uri)
-        except RuntimeError:
+        except ExceptionMsg:
             return None
 
     # -- Checksum -------------------------------------------------------------
@@ -245,9 +246,9 @@ class MDNode(Node, StreamMixin, Serialisable):
         if self._repo_vars is not None:
             # Sync mode: read from the hardlinked repo destination.
             return open(Path(self._repo_vars.repo_root) / self["path"], "rb")
-        raise RuntimeError(
+        raise ExceptionMsg(0,
             "Cannot open file on disk: node has no _repo_vars "
-            "and no data bytes were provided."
+            "and no data bytes were provided.",
         )
 
     def _iter_lines(self, data: Optional[bytes] = None):
@@ -453,7 +454,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         if self._repo_vars is not None and self._repo_vars.sync_mode:
             return self.read(config=config)
         # Scan mode: HTTP directly into memory.
-        data = HTTPFetch(uri)
+        data = HTTPFetch(uri, expected_hash=self.get("hash"))
         self._cache = data
         return data
 
@@ -522,8 +523,8 @@ class MDNode(Node, StreamMixin, Serialisable):
 
         rv = self._repo_vars
         if rv is None:
-            raise RuntimeError(
-                f"sync() called on {path_val} without _repo_vars."
+            raise ExceptionMsg(0,
+                f"sync() called on {path_val} without _repo_vars.",
             )
 
         # Declare this path as wanted before any I/O.  Removes it from
@@ -693,16 +694,7 @@ class MDNode(Node, StreamMixin, Serialisable):
                 # repo.  The staging file is kept on failure so
                 # subsequent retries can resume via curl -C -.
                 tmp = str(staging_dir / staging_key)
-                actual_hash = HTTPDownload(uri, tmp)
-                if hash_val and actual_hash != hash_val:
-                    # Corrupt download — remove staging file and fail.
-                    # The caller (Repo._sync_content) will log the
-                    # error and continue with the next node.
-                    os.unlink(tmp)
-                    raise RuntimeError(
-                        f"Hash mismatch for {uri}: expected "
-                        f"{hash_val}, got {actual_hash}."
-                    )
+                actual_hash = HTTPDownload(uri, tmp, expected_hash=hash_val)
                 # Record the actual hash for dedup; for nodes that
                 # did not have a known hash (e.g. Release file on
                 # first sync) this is the authoritative value.

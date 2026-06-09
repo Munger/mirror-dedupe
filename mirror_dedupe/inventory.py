@@ -31,6 +31,7 @@ import threading
 from pathlib import Path
 from typing import Dict
 
+from .lib.exceptions import ExceptionMsg
 from .lib.find import find_binary, find_stream
 
 
@@ -219,7 +220,7 @@ class Inventory:
                 ino = int(ino_str)
                 inv._dict[h] = ino
                 inv._rev[ino] = h
-        except (RuntimeError, OSError):
+        except (ExceptionMsg, OSError):
             pass
 
         return inv
@@ -281,7 +282,7 @@ class Inventory:
                 if h is not None:
                     inv._dict[h] = ino
                     inv._rev[ino] = h
-        except (RuntimeError, OSError):
+        except (ExceptionMsg, OSError):
             pass
 
         return result

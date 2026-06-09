@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from ..lib.exceptions import ExceptionMsg
 from .mdnode import MDNode as Node
 from ..lib.node_x import SerialisableNodeList as NodeList
 from .package import Package, Packages
@@ -33,7 +34,7 @@ class Index(Node):
     ##
     ## * ``metadata`` — parser-specific data stored in an ``Index.Metadata`` node
 
-    _children = ["packages"]
+    _children = ("packages",)
     ## @brief Declare ``packages`` as child nodes so that ``_tree_iter()``
     ##        (used by ``_sync_content()``) walks into Package children.
 
@@ -115,7 +116,7 @@ class Index(Node):
             return self
         try:
             data = self.fetch(uri=self.get("uri"), config=config)
-        except RuntimeError:
+        except ExceptionMsg:
             from ..lib.log import log
             log(f"  FAILED index {self.get('uri', 'unknown')}")
             return self
@@ -145,14 +146,14 @@ class VariantIndex(Index):
     ##
     ## A ``VariantIndex`` represents an alternative compression of a
     ## primary index file (e.g. ``Packages.bz2`` when ``Packages.xz`` is
-    ## the primary).  It has ``_children = []`` so ``_tree_iter()`` does
+    ## the primary).  It has ``_children = ()`` so ``_tree_iter()`` does
     ## not descend into Package children — only the primary variant holds
     ## them.
     ##
     ## ``stream()`` is a no-op — variant indices are downloaded but not
     ## parsed for child packages.
 
-    _children: list[str] = []
+    _children: tuple[str, ...] = ()
 
     def stream(self, data: Optional[bytes] = None):
         ## @brief No-op stream for non-primary variants.
