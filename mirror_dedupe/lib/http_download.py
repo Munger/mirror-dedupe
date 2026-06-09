@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import platform
+import tempfile
 import time
 from typing import Dict, List, Tuple
 
@@ -49,18 +50,16 @@ def _http_reason(code: int) -> str:
     return _HTTP_REASONS.get(code, f"HTTP {code}")
 
 
+_TRANSIENT_EXITS: Tuple[int, ...] = (7, 18, 28, 35, 52, 55, 56)
+
+
 def HTTPFetch(uri: str) -> bytes:
-    ## @brief Fetch a URI into memory via ``curl -sL``.
+    ## @brief Fetch a URI into memory via ``curl -sL`` with retry.
     ##
-    ## Returns the raw bytes.  Used in scan mode for Release and
-    ## Packages.gz content.  Raises ``RuntimeError`` if curl exits
-    ## non-zero (network error, DNS failure, SSL issue, etc.).
-    ##
-    ## Uses ``--connect-timeout`` from ``Config.connect_timeout`` (default
-    ## 10) so the probe doesn't hang forever on an unresponsive upstream.
-    ##
-    ## curl's built-in Happy Eyeballs (RFC 8305) handles transparent
-    ## IPv6/IPv4 fallback.
+    ## Returns the raw bytes.  Raises ``RuntimeError`` on curl failure
+    ## or HTTP 4xx/5xx.  Transient errors (timeout, DNS, connection
+    ## reset) are retried according to ``Config.max_retries`` with
+    ## exponential backoff.
     ##
     ## @param uri  Fully-qualified URL to fetch.
     ## @return Raw response bytes.
@@ -68,54 +67,73 @@ def HTTPFetch(uri: str) -> bytes:
     if not uri:
         raise RuntimeError("No URI provided")
     config = Config.load()
-    args = ["curl", "-s", "-L", "--connect-timeout", str(config.connect_timeout), uri]
-    rc, out, err = run_subprocess(args)
-    if rc != 0:
-        msg = err.decode("utf-8", errors="replace").strip() if err else ""
-        raise RuntimeError(f"FAILED {uri} - curl exit {rc} {msg}".strip())
-    return out  # type: ignore[return-value]
+    retries = config.max_retries
+    _ct = str(config.connect_timeout)
+
+    for attempt in range(1 + retries):
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        try:
+            tmp.close()
+            args = ["curl", "-s", "-L", "--connect-timeout", _ct,
+                    "-w", "%{http_code}", "-o", tmp.name, uri]
+            rc, out, err = run_subprocess(args)
+
+            if rc != 0:
+                msg = err.decode("utf-8", errors="replace").strip() if err else ""
+                if rc in _TRANSIENT_EXITS and attempt < retries:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise RuntimeError(
+                    f"FAILED {uri} - curl exit {rc} {msg}".strip()
+                )
+
+            if out:
+                try:
+                    http_code = int(out.decode().strip())
+                    if http_code >= 400:
+                        reason = _HTTP_REASONS.get(http_code, "")
+                        raise RuntimeError(
+                            f"FAILED {uri} - {reason} ({http_code})" if reason
+                            else f"FAILED {uri} - HTTP {http_code}"
+                        )
+                except ValueError:
+                    pass
+
+            with open(tmp.name, "rb") as f:
+                return f.read()
+
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+
+    raise RuntimeError(f"FAILED {uri} - all {retries + 1} attempts failed")
 
 
-def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
+def HTTPDownload(uri: str, output_path: str) -> str:
     ## @brief Download a URI to a local file and return its SHA-256 hash.
     ##
     ## Uses ``curl -sL`` with ``--connect-timeout`` (from
-    ## ``Config.connect_timeout``) and ``-C -`` to auto-resume partial
-    ## downloads, and ``-w %{http_code}`` to detect HTTP-level errors
-    ## (4xx/5xx) even on macOS where ``-f`` exits 56 for 4xx.  After a
-    ## successful download, computes the hash via ``sha256sum`` (Linux) or
-    ## ``shasum -a 256`` (macOS fallback).
-    ##
-    ## On transient curl failures (exit codes 7, 18, 35, 52, 55, 56),
-    ## retries up to *retries* times with exponential backoff (2s, 4s).
-    ## The partial staging file is preserved for ``-C -`` resume across
-    ## retry attempts.
-    ##
-    ## curl's built-in Happy Eyeballs (RFC 8305) handles transparent
-    ## IPv6/IPv4 fallback.
+    ## ``Config.connect_timeout``), ``-C -`` for resume, and
+    ## ``-w %{http_code}`` for HTTP error detection.
+    ## Transient curl failures are retried per ``Config.max_retries``.
     ##
     ## @param uri          Fully-qualified URL to download.
     ## @param output_path  Path to write the downloaded content.
-    ## @param retries      Number of retry attempts for transient errors.
     ## @return The SHA-256 hex digest of *output_path*.
-    ## @raises RuntimeError  On curl failure, HTTP error, or hash tool missing.
+    ## @raises RuntimeError  On curl failure or HTTP error.
     output_str = str(output_path)
 
-    _TRANSIENT_EXITS: Tuple[int, ...] = (7, 18, 35, 52, 55, 56)
-    _connect_timeout = str(Config.load().connect_timeout)
+    config = Config.load()
+    retries = config.max_retries
+    _ct = str(config.connect_timeout)
 
     def _curl_args() -> List[str]:
-        ## @brief Build curl argument list.
-        ## @return Argument list for ``subprocess.Popen``.
-        return ["curl", "-s", "-L", "--connect-timeout", _connect_timeout, "-C", "-", "-w", "%{http_code}", "-o", output_str, uri]
+        return ["curl", "-s", "-L", "--connect-timeout", _ct, "-C", "-",
+                "-w", "%{http_code}", "-o", output_str, uri]
 
     def _compute_hash() -> str:
-        ## @brief Compute the SHA-256 hash of *output_str*.
-        ##
-        ## Tries ``sha256sum`` first (Linux), then ``shasum -a 256``
-        ## (macOS).  Raises ``RuntimeError`` if neither tool is found.
-        ##
-        ## @return SHA-256 hex digest as a 64-character string.
         rc, out, _ = run_subprocess(["sha256sum", output_str])
         if rc == 0:
             return out.decode("utf-8").split()[0]
@@ -141,8 +159,7 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
                             pass
                         if http_code == 416 and not _range_retried and attempt < retries:
                             _range_retried = True
-                            delay = 2 ** attempt
-                            time.sleep(delay)
+                            time.sleep(2 ** attempt)
                             continue
                         reason = _HTTP_REASONS.get(http_code, "")
                         raise RuntimeError(
@@ -164,8 +181,7 @@ def HTTPDownload(uri: str, output_path: str, retries: int = 2) -> str:
             except ValueError:
                 pass
         if rc in _TRANSIENT_EXITS and attempt < retries:
-            delay = 2 ** attempt
-            time.sleep(delay)
+            time.sleep(2 ** attempt)
             continue
 
         if http_info:

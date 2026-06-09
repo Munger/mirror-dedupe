@@ -100,7 +100,8 @@ def _iter_href_names(lines: Iterable[str], *, dirs_only: bool = False) -> Iterab
     ##
     ## Used for both top-level ``/dists/`` discovery and nested walks
     ## under ``/dists/<path>/``.  Deliberately ignores absolute URLs,
-    ## Apache sort links, parent/self entries, and URI scheme markers.
+    ## absolute server paths, Apache sort links, parent/self entries,
+    ## and URI scheme markers.
     ##
     ## @param lines      Iterable of HTML lines.
     ## @param dirs_only  If True, only yield names ending with ``/``.
@@ -115,15 +116,30 @@ def _iter_href_names(lines: Iterable[str], *, dirs_only: bool = False) -> Iterab
             continue
 
         if raw.startswith("http://") or raw.startswith("https://") or "?" in raw:
+            # Skip absolute URLs, external links, and Apache sort
+            # query params (?C=N&amp;O=D).  Only relative paths matter.
             continue
 
+        if raw.startswith("/"):
+            # Skip absolute server paths (e.g. /.headers/main.css,
+            # /debian/).  These are not directory entries.
+            continue
+
+        # Extract the last path segment from the href.  In Apache-style
+        # directory listings, hrefs are bare names ("bionic/") or nested
+        # paths ("/dists/bionic/"), not full URLs.
         name = raw.strip("/")
         if "/" in name:
             name = name.split("/")[-1]
 
         if name in (".", "..", "dists"):
+            # Skip parent/self directory links and the dists root
+            # itself (already being parsed, not a candidate).
             continue
         if "://" in name or ":" in name:
+            # Skip any remaining URI-scheme fragments that made it
+            # past the absolute-URL check (rare but possible when
+            # path stripping exposes a colon).
             continue
 
         if name:
@@ -210,6 +226,9 @@ def discover_distribution_paths(
     log(f"[apt] /dists/ HTML line count: {len(lines)}")
 
     suites: List[str] = []
+    # First pass: accept all relative hrefs.  Some Apache-style listings
+    # omit trailing slashes on directory entries, so dirs_only=False is
+    # used to catch everything, with file-like names filtered in _iter_href_names.
     for name in _iter_href_names(lines, dirs_only=False):
         if name and name not in suites:
             log(f"[apt] discovered suite under /dists: {name}")
@@ -323,6 +342,10 @@ def probe_any_suite(
             text = None
 
         if text and looks_like_release(text):
+            # Verify the Release file's Suite/Codename matches what we
+            # probed.  This guards against false positives from redirects
+            # or child prefixes where a different suite's Release is served
+            # under the wrong path.
             claimed = None
             for line in text.splitlines():
                 if line.startswith("Suite:") or line.startswith("Codename:"):
@@ -367,6 +390,9 @@ def probe_fallback_suites(
             text = None
 
         if text and looks_like_release(text):
+            # Same Suite/Codename verification as probe_any_suite —
+            # confirm the Release file matches the probed suite name,
+            # not a redirect or child-prefix false positive.
             claimed = None
             for line in text.splitlines():
                 if line.startswith("Suite:") or line.startswith("Codename:"):
