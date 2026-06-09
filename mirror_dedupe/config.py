@@ -117,6 +117,7 @@ class Config:
         self.parallel_downloads = self._data.get('parallel_downloads', 10)
         self.max_concurrent_syncs = self._data.get('max_concurrent_syncs', 2)
         self.connect_timeout = self._data.get('connect_timeout', 10)
+        self.max_retries = self._data.get('max_retries', 2)
         self.sweep_pool_after_sync = bool(self._data.get('sweep_pool_after_sync', False))
         raw_additional = self._data.get('additional_repos', []) or []
         self.additional_repos: Dict[str, str] = {}
@@ -193,6 +194,7 @@ class Config:
         self._data['parallel_downloads'] = self.parallel_downloads
         self._data['max_concurrent_syncs'] = self.max_concurrent_syncs
         self._data['connect_timeout'] = self.connect_timeout
+        self._data['max_retries'] = self.max_retries
         self._data['sweep_pool_after_sync'] = self.sweep_pool_after_sync
         self._data['mirrors'] = self.mirrors
         self._data['additional_repos'] = self.additional_repos
