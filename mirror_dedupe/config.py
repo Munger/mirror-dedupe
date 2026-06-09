@@ -143,8 +143,8 @@ class Config:
                             if not os.path.isabs(dest):
                                 mirror['dest'] = os.path.join(repo_root, dest)
                             mirrors.append(mirror)
-                except Exception as e:
-                    log(f"Warning: Failed to load {repo_file}: {e}", level="WARN")
+                except Exception:
+                    pass
 
         # Global arch mask: only keep architectures present in both mask and per-mirror list
         arch_mask = self._data.get('architectures', '*')
