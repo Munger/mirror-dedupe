@@ -208,6 +208,10 @@ def main():
         ),
     )
 
+    # Check external dependencies before any real work.
+    from .deps import check_dependencies
+    check_dependencies()
+
     parser = argparse.ArgumentParser(
         description='Mirror repository with global deduplication',
         formatter_class=argparse.RawDescriptionHelpFormatter

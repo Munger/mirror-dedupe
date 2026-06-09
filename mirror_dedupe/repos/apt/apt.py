@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from mirror_dedupe import schema as Schema
+from mirror_dedupe.lib.exceptions import ExceptionMsg
 from mirror_dedupe.lib.html_helpers import build_url
 from mirror_dedupe.lib.log import log
 from mirror_dedupe.schema.mdnode import MDNode as Node
@@ -135,8 +136,8 @@ class Apt(Schema.Repo):
         self._comp_filter = p.get("components")
         suites: List[str] = p.get("suites", [])
         if not suites:
-            raise RuntimeError(
-                "Apt._build_sync_tree: no suites configured in repo.params"
+            raise ExceptionMsg(0,
+                "Apt._build_sync_tree: no suites configured in repo.params",
             )
         self.distributions = Schema.Distributions()
         self.suites = Schema.Suites()

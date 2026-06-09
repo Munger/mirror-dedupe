@@ -25,6 +25,9 @@ import subprocess
 from typing import Generator, List, Optional
 
 
+from .exceptions import ExceptionMsg
+
+
 _find_cmd: Optional[str] = None
 
 
@@ -45,8 +48,8 @@ def find_binary() -> str:
     if platform.system() == "Darwin":
         gfind = shutil.which("gfind")
         if gfind is None:
-            raise RuntimeError(
-                "gfind not found.  Install with: brew install findutils"
+            raise ExceptionMsg(0,
+                "gfind not found.  Install with: brew install findutils",
             )
         _find_cmd = gfind
     else:

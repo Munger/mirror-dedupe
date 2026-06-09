@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from mirror_dedupe.lib.exceptions import ExceptionMsg
 from mirror_dedupe import schema as Schema
 
 
@@ -22,7 +23,7 @@ class Distribution(Schema.Distribution):
     ##        release headers (components, architectures, fields) and hash sections
     ##        (MD5Sum, SHA1, SHA256), and populates metadata.
 
-    _children = ["release"]
+    _children = ("release",)
     ## @brief Base ``Node.parse()`` recurses into the child Release after
     ##        ``on_parse()`` completes.
 
@@ -213,7 +214,7 @@ class Distribution(Schema.Distribution):
         # Scan mode: fetch Release body via HTTP, parse headers, create Release
         try:
             text_bytes = self.fetch(uri=self.get("uri"), config=config)
-        except RuntimeError:
+        except ExceptionMsg:
             return
         if text_bytes is None:
             return
