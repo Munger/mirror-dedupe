@@ -1,0 +1,15 @@
+# ubuntu-cloud repository
+# Auto-generated from candidates.conf
+---
+name: ubuntu-cloud
+dest: ubuntu-cloud
+upstreams:
+- https://ubuntu-cloud.archive.canonical.com/ubuntu
+releases:
+- noble-proposed/dalamation
+- noble-proposed/epoxy
+- noble-proposed/flamingo
+- noble-updates/dalamation
+- noble-updates/epoxy
+- noble-updates/flamingo
+gpg_key_url: http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg

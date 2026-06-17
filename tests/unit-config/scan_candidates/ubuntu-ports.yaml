@@ -1,0 +1,8 @@
+# ubuntu-ports repository
+# Auto-generated from candidates.conf
+---
+name: ubuntu-ports
+dest: ubuntu-ports
+upstreams:
+- https://ports.ubuntu.com/ubuntu-ports
+gpg_key_url: http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg

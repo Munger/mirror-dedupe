@@ -1,13 +1,11 @@
-#!/usr/bin/env python3
-"""
-__init__.py
+## @file __init__.py
+##
+## @brief Mirror synchronisation with global deduplication.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
-  Ubuntu mirror synchronisation with global deduplication
+from __future__ import annotations
 
-Copyright (c) 2025 Tim Hosking
-Email: tim@mungerware.com
-Website: https://github.com/munger
-Licence: MIT
-"""
-
-__version__ = '0.1.0'
+__version__ = '1.0.0'

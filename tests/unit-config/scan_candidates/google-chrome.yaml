@@ -1,0 +1,8 @@
+# google-chrome repository
+# Auto-generated from candidates.conf
+---
+name: google-chrome
+dest: google-chrome
+upstreams:
+- https://dl.google.com/linux/chrome/deb/
+gpg_key_url: https://dl.google.com/linux/linux_signing_key.pub

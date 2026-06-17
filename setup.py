@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""
-setup.py
-
-  Ubuntu mirror synchronisation with global deduplication
-
-Copyright (c) 2025 Tim Hosking
-Email: tim@mungerware.com
-Website: https://github.com/munger
-Licence: MIT
-"""
+## @file setup.py
+##
+## @brief Package setup and version helpers for mirror-dedupe.
+##
+## @copyright Copyright (c) 2026 Tim Hosking
+## @see https://github.com/munger
+## @par Licence: MIT
 
 from setuptools import setup, find_packages
 import os
@@ -20,6 +17,8 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 # Extract version from debian/changelog
 def get_version():
+    ## @brief Extract version from debian/changelog.
+    ## @return Version string from changelog, or "0.0.0" if not found.
     with open("debian/changelog", "r") as f:
         first_line = f.readline()
         match = re.match(r'^mirror-dedupe \(([^-]+)-\d+\)', first_line)
@@ -47,7 +46,6 @@ setup(
     entry_points={
         'console_scripts': [
             'mirror-dedupe=mirror_dedupe.cli:main',
-            'mirror-dedupe-scan=mirror_dedupe.scan:main',
         ],
     },
     python_requires=">=3.8",

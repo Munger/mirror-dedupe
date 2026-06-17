@@ -1,0 +1,8 @@
+# nginx repository
+# Auto-generated from candidates.conf
+---
+name: nginx
+dest: nginx
+upstreams:
+- https://nginx.org/packages/ubuntu
+gpg_key_url: https://nginx.org/keys/nginx_signing.key

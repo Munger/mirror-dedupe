@@ -1,0 +1,8 @@
+# docker repository
+# Auto-generated from candidates.conf
+---
+name: docker
+dest: docker
+upstreams:
+- https://download.docker.com/linux/ubuntu
+gpg_key_url: https://download.docker.com/linux/ubuntu/gpg

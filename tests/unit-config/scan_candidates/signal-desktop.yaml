@@ -1,0 +1,8 @@
+# signal-desktop repository
+# Auto-generated from candidates.conf
+---
+name: signal-desktop
+dest: signal-desktop
+upstreams:
+- https://updates.signal.org/desktop/apt
+gpg_key_url: https://updates.signal.org/desktop/apt/keys.asc

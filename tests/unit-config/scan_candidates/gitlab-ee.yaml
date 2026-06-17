@@ -1,0 +1,8 @@
+# gitlab-ee repository
+# Auto-generated from candidates.conf
+---
+name: gitlab-ee
+dest: gitlab-ee
+upstreams:
+- https://packages.gitlab.com/gitlab/gitlab-ee/debian/
+gpg_key_url: https://packages.gitlab.com/gitlab/gitlab-ee/gpgkey
