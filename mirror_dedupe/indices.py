@@ -12,7 +12,7 @@ Licence: MIT
 
 import os
 import gzip
-from typing import Dict, Set
+from typing import Dict, Set, Tuple
 
 
 def read_gzipped_file(filepath: str) -> str:
@@ -165,6 +165,42 @@ def parse_release_file(dest_base: str, distribution: str) -> Set[str]:
         return set()
     
     return available_files
+
+
+def parse_release_metadata(dest_base: str, distribution: str) -> Dict[str, Tuple[int, str]]:
+    """
+    Parse Release file and return file metadata from SHA256 section.
+    Returns: {relative_path: (size_in_bytes, sha256_hex)}
+    """
+    release_path = f"{dest_base}/dists/{distribution}/Release"
+
+    if not os.path.exists(release_path):
+        return {}
+
+    metadata = {}
+    in_sha256_section = False
+
+    try:
+        with open(release_path, 'r') as f:
+            for line in f:
+                line = line.rstrip()
+                if line.startswith('SHA256:'):
+                    in_sha256_section = True
+                    continue
+                elif line and not line.startswith(' '):
+                    in_sha256_section = False
+                if in_sha256_section and line.startswith(' '):
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        sha256 = parts[0]
+                        size = int(parts[1])
+                        file_path = parts[2]
+                        metadata[file_path] = (size, sha256)
+    except Exception as e:
+        print(f"  Warning: Could not parse Release file: {e}")
+        return {}
+
+    return metadata
 
 
 def get_packages_index(dest_base: str, distribution: str, component: str, arch: str) -> Dict[str, Dict[str, str]]:

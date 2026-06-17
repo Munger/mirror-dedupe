@@ -1,3 +1,26 @@
+mirror-dedupe (0.2.12-1) noble; urgency=medium
+
+  * Add configurable rsync_timeout to prevent rsync hangs:
+    - run_rsync() accepts a timeout parameter; when > 0, rsync gets
+      --timeout=N so stalled upstream connections abort cleanly
+    - sync_mirrors() and cleanup_mirrors() read rsync_timeout from
+      per-mirror config, falling back to the global mirror-dedupe.conf
+    - cli.py merges global config defaults (rsync_timeout, curl_timeout,
+      parallel_downloads, etc.) into each mirror config at startup
+    - Main config has rsync_timeout: 300 by default
+  * Fix run_https_sync() to be a true mirror:
+    - Iterates available_indices from the Release file instead of
+      hardcoding file patterns, so ALL index types are fetched
+      (Packages, Sources, Translations, cnf, dep11, by-hash, etc.)
+    - Adds orphan cleanup: removes local files under dists/ not listed
+      in the current Release, preventing stale files from a previous
+      sync method from causing apt hash mismatches
+    - Removes empty directories after orphan cleanup
+    Switching between sync_method: rsync and sync_method: https is now
+    seamless — both methods leave the mirror fully consistent.
+
+ -- Tim Hosking <tim@mungerware.com>  Tue, 02 Jun 2026 19:30:00 +0000
+
 mirror-dedupe (0.2.11-1) noble; urgency=medium
 
   * Add force_ipv4 / disable_ipv6 support to the runtime sync pipeline:
