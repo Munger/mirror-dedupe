@@ -135,6 +135,14 @@ class Apt(Schema.Repo):
         self._arch_filter = p.get("architectures")
         self._comp_filter = p.get("components")
         suites: List[str] = p.get("suites", [])
+        expand = p.get("expand_distributions", True)
+        if expand:
+            expanded: List[str] = []
+            for s in suites:
+                expanded.append(s)
+                if '-' not in s:
+                    expanded.extend([f"{s}-updates", f"{s}-security", f"{s}-backports", f"{s}-proposed"])
+            suites = expanded
         if not suites:
             raise ExceptionMsg(0,
                 "Apt._build_sync_tree: no suites configured in repo.params",

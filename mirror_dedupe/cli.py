@@ -217,98 +217,125 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    parser.add_argument('--version', '-v', action='version',
-                        version=f'mirror-dedupe {__version__}')
-    parser.add_argument('--config', dest='config_path', default=None,
-                        help='Path to config file (default: /etc/mirror-dedupe/mirror-dedupe.conf)')
-    parser.add_argument('--dry-run', action='store_true',
-                        help='Show what would be done without actually doing it')
-    parser.add_argument('--mirror', type=str,
-                        help='Process only the specified mirror (by name)')
-    parser.add_argument('--sync', action='store_true',
-                        help='Run the schema-based sync pipeline')
-    parser.add_argument('--dedupe-only', action='store_true',
-                        help='Only run deduplication phase (skip mirror sync)')
-    parser.add_argument('--scan', action='store_true',
-                        help='Scan an upstream URL and generate repo configuration')
-    parser.add_argument('--list', action='store_true',
-                        help='List available mirrors (active and inactive)')
-    parser.add_argument('--activate', metavar='MIRROR',
-                        help='Activate a mirror by creating a symlink in repos-enabled')
-    parser.add_argument('--deactivate', metavar='MIRROR',
-                        help='Deactivate a mirror by removing its symlink from repos-enabled')
-    parser.add_argument('--test', metavar='MIRROR',
-                        help='Test a mirror configuration and summarise what it will fetch')
-    parser.add_argument('--reinitialise', metavar='REPO',
-                        help='Snapshot a repo and remove its data directory, leaving activation status unchanged (requires PIN)')
+    # ── Global options ────────────────────────────────────────────────
+    global_grp = parser.add_argument_group('Global options')
+    global_grp.add_argument('--version', '-v', action='version',
+                            version=f'mirror-dedupe {__version__}')
+    global_grp.add_argument('--config', dest='config_path', default=None,
+                            help='Path to config file (default: /etc/mirror-dedupe/mirror-dedupe.conf)')
 
-    # Scan-only arguments (ignored unless --scan is used)
-    parser.add_argument('--name',
-                        help='Repository name (required for --scan)')
-    parser.add_argument('--dest',
-                        help='Destination path relative to repo_root (defaults to --name)')
-    parser.add_argument('-U', '--upstream', '--upstreams', dest='upstreams', action='extend', nargs='+',
-                        help='Upstream URL(s) for scanning (may be specified multiple times)')
-    parser.add_argument('-r', '--dist', '--release', action='append', dest='dist',
-                        help='Override distribution/suite (may be specified multiple times)')
-    parser.add_argument('-R', '--releases', dest='releases',
-                        help='Comma-separated list of distributions/suites')
-    parser.add_argument('--arch', action='append', dest='arch',
-                        help='Architecture to include (may be specified multiple times)')
-    parser.add_argument('--architectures', dest='architectures',
-                        help='Comma-separated list of architectures')
-    parser.add_argument('--component', action='append', dest='component',
-                        help='Component to include (may be specified multiple times)')
-    parser.add_argument('--components', dest='components',
-                        help='Comma-separated list of components')
-    parser.add_argument('--repo-type', dest='repo_type',
-                        help='Force a specific Repo type (e.g. "apt")')
-    parser.add_argument('-G', '--gpg-key-url', dest='gpg_key_url',
-                        help='Explicit GPG key URL for this repository')
-    collapse_scan = parser.add_mutually_exclusive_group()
+    # ── Sync options ──────────────────────────────────────────────────
+    sync_grp = parser.add_argument_group('Sync options')
+    sync_grp.add_argument('--sync', action='store_true',
+                          help='Run the full sync pipeline for all enabled mirrors')
+    sync_grp.add_argument('--mirror', type=str, metavar='NAME',
+                          help='Sync only the named mirror (used with --sync)')
+    sync_grp.add_argument('--dedupe-only', action='store_true',
+                          help='Skip metadata sync; only hardlink pool entries into repo trees')
+
+    # ── Scan options ──────────────────────────────────────────────────
+    scan_grp = parser.add_argument_group('Scan options')
+    scan_grp.add_argument('--scan', action='store_true',
+                          help='Probe an upstream URL and generate a repo YAML config')
+    scan_grp.add_argument('--name', metavar='NAME',
+                          help='Repository name (required for --scan)')
+    scan_grp.add_argument('--dest', metavar='DEST',
+                          help='Destination path relative to repo_root (defaults to --name)')
+    scan_grp.add_argument('--out', dest='out_dir', metavar='DIR',
+                          help='Output directory for generated config (required for --scan)')
+    scan_grp.add_argument('-U', '--upstream', '--upstreams', dest='upstreams',
+                          action='extend', nargs='+', metavar='URL',
+                          help='Upstream URL(s); first is primary, subsequent are fallbacks')
+    scan_grp.add_argument('-r', '--dist', '--release', action='append',
+                          dest='dist', metavar='SUITE',
+                          help='Restrict to a specific suite (may be repeated)')
+    scan_grp.add_argument('-R', '--releases', dest='releases', metavar='SUITES',
+                          help='Comma-separated list of suites to mirror')
+    scan_grp.add_argument('--arch', action='append', dest='arch',
+                          metavar='ARCH',
+                          help='Architecture to include (may be repeated)')
+    scan_grp.add_argument('--architectures', dest='architectures',
+                          metavar='ARCHES',
+                          help='Comma-separated list of architectures')
+    scan_grp.add_argument('--component', action='append', dest='component',
+                          metavar='COMP',
+                          help='Component to include (may be repeated)')
+    scan_grp.add_argument('--components', dest='components',
+                          metavar='COMPS',
+                          help='Comma-separated list of components')
+    scan_grp.add_argument('--repo-type', dest='repo_type', metavar='TYPE',
+                          help='Force a repo type (e.g. "apt") for unusual layouts')
+    scan_grp.add_argument('-G', '--gpg-key-url', dest='gpg_key_url',
+                          metavar='URL',
+                          help='GPG key URL for Release file signature verification')
+    collapse_scan = scan_grp.add_mutually_exclusive_group()
     collapse_scan.add_argument('--collapse-dists', dest='collapse_dists',
                                action='store_true',
-                               help='Collapse discovered distributions to base suites')
+                               help='Collapse discovered suites to base names (e.g. noble-updates → noble)')
     collapse_scan.add_argument('--no-collapse-dists', dest='collapse_dists',
                                action='store_false',
-                               help='Do not collapse discovered distributions')
+                               help='Emit all discovered suite variants explicitly')
     parser.set_defaults(collapse_dists=None)
-    parser.add_argument('upstream', nargs='?',
-                        help='Upstream repository URL (alternative to --upstream)')
+    scan_grp.add_argument('--emit-json', action='store_true', default=False,
+                          help='Also write a JSON snapshot of the discovered structure')
+    scan_grp.add_argument('--no-filter', action='store_true', default=False,
+                          help='Ignore architecture filters from mirror-dedupe.conf; '
+                               'emit all discovered arches')
+    scan_grp.add_argument('upstream', nargs='?',
+                          help='Upstream URL (alternative to -U / --upstream)')
 
-    # Modifiers
-    parser.add_argument('--force', action='store_true',
-                        help='Bypass PIN confirmation on destructive operations')
-    parser.add_argument('--no-backup', action='store_true',
-                        help='Skip current-state backup before restore')
+    # ── Repository management ─────────────────────────────────────────
+    mgmt_grp = parser.add_argument_group('Repository management')
+    mgmt_grp.add_argument('--list', action='store_true',
+                          help='List available mirrors (active and inactive)')
+    mgmt_grp.add_argument('--list-repos', action='store_true',
+                          help='List all known repos (config-based and additional)')
+    mgmt_grp.add_argument('--activate', metavar='NAME',
+                          help='Enable a mirror via symlink in repos-enabled')
+    mgmt_grp.add_argument('--deactivate', metavar='NAME',
+                          help='Disable a mirror by removing its repos-enabled symlink')
+    mgmt_grp.add_argument('--test', metavar='NAME',
+                          help='Check upstream reachability and summarise what will be synced')
+    mgmt_grp.add_argument('--reinitialise', metavar='NAME',
+                          help='Snapshot a repo and remove its data dir (leaves activation; requires PIN)')
+    mgmt_grp.add_argument('--force', action='store_true',
+                          help='Bypass PIN confirmation on destructive operations')
+    mgmt_grp.add_argument('--no-backup', action='store_true',
+                          help='Skip current-state backup before restore')
+    mgmt_grp.add_argument('--relink-pool', action='store_true',
+                          help='Re-link pool hashes with all managed repos and snapshots')
+    mgmt_grp.add_argument('--migrate', action='store_true',
+                          help='Migrate a legacy repo tree to the current layout (not yet implemented)')
+    mgmt_grp.add_argument('--stats', metavar='NAME', nargs='?', const='ALL',
+                          help='Print sync statistics for a repo or ALL repos')
+    mgmt_grp.add_argument('--stats-reset', metavar='NAME', nargs='?', const='ALL',
+                          help='Truncate stats.ndjson for a repo or ALL (requires PIN)')
 
-    # Management operations (new)
-    parser.add_argument('--list-repos', action='store_true',
-                        help='List all known repos (config-based and additional)')
-    parser.add_argument('--relink-pool', action='store_true',
-                        help='Re-link pool hashes with all managed repos and snapshots')
-    parser.add_argument('--snapshot', metavar='NAME', nargs='?', const='ALL',
-                        help='Create a hardlink snapshot of a repo dest or ALL')
-    parser.add_argument('--list-snapshots', metavar='NAME', nargs='?', const='ALL',
-                        help='List available snapshots for a repo or ALL')
-    parser.add_argument('--restore-snapshot', metavar='NAME',
-                        help='Restore a snapshot (NAME[:TS] format, defaults to latest)')
-    parser.add_argument('--delete-snapshot', metavar='NAME',
-                        help='Delete a snapshot directory under Snapshots/ (requires PIN)')
-    parser.add_argument('--stats', metavar='NAME', nargs='?', const='ALL',
-                        help='Print sync stats for a repo dest or ALL')
-    parser.add_argument('--stats-reset', metavar='NAME', nargs='?', const='ALL',
-                        help='Truncate stats.ndjson for a repo dest or ALL (requires PIN)')
-    parser.add_argument('--migrate', action='store_true',
-                        help='Migrate a legacy mirror-dedupe repo tree to the current layout (not yet implemented)')
-    parser.add_argument('--sweep', action='store_true',
-                        help='Remove orphaned pool entries (st_nlink == 1)')
-
-    # Scan output directory
-    parser.add_argument('--out', dest='out_dir',
-                        help='Output directory for --scan results (required for --scan)')
+    # ── Snapshots and pool ────────────────────────────────────────────
+    snap_grp = parser.add_argument_group('Snapshots and pool')
+    snap_grp.add_argument('--snapshot', metavar='NAME', nargs='?', const='ALL',
+                          help='Create a hardlink snapshot of a repo dest or ALL repos')
+    snap_grp.add_argument('--list-snapshots', metavar='NAME', nargs='?', const='ALL',
+                          help='List available snapshots for a repo or ALL')
+    snap_grp.add_argument('--restore-snapshot', metavar='NAME',
+                          help='Restore a snapshot (NAME[:TS] format; defaults to latest)')
+    snap_grp.add_argument('--delete-snapshot', metavar='NAME',
+                          help='Delete a snapshot directory (requires PIN)')
+    snap_grp.add_argument('--sweep-pool', action='store_true', dest='sweep',
+                          help='Remove orphaned pool entries (st_nlink == 1)')
 
     args = parser.parse_args()
+
+    has_action = any([
+        args.sync, args.scan, args.list, args.list_repos,
+        args.activate, args.deactivate, args.test, args.reinitialise,
+        args.relink_pool, args.snapshot, args.list_snapshots,
+        args.restore_snapshot, args.delete_snapshot, args.stats,
+        args.stats_reset, args.migrate, args.sweep,
+    ])
+    if not has_action:
+        parser.print_help()
+        sys.exit(2)
 
     cfg_main = Config.load(args.config_path)
 
@@ -335,7 +362,7 @@ def main():
             "--scan", "--list", "--list-repos", "--activate", "--deactivate",
             "--test", "--reinitialise", "--relink-pool", "--snapshot",
             "--list-snapshots", "--restore-snapshot", "--delete-snapshot",
-            "--stats", "--stats-reset", "--migrate", "--sweep",
+            "--stats", "--stats-reset", "--migrate", "--sweep-pool",
         ]
         log(f"ERROR: Only one management flag may be used at a time. Choose one of: {', '.join(names)}", level="ERROR")
         sys.exit(1)
@@ -474,7 +501,11 @@ def main():
                 dist_overrides=dist_overrides,
                 arch_override=arch_override,
                 component_override=component_override,
-                global_arch_mask=_normalize_arch_mask(cfg_main.architectures),
+                global_arch_mask=(
+                    None
+                    if args.no_filter
+                    else _normalize_arch_mask(cfg_main.architectures)
+                ),
                 collapse_dists=(
                     args.collapse_dists
                     if args.collapse_dists is not None
@@ -487,15 +518,15 @@ def main():
             config_file = out_dir / f"{repo.name}.conf"
             config_file.write_text(config)
 
-            try:
-                snapshot_path = out_dir / f"{repo.name}.json"
-                import json
-                snapshot_path.write_text(
-                    json.dumps(repo.snapshot(), indent=2)
-                )
-                log(f"Snapshot saved to: {snapshot_path}")
-            except Exception as e:
-                log(f"Warning: failed to write snapshot: {e}", level="WARN")
+            if args.emit_json:
+                try:
+                    snapshot_path = out_dir / f"{repo.name}.json"
+                    snapshot_path.write_text(
+                        json.dumps(repo.snapshot(), indent=2)
+                    )
+                    log(f"Snapshot saved to: {snapshot_path}")
+                except Exception as e:
+                    log(f"Warning: failed to write snapshot: {e}", level="WARN")
 
             log(f"Configuration saved to: {config_file}")
             log(
@@ -846,48 +877,51 @@ def main():
     # --stats : print stats.ndjson for a repo or ALL
     # ------------------------------------------------------------------
     if args.stats:
+        from .stats import read_ndjson, format_row, print_summary_table
+
         name = args.stats
         if name != "ALL":
             candidates = cfg_main.list_repo_names()
-            if candidates:
-                name = _resolve_name_or_index(name, candidates, "repo")
-
-        def _print_stats(repo_name: str) -> None:
-            ## @brief Print all NDJSON sync stats for a repo.
-            ## @param repo_name  Name of the repo (subdirectory under ``.mirror-dedupe/``).
-            ## @return None
-            stats_file = (
-                Path(cfg_main.repo_root) / ".mirror-dedupe" / repo_name / "stats.ndjson"
-            )
-            if not stats_file.exists():
-                print(f"[{repo_name}] No stats.ndjson at {stats_file}")
-                return
-            with open(stats_file) as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            formatted = json.dumps(json.loads(line), indent=2)
-                            print(f"[{repo_name}] {formatted}")
-                        except json.JSONDecodeError:
-                            print(f"[{repo_name}] (raw) {line}")
-
-        if name == "ALL":
-            names = cfg_main.list_repo_names()
-            if not names:
+            if not candidates:
                 print("No repos found")
+                sys.exit(1)
+            name = _resolve_name_or_index(name, candidates, "repo")
+
+            records = list(read_ndjson(cfg_main.repo_root, name))
+            if not records:
+                print(f"No stats records for '{name}'")
                 sys.exit(0)
-            for n in names:
-                _print_stats(n)
+            rows = [format_row(r, name) for r in records]
+            print_summary_table(rows)
             sys.exit(0)
 
-        _print_stats(name)
+        # ALL: most recent record per enabled repo
+        enabled_dir = Path(cfg_main.config_dir) / "repos-enabled"
+        if not enabled_dir.is_dir():
+            print("No active repos")
+            sys.exit(0)
+        names = sorted(f.stem for f in enabled_dir.glob("*.conf"))
+        if not names:
+            print("No active repos")
+            sys.exit(0)
+
+        rows: List[Dict[str, str]] = []
+        for n in names:
+            rec = next(read_ndjson(cfg_main.repo_root, n), None)
+            if rec:
+                rows.append(format_row(rec, n))
+        if not rows:
+            print("No stats records found")
+            sys.exit(0)
+        print_summary_table(rows)
         sys.exit(0)
 
     # ------------------------------------------------------------------
     # --stats-reset : truncate stats.ndjson for a repo or ALL
     # ------------------------------------------------------------------
     if args.stats_reset:
+        from .stats import clear_ndjson
+
         name = args.stats_reset
         if name != "ALL":
             candidates = cfg_main.list_repo_names()
@@ -898,14 +932,12 @@ def main():
             ## @brief Truncate the NDJSON stats file for a repo.
             ## @param repo_name  Name of the repo (subdirectory under ``.mirror-dedupe/``).
             ## @return None
-            stats_file = (
-                Path(cfg_main.repo_root) / ".mirror-dedupe" / repo_name / "stats.ndjson"
-            )
-            if not stats_file.exists():
-                print(f"[{repo_name}] No stats.ndjson at {stats_file} (nothing to reset)")
-                return
-            stats_file.write_text("")
-            print(f"[{repo_name}] Reset stats.ndjson at {stats_file}")
+            cleared = clear_ndjson(cfg_main.repo_root, repo_name)
+            if cleared is None:
+                p = Path(cfg_main.repo_root) / ".mirror-dedupe" / repo_name / "stats.ndjson"
+                print(f"[{repo_name}] No stats.ndjson at {p} (nothing to reset)")
+            else:
+                print(f"[{repo_name}] Reset stats.ndjson at {cleared}")
 
         if name == "ALL":
             desc = "Reset stats for ALL repos"
@@ -932,7 +964,7 @@ def main():
         sys.exit(0)
 
     # ------------------------------------------------------------------
-    # --sweep : remove orphaned pool entries
+    # --sweep-pool : remove orphaned pool entries
     # ------------------------------------------------------------------
     if args.sweep:
         from .schema.repo import pool_sweep_safe
@@ -1181,12 +1213,6 @@ def main():
 
         print(f"Reinitialised '{name}' — next sync will re-download from upstream.")
         sys.exit(0)
-
-    log("Use `mirror-dedupe --sync` to run the sync pipeline,", level="INFO")
-    log("`mirror-dedupe --scan` to discover and configure repos,", level="INFO")
-    log("or `--list`/`--activate`/`--deactivate`/`--test`/`--reinitialise`", level="INFO")
-    log("to manage existing configurations.", level="INFO")
-    sys.exit(0)
 
 
 if __name__ == '__main__':

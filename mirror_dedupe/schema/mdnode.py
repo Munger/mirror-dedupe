@@ -35,7 +35,7 @@ from typing import Any, Dict, List, Optional
 
 from ..lib.exceptions import ExceptionMsg
 from ..lib import fmt_size, LOG_LABEL_W
-from ..lib.http_download import HTTPFetch, HTTPDownload
+from ..lib.http_download import HTTPFetch, HTTPDownload, HTTPGet
 from ..lib.subproc import kill_active_subprocesses
 from ..lib.log import log
 from ..lib.node_x import Node, NodeList, Serialisable, StreamMixin
@@ -186,10 +186,14 @@ class MDNode(Node, StreamMixin, Serialisable):
     def probe_url(cls, uri: str) -> Optional[bytes]:
         ## @brief Check whether a URL is reachable and return its content.
         ##
-        ## Used during ``--test`` and health checks to verify upstream
-        ## connectivity without instantiating the full sync machinery.
-        ## Returns the response body so caller can inspect it further
-        ## if needed.
+        ## Used during ``--test``, ``--scan``, and health checks to verify
+        ## upstream connectivity without instantiating the full sync
+        ## machinery.  Returns the response body so the caller can inspect
+        ## it further if needed.
+        ##
+        ## Unlike ``HTTPFetch`` (retry, resume, hash validation), this is a
+        ## lightweight single GET with ``--max-time 30`` — no HEAD probe,
+        ## no retries, no temp files.
         ##
         ## @param uri  The URL to probe.
         ## @return The raw response bytes, or ``None`` if the URL is empty
@@ -198,8 +202,8 @@ class MDNode(Node, StreamMixin, Serialisable):
         if not uri:
             return None
         try:
-            return HTTPFetch(uri)
-        except ExceptionMsg:
+            return HTTPGet(uri)
+        except Exception:
             return None
 
     # -- Checksum -------------------------------------------------------------

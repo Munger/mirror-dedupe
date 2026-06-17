@@ -45,6 +45,7 @@ from ..schema.vars import Vars
 from ..schema.upstream import Upstream, Upstreams
 from ..lib.log import log
 from ..lib.subproc import kill_active_subprocesses_signal_safe
+from .. import stats
 from ..inventory import Inventory
 from ..repo_vars import RepoVars, SyncStats
 
@@ -427,12 +428,12 @@ class Repo(Node):
                 ):
                     try:
                         node.sync(config=config)
+                        for child in node.stream():
+                            stack.append(child)
                     except Exception as e:
                         if rv.stats is not None:
                             rv.stats.add_error()
                         log(f"  {e}")
-                    for child in node.stream():
-                        stack.append(child)
                     continue
 
                 future = pool.submit(node.sync, config=config)
@@ -448,12 +449,12 @@ class Repo(Node):
                 node = futures.pop(future)
                 try:
                     future.result()
+                    for child in node.stream():
+                        stack.append(child)
                 except Exception as e:
                     if rv.stats is not None:
                         rv.stats.add_error()
                     log(f"  {e}")
-                for child in node.stream():
-                    stack.append(child)
 
     def _sweep_stale(self) -> int:
         ## @brief Delete pre-sync paths that were never declared as wanted.
@@ -498,7 +499,7 @@ class Repo(Node):
                 continue
 
         if removed:
-            log(f"Repo sweep: removed {removed} stale files from '{dest}'", level="INFO")
+            log(f"Removed {removed} stale files from repo '{dest}'", level="INFO")
             if dest:
                 dest_path = Path(repo_root) / dest
                 if dest_path.exists():
@@ -592,6 +593,9 @@ class Repo(Node):
         params: Dict[str, Any] = {}
         if releases:
             params["suites"] = releases
+        expand = mirror_cfg.get("expand_distributions")
+        if expand is not None:
+            params["expand_distributions"] = expand
         arches = mirror_cfg.get("architectures")
         if arches:
             params["architectures"] = arches if isinstance(arches, list) else [arches]
@@ -1043,8 +1047,13 @@ class Repos(NodeList[Repo]):
             if _ABORT_SYNC:
                 os._exit(130)
 
+            rss_mb = self._get_peak_rss_mb()
             for repo in self:
-                self._write_ndjson(repo)
+                stats.write_ndjson(
+                    self.session_ts, repo,
+                    repo_root=repo._repo_vars.repo_root if repo._repo_vars else "",
+                    peak_rss_mb=rss_mb,
+                )
 
             self.session_end = datetime.now(timezone.utc)
             self.session_elapsed = time.monotonic() - t0
@@ -1128,262 +1137,31 @@ class Repos(NodeList[Repo]):
             ) as pool:
                 repo.sync(pool=pool, config=config)
 
-    def _write_ndjson(self, repo: Repo) -> None:
-        ## @brief Append a stats NDJSON record for *repo* to its per-repo file.
-        ##
-        ## Writes to ``<repo_root>/.mirror-dedupe/<name>/stats.ndjson``.
-        ## Computes delta_files and delta_bytes against the previous
-        ## record for trend analysis.
-        ##
-        ## @param repo  The ``Repo`` instance whose stats to record.
-        ## @return None
-        name = repo.get("name", "")
-        if not name:
-            return
-
-        repo_root: str = ""
-        if repo._repo_vars is not None:
-            repo_root = repo._repo_vars.repo_root
-        if not repo_root:
-            from ..config import Config
-            cfg = Config.load()
-            repo_root = cfg.repo_root
-        stats_dir = Path(repo_root) / ".mirror-dedupe" / name
-        stats_dir.mkdir(parents=True, exist_ok=True)
-        stats_file = stats_dir / "stats.ndjson"
-
-        from ..lib.datetimeutils import fmt_isotimestamp
-
-        s = repo.stats()
-        record = {
-            "session_ts": self.session_ts,
-            "ts": fmt_isotimestamp(),
-            "elapsed": round(s["elapsed"], 2),
-            "file_count": s["file_count"],
-            "total_bytes": s["total_bytes"],
-            "deduped_bytes": s["deduped_bytes"],
-            "bytes_transferred": s["bytes_transferred"],
-            "errors": s["errors"],
-            "pool_hits": s["pool_hits"],
-            "pool_misses": s["pool_misses"],
-            "removed": s["removed"],
-            "peak_rss_mb": self._get_peak_rss_mb(),
-        }
-
-        # Deltas from previous record
-        try:
-            # Initialise line so that if stats_file exists but is empty the
-            # for-loop never executes and line remains a defined local rather
-            # than causing UnboundLocalError (not caught by the OSError /
-            # JSONDecodeError handler below).
-            line = ""
-            with open(stats_file) as f:
-                for line in f:
-                    pass
-            prev = json.loads(line) if line else {}
-            curr_file_count = record["file_count"]
-            prev_file_count = prev.get("file_count", 0)
-            curr_bytes = record["total_bytes"]
-            prev_bytes = prev.get("total_bytes", 0)
-            record["delta_files"] = curr_file_count - prev_file_count
-            record["delta_bytes"] = curr_bytes - prev_bytes
-        except (OSError, json.JSONDecodeError):
-            record["delta_files"] = 0
-            record["delta_bytes"] = 0
-
-        with open(stats_file, "a") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
     def _print_summary(self) -> None:
         ## @brief Print a cross-repo sync summary table to stdout.
         ##
-        ## Columns: Repository, Files, Total, Deduped, Transferred, Hit,
-        ## Miss, Err, Time, Removed.  A ``Total`` row at the bottom
-        ## aggregates all repos.
+        ## Delegates to ``stats.print_summary_table()``.
         ##
         ## @return None
-
         from ..lib.datetimeutils import fmt_datetime
-        from ..lib import fmt_duration
+        from ..stats import format_row, print_summary_table
 
         rows: List[Dict[str, str]] = []
         for repo in self:
             s = repo.stats()
-            rows.append(self._aggregate_stats(s, repo.get("name", "?")))
+            rows.append(format_row(s, repo.get("name", "?")))
 
         if not rows:
             return
 
-        total_files = sum(int(r["files"].replace(",", "")) for r in rows)
-        total_bytes = sum(self._parse_fmt(r["total"]) for r in rows)
-        total_deduped = sum(self._parse_fmt(r["deduped"]) for r in rows)
-        total_tx = sum(self._parse_fmt(r["tx"]) for r in rows)
-        total_hits = sum(int(r["hit"].replace(",", "")) for r in rows)
-        total_misses = sum(int(r["miss"].replace(",", "")) for r in rows)
-        total_errors = sum(int(r["errors"]) for r in rows)
-        total_removed = sum(int(r["removed"].replace(",", "")) for r in rows)
-
-        def _fmt(b: int) -> str:
-            ## @brief Format byte count as human-readable string.
-            ## @param b  Byte count.
-            ## @return Formatted string (e.g. ``"450MB"``).
-            if b >= 1073741824:
-                return f"{b/1073741824:.1f}GB"
-            if b >= 1048576:
-                return f"{b/1048576:.0f}MB"
-            if b >= 1024:
-                return f"{b/1024:.0f}KB"
-            return f"{b}B"
-
-        def _fmt_int(n: int) -> str:
-            ## @brief Format integer with thousands separator.
-            ## @param n  Integer to format.
-            ## @return Formatted string (e.g. ``"1,234"``).
-            return f"{n:,}" if n >= 1000 else str(n)
-
-        def _pad(s: str, width: int) -> str:
-            ## @brief Left-pad a string to *width*.
-            ## @param s      Input string.
-            ## @param width  Minimum width.
-            ## @return Left-justified string.
-            return s.ljust(width) if len(s) < width else s
-
-        def _center(s: str, width: int) -> str:
-            ## @brief Center a string within *width*.
-            ## @param s      Input string.
-            ## @param width  Target width.
-            ## @return Centered string.
-            return s.center(width) if len(s) < width else s
-
-        # Column definitions: (dict_key, heading, alignment)
-        cols = [
-            ("name", "Repository", "left"),
-            ("files", "Files", "right"),
-            ("total", "Total", "right"),
-            ("deduped", "Deduplicated", "right"),
-            ("tx", "Transferred", "right"),
-            ("hit", "Hit", "right"),
-            ("miss", "Miss", "right"),
-            ("errors", "Errors", "right"),
-            ("time", "Time", "right"),
-            ("removed", "Removed", "right"),
-        ]
-
-        cw = self._col_widths(rows)
-        sep = "  ".join("-" * cw[k] for k, _, _ in cols)
-
-        print("")
-        start_s = fmt_datetime(self.session_start)
-        end_s = fmt_datetime(self.session_end)
-        elapsed_s = fmt_duration(self.session_elapsed)
-        print(f"  Start:   {start_s}")
-        print(f"  End:     {end_s}")
-        print(f"  Elapsed: {elapsed_s}")
-        print("")
-        print(sep)
-        header = ""
-        for key, heading, align in cols:
-            w = cw[key]
-            if align == "left":
-                header += _pad(heading, w)
-            else:
-                header += heading.rjust(w)
-            header += "  "
-        print(header.rstrip("  "))
-        print(sep)
-
-        for r in rows:
-            line = _pad(r["name"], cw["name"]) + "  "
-            for key, _, _ in cols[1:]:
-                line += r[key].rjust(cw[key]) + "  "
-            print(line.rstrip("  "))
-
-        print(sep)
-        total_line = _pad("Total", cw["name"]) + "  "
-        total_line += _fmt_int(total_files).rjust(cw["files"]) + "  "
-        total_line += _fmt(total_bytes).rjust(cw["total"]) + "  "
-        total_line += _fmt(total_deduped).rjust(cw["deduped"]) + "  "
-        total_line += _fmt(total_tx).rjust(cw["tx"]) + "  "
-        total_line += _fmt_int(total_hits).rjust(cw["hit"]) + "  "
-        total_line += _fmt_int(total_misses).rjust(cw["miss"]) + "  "
-        total_line += str(total_errors).rjust(cw["errors"]) + "  "
-        total_line += fmt_duration(self.session_elapsed).rjust(cw["time"]) + "  "
-        total_line += _fmt_int(total_removed).rjust(cw["removed"])
-        print(total_line)
-        print("")
-
-    def _aggregate_stats(
-        self, s: Dict[str, Any], name: str
-    ) -> Dict[str, str]:
-        ## @brief Convert a raw stats dict into a display row for the summary table.
-        ##
-        ## @param s     Stats dict from ``Repo.stats()``.
-        ## @param name  Repo name.
-        ## @return Dict with formatted string values for each column.
-
-        def _fmt(b: int) -> str:
-            ## @brief Format byte count as human-readable string.
-            ## @param b  Byte count.
-            ## @return Formatted string (e.g. ``"450MB"``).
-            if b >= 1073741824:
-                return f"{b/1073741824:.1f}GB"
-            if b >= 1048576:
-                return f"{b/1048576:.0f}MB"
-            if b >= 1024:
-                return f"{b/1024:.0f}KB"
-            return f"{b}B"
-
-        def _fmt_int(n: int) -> str:
-            ## @brief Format integer with thousands separator.
-            ## @param n  Integer to format.
-            ## @return Formatted string (e.g. ``"1,234"``).
-            return f"{n:,}" if n >= 1000 else str(n)
-
         from ..lib import fmt_duration
 
-        return {
-            "name": name,
-            "files": _fmt_int(s.get("file_count", 0)),
-            "total": _fmt(s.get("total_bytes", 0)),
-            "deduped": _fmt(s.get("deduped_bytes", 0)),
-            "tx": _fmt(s.get("bytes_transferred", 0)),
-            "hit": _fmt_int(s.get("pool_hits", 0)),
-            "miss": _fmt_int(s.get("pool_misses", 0)),
-            "errors": str(s.get("errors", 0)),
-            "time": fmt_duration(s.get("elapsed", 0)),
-            "removed": _fmt_int(s.get("removed", 0)),
-        }
-
-    @staticmethod
-    def _parse_fmt(s: str) -> int:
-        ## @brief Parse a human-readable byte string back to an integer.
-        ##
-        ## @param s  Formatted byte string (e.g. ``"450MB"``, ``"1.2GB"``).
-        ## @return Byte count as integer.
-        s = s.strip()
-        if s.endswith("GB"):
-            return int(float(s[:-2]) * 1073741824)
-        if s.endswith("MB"):
-            return int(float(s[:-2]) * 1048576)
-        if s.endswith("KB"):
-            return int(float(s[:-2]) * 1024)
-        if s.endswith("B") and not any(c in s for c in "GMK"):
-            return int(s[:-1])
-        return 0
-
-    @staticmethod
-    def _col_widths(rows: List[Dict[str, str]]) -> Dict[str, int]:
-        ## @brief Compute column widths for the summary table.
-        ##
-        ## @param rows  List of formatted row dicts.
-        ## @return Dict mapping column name to minimum pixel width.
-        widths = {"name": 20, "files": 8, "total": 10, "deduped": 12,
-                  "tx": 12, "hit": 8, "miss": 8, "errors": 6, "time": 11,
-                  "removed": 8}
-        for r in rows:
-            for k, v in r.items():
-                widths[k] = max(widths[k], len(v))
-        return widths
+        print_summary_table(
+            rows,
+            session_start=fmt_datetime(self.session_start),
+            session_end=fmt_datetime(self.session_end),
+            session_elapsed=fmt_duration(self.session_elapsed),
+        )
 
     @staticmethod
     def _get_peak_rss_mb() -> int:

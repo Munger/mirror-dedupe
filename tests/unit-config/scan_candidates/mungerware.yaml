@@ -1,0 +1,8 @@
+# apt.mungerware.com repository
+# Auto-generated from candidates.conf
+---
+name: mungerware
+dest: mungerware
+upstreams:
+- https://apt.mungerware.com/
+gpg_key_url: https://apt.mungerware.com/key.asc

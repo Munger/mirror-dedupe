@@ -7,4 +7,5 @@ upstreams:
 - https://archive.ubuntu.com/ubuntu
 releases:
 - noble
+- resolute
 gpg_key_url: http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg
