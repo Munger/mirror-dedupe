@@ -298,6 +298,17 @@ def main():
         print("No mirrors defined in configuration")
         sys.exit(1)
     
+    # Merge global config defaults into each mirror config.
+    # This allows values set in mirror-dedupe.conf to serve as
+    # defaults that per-repo configs in repos-available/ can override.
+    # Examples: rsync_timeout, curl_timeout, parallel_downloads.
+    global_keys = ['rsync_timeout', 'curl_timeout', 'parallel_downloads',
+                   'buffer_size', 'max_retries', 'progress_interval']
+    for mirror in mirrors:
+        for key in global_keys:
+            if key in config and key not in mirror:
+                mirror[key] = config[key]
+    
     print(f"\n{'='*60}")
     print(f"Loaded {len(mirrors)} mirror(s) from configuration")
     print(f"{'='*60}")

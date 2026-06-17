@@ -21,11 +21,13 @@ Ubuntu/Debian mirror synchronisation with intelligent deduplication using hardli
 
 ### Option 1: Debian/Ubuntu Package (Recommended)
 
-Download the latest `.deb` package from [GitHub Releases](https://github.com/munger/mirror-dedupe/releases):
+Download the latest `.deb` package from [GitHub Releases](https://github.com/munger/mirror-dedupe/releases/latest):
 
 ```bash
-wget https://github.com/munger/mirror-dedupe/releases/download/v0.2.0/mirror-dedupe_0.2.0-1_all.deb
-sudo dpkg -i mirror-dedupe_0.2.0-1_all.deb
+curl -fsSL https://api.github.com/repos/munger/mirror-dedupe/releases/latest \
+  | grep browser_download_url | grep all.deb | head -1 | cut -d'"' -f4 \
+  | xargs wget
+sudo dpkg -i mirror-dedupe_*.deb
 ```
 
 This includes systemd integration, man pages, and proper package management.

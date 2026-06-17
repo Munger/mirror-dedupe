@@ -127,11 +127,14 @@ enabled by adding a symlink under `repos-enabled/`.
 
 ```bash
 # Scan the Ubuntu archive (noble)
+# Note: uses rsync.archive.ubuntu.com (not archive.ubuntu.com) to reach the
+# rsync daemon directly — the canonical hostname sits behind Cloudflare which
+# does not proxy port 873.
 mirror-dedupe-scan \
   --name ubuntu \
   --dest ubuntu \
   --dist noble \
-  http://archive.ubuntu.com/ubuntu > /etc/mirror-dedupe/repos-available/ubuntu.conf
+  http://rsync.archive.ubuntu.com/ubuntu
 
 # Scan the Debian archive (bookworm)
 mirror-dedupe-scan \
@@ -244,14 +247,14 @@ mirror-dedupe-scan \
   --name ubuntu \
   --dest ubuntu \
   --release noble \
-  http://archive.ubuntu.com/ubuntu
+  http://rsync.archive.ubuntu.com/ubuntu
 
 # Ubuntu ports (noble)
 mirror-dedupe-scan \
   --name ubuntu-ports \
   --dest ubuntu-ports \
   --release noble \
-  http://ports.ubuntu.com/ubuntu-ports
+  http://rsync.ports.ubuntu.com/ubuntu-ports
 
 # Ubuntu Cloud Archive (UCA) – OpenStack tracks
 mirror-dedupe-scan \
