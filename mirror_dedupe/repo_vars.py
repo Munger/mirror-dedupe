@@ -93,7 +93,7 @@ class SyncStats:
 
     def to_dict(self) -> dict[str, Any]:
         ## @brief Return a plain-dict snapshot of the current totals.
-        ## @return Stats dict consumed by ``Repo.stats()``, ``_write_ndjson()``,
+        ## @return Stats dict consumed by ``Repo.stats()``, ``stats.write_ndjson()``,
         ##         and ``_print_summary()``.
         return {
             "file_count": self.file_count,

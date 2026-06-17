@@ -7,15 +7,18 @@ Website: https://github.com/munger
 Licence: MIT
 -->
 
-Ubuntu/Debian mirror synchronisation with intelligent deduplication using hardlinks.
+Pool-based content-addressable APT repository mirror sync with global deduplication via hardlinks.
 
 ## Features
 
-- Downloads from upstream and hardlinks duplicate files (same SHA256 hash) to save bandwidth and disk space
-- Supports multiple mirrors with global deduplication across all mirrors
-- Relies on standard command-line tools: curl, nc (netcat)
-- Configurable via YAML files
-- Systemd timer support for automated synchronisation
+- Pool-based content-addressable storage: every unique file is stored once by SHA-256 hash
+- Hardlink deduplication across all mirrored repositories
+- HTTPS-based sync with automatic upstream failover
+- Auto-discovery of distributions, architectures, and components via HTTP probing
+- Snapshot/restore system for safe repository migrations
+- Per-repo distribution expansion toggle (e.g. `noble` → `noble-updates`, `noble-security`, etc.)
+- GPG key URL tracking in per-repo configuration
+- Stale pool orphan detection and cleanup (`--sweep-pool`)
 
 ## Installation
 
@@ -56,76 +59,65 @@ sudo ./install.sh
 
 Configuration files are located in `/etc/mirror-dedupe/`:
 
-- `mirror-dedupe.conf` - Global settings
-- `repos-available/` - Available repository configurations
-- `repos-enabled/` - Enabled repositories (symlinks to repos-available)
+- `mirror-dedupe.conf` — Global settings (repo_root, pool_root, concurrency, etc.)
+- `repos-available/` — Available repository configurations
+- `repos-enabled/` — Enabled repositories (symlinks to repos-available)
+
+Pool and repository must reside on the same filesystem; hardlinks are a fundamental requirement.
 
 ### Adding a Repository
 
-Use the scanner to auto-generate configuration for a repository, for example:
+Use `--scan` to auto-generate configuration for a repository:
 
 ```bash
-mirror-dedupe-scan --name grafana --dest grafana https://apt.grafana.com
+mirror-dedupe --scan --name grafana --out /etc/mirror-dedupe/repos-available https://apt.grafana.com
 ```
 
-See `config/repos-available/README.md` for the full `mirror-dedupe-scan`
-reference and ready-made commands for all of the packaged example
-repositories.
+See `config/repos-available/README.md` for the full scan reference and
+ready-made commands for all packaged example repositories.
 
-Then test and enable it using the CLI:
+Then test and enable it:
 
 ```bash
-# Test that the upstream and GPG key URL (if configured) are reachable
 mirror-dedupe --test grafana
-
-# If the test looks good, activate the repository
 mirror-dedupe --activate grafana
 ```
 
-If you prefer, you can still enable it manually with a symlink:
+### Advanced: Alternative config paths
+
+Override the default config path with `--config`:
 
 ```bash
-cd /etc/mirror-dedupe/repos-enabled
-ln -s ../repos-available/grafana.conf .
-```
-
-### Advanced: Alternative config directories
-
-By default, both tools use `/etc/mirror-dedupe`. You can override this with `--config`, e.g. for testing or multiple instances:
-
-```bash
-mirror-dedupe --config /tmp/mirror-test --test grafana
+mirror-dedupe --config /tmp/mirror/mirror-dedupe.conf --test grafana
 ```
 
 ### Pre-configured Repositories
 
-The package includes pre-configured repositories:
-- ubuntu - Ubuntu main archive (noble)
-- ubuntu-ports - Ubuntu ports archive (noble)
-- ubuntu-cloud - Ubuntu Cloud Archive (selected OpenStack tracks on noble)
-- debian - Debian stable archive (bookworm)
-- docker - Docker packages for Ubuntu noble
-- grafana - Grafana APT repository
-- influxdb - InfluxData repository for Debian/Ubuntu
-- kubernetes - Kubernetes packages from apt.kubernetes.io
-- nginx - Official NGINX packages for Ubuntu
-- nodesource-node22 - Node.js 22.x LTS from NodeSource
-- postgresql - PostgreSQL APT repository (noble-pgdg)
+The package includes pre-configured repository definitions in `config/repos-available/`.
 
 ## Usage
 
 ```bash
-# Sync all mirrors
-mirror-dedupe
+# Sync all enabled mirrors
+mirror-dedupe --sync
 
-# Sync specific mirror
-mirror-dedupe --mirror ubuntu
+# Sync a specific mirror
+mirror-dedupe --sync --mirror ubuntu
 
-# Dry run
-mirror-dedupe --dry-run
+# Scan a repository and generate config (single release)
+mirror-dedupe --scan --name ubuntu --release noble --out /etc/mirror-dedupe/repos-available http://archive.ubuntu.com/ubuntu
 
-# Dedupe only (no sync)
-mirror-dedupe --dedupe-only
+# Scan with all discovered architectures and distributions
+mirror-dedupe --scan --name postgresql --no-filter --out /etc/mirror-dedupe/repos-available http://apt.postgresql.org/pub/repos/apt
+
+# Scan without JSON snapshot
+mirror-dedupe --scan --name grafana --out /etc/mirror-dedupe/repos-available https://apt.grafana.com
+
+# Pool orphan sweep
+mirror-dedupe --sweep-pool
+
+# Create a hardlink snapshot of all repos
+mirror-dedupe --snapshot
 ```
 
 ## Systemd Integration
@@ -149,7 +141,7 @@ See `nginx/mirror.conf` for an example nginx configuration.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License — see LICENSE file for details.
 
 ## Author
 

@@ -267,6 +267,12 @@ def generate_config(repo: Repo, dest: str,
     config_lines.append("# Distribution(s) / suites to mirror.  Each name corresponds to a")
     config_lines.append("# Release file on the upstream server.  Comment out a line to exclude")
     config_lines.append("# that suite from sync.")
+    config_lines.append("#")
+    config_lines.append("# When expand_distributions is true (the default if unset), a base")
+    config_lines.append("# distribution like \"noble\" is automatically expanded at sync time")
+    config_lines.append("# to include noble-updates, noble-security, noble-backports, and")
+    config_lines.append("# noble-proposed.  When false, only the listed distributions are")
+    config_lines.append("# synced — no automatic expansion occurs.")
     config_lines.append("distributions:")
     if all_dists_mode:
         for dist in discovered:
@@ -369,6 +375,19 @@ def main() -> None:
         help='Do not collapse discovered distributions; emit all variants explicitly',
     )
     parser.set_defaults(collapse_dists=None)
+    parser.add_argument(
+        '--emit-json',
+        action='store_true',
+        default=False,
+        help='Emit a JSON snapshot file alongside the YAML config (default: no JSON)',
+    )
+    parser.add_argument(
+        '--no-filter',
+        action='store_true',
+        default=False,
+        help='Ignore architecture filters from mirror-dedupe.conf and emit every '
+             'architecture discovered upstream (default: respect global config)',
+    )
     parser.add_argument('--repo-type', dest='repo_type',
                         help='Force a specific Repo type (e.g. "apt") for unusual layouts')
     parser.add_argument('-G', '--gpg-key-url',
@@ -400,6 +419,9 @@ def main() -> None:
         return None
 
     global_arch_mask = _normalize_arch_mask(arch_mask)
+
+    if args.no_filter:
+        global_arch_mask = None
 
     def _split_csv(values):
         ## @brief Split a list of comma-separated strings, deduplicated.
@@ -487,14 +509,15 @@ def main() -> None:
         with open(config_file, 'a') as f:
             f.write("\n")
 
-    try:
-        snapshot_path = out_dir / f"{repo.name}.json"
-        snapshot_path.write_text(
-            json.dumps(repo.snapshot(), indent=2)
-        )
-        log(f"Snapshot saved to: {snapshot_path}")
-    except Exception as e:
-        log(f"Warning: failed to write snapshot: {e}", level="WARN")
+    if args.emit_json:
+        try:
+            snapshot_path = out_dir / f"{repo.name}.json"
+            snapshot_path.write_text(
+                json.dumps(repo.snapshot(), indent=2)
+            )
+            log(f"Snapshot saved to: {snapshot_path}")
+        except Exception as e:
+            log(f"Warning: failed to write snapshot: {e}", level="WARN")
 
     log(f"Configuration saved to: {config_file}")
     log(f"\nNext steps:\n  # Test the repository configuration before activating it\n  mirror-dedupe --test {args.name}\n\n  # If the test looks good, activate the repository:\n  mirror-dedupe --activate {args.name}\n\n  # Manual enable (equivalent to --activate) if you prefer:\n  ln -s {config_file} {Path(cfg.config_dir) / 'repos-enabled' / (args.name + '.conf')}\n\nOr simply:\n  cd {Path(cfg.config_dir) / 'repos-enabled'}\n  ln -s ../repos-available/{args.name}.conf .\n\nThis is my best guess and should give you a decent head start when mirroring this repo.\nHowever, I'm not perfect so you really should examine the config file carefully before activating it.")

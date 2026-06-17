@@ -1,180 +1,383 @@
-.TH MIRROR-DEDUPE 1 "December 2025" "mirror-dedupe 0.2.10" "User Commands"
+.TH MIRROR-DEDUPE 1 "June 2026" "mirror-dedupe 1.0.0" "User Commands"
 .SH NAME
-mirror-dedupe \- Ubuntu mirror synchronisation with global deduplication
+mirror-dedupe \- Ubuntu/Debian mirror synchronisation with global deduplication via hardlinks
 .SH SYNOPSIS
 .B mirror-dedupe
+.RB [ \-\-help ]
+.RB [ \-\-version ]
 .RB [ \-\-config
-.IR DIR ]
-.RB [ \-h ]
-.RB [ \-\-dry\-run ]
+.IR PATH ]
+.RB [ \-\-sync ]
 .RB [ \-\-mirror
-.IR MIRROR ]
-.RB [ \-\-dedupe\-only ]
+.IR NAME ]
+.RB [ \-\-dedupe-only ]
+.RB [ \-\-sweep-pool ]
+.RB [ \-\-scan ]
+.RB [ \-\-out
+.IR DIR ]
+.RB [ \-\-name
+.IR NAME ]
+.RB [ \-\-dest
+.IR DEST ]
+.RB [ \-\-upstream
+.IR URL ]
+.RB [ \-\-releases
+.IR DISTS ]
+.RB [ \-\-architectures
+.IR ARCHES ]
+.RB [ \-\-components
+.IR COMPS ]
+.RB [ \-\-gpg-key-url
+.IR URL ]
+.RB [ \-\-collapse-dists ]
 .RB [ \-\-list ]
 .RB [ \-\-activate
-.IR MIRROR ]
+.IR NAME ]
 .RB [ \-\-deactivate
-.IR MIRROR ]
+.IR NAME ]
 .RB [ \-\-test
-.IR MIRROR ]
-.RB [ \-\-delete
-.IR MIRROR ]
-\fR]
+.IR NAME ]
+.RB [ \-\-reinitialise
+.IR NAME ]
+.RB [ \-\-list-repos ]
+.RB [ \-\-relink-pool ]
+.RB [ \-\-snapshot
+.RI [ NAME ]]
+.RB [ \-\-list-snapshots
+.RI [ NAME ]]
+.RB [ \-\-restore-snapshot
+.IR NAME ]
+.RB [ \-\-delete-snapshot
+.IR NAME ]
+.RB [ \-\-stats
+.RI [ NAME ]]
+.RB [ \-\-stats-reset
+.RI [ NAME ]]
 .SH DESCRIPTION
 .B mirror-dedupe
-synchronises Ubuntu package repositories and performs global deduplication
-across multiple mirrors using hardlinks. This significantly reduces disk space
-usage when hosting multiple Ubuntu mirrors or architectures.
+synchronises Debian/Ubuntu package repositories into a pool-based,
+content-addressable store and uses hardlinks for global deduplication
+across all mirrored repositories.  Pool and repository must reside on
+the same filesystem; hardlinks are a fundamental requirement.
 .PP
-The tool operates in three modes:
-.IP "1." 4
-.B Orchestrator mode
-(default): Spawns subprocesses for each configured mirror, then performs
-global deduplication across all mirrors.
-.IP "2." 4
-.B Single mirror mode
-(\fB\-\-mirror\fR): Processes only the specified mirror.
-.IP "3." 4
-.B Dedupe-only mode
-(\fB\-\-dedupe\-only\fR): Skips mirror synchronisation and only performs
-deduplication.
+Modes of operation:
+.IP \(bu 3
+\fB\-\-sync\fR: build the sync tree, fetch Release/Packages
+metadata, partition package stanzas by hash prefix, download missing
+pool entries, hardlink into repo trees, and clean up.
+.IP \(bu 3
+\fB\-\-scan\fR: probe an upstream repository, discover
+distributions/components/architectures, and generate a YAML config file.
+.IP \(bu 3
+\fB\-\-sweep-pool\fR: walk the pool and remove orphaned files (those whose
+link count has dropped to 1).
+.IP \(bu 3
+\fB\-\-dedupe-only\fR: run only the deduplication phase against an
+already-synced repo tree.
+.IP \(bu 3
+Management operations: \-\-list, \-\-activate, \-\-deactivate, \-\-test,
+\-\-reinitialise, \-\-snapshot, \-\-restore-snapshot, \-\-delete-snapshot,
+\-\-stats, \-\-list-repos, \-\-relink-pool.
 .SH OPTIONS
 .TP
 .BR \-h ", " \-\-help
 Show help message and exit.
 .TP
-.BR \-\-dry\-run
-Show what would be done without actually making any changes.
+.BR \-\-version ", " \-v
+Show program version and exit.
 .TP
-.BR \-\-mirror " " \fIMIRROR\fR
-Process only the specified mirror by name. Used internally by the orchestrator
-to spawn subprocesses for each mirror.
+.BR \-\-config " " \fIPATH\fR
+Path to mirror-dedupe.conf (default: /etc/mirror-dedupe/mirror-dedupe.conf).
 .TP
-.BR \-\-dedupe\-only
-Only run the deduplication phase, skipping mirror synchronisation.
+.BR \-\-sync
+Run the full sync pipeline for all enabled mirrors (or a single mirror
+when \-\-mirror is given).
 .TP
-.BR \-\-config " " \fIDIR\fR
-Path to configuration directory. Default: \fI/etc/mirror-dedupe\fR.
+.BR \-\-mirror " " \fINAME\fR
+Sync only the named mirror (used with \-\-sync).
+.TP
+.BR \-\-dedupe-only
+Skip metadata sync and only hardlink pool entries into the repo tree.
+.TP
+.BR \-\-sweep-pool
+Remove orphaned pool entries (files whose st_nlink equals 1).
+.TP
+.BR \-\-scan
+Discover upstream metadata and generate a repo config file.  Requires
+\-\-name and \-\-out.  Additional scan options are listed below and
+documented in mirror-dedupe-scan(1).
+.TP
+.BR \-\-name " " \fINAME\fR
+Repository name (required for \-\-scan).
+.TP
+.BR \-\-dest " " \fIDEST\fR
+Destination path relative to repo_root (defaults to \-\-name).
+.TP
+.BR \-U ", " \-\-upstream " " \fIURL\fR
+Upstream URL(s) for scanning.  May be specified multiple times.
+The first URL is the primary; subsequent entries are fallbacks.
+.TP
+.BR \-r ", " \-\-dist ", " \-\-release " " \fIDIST\fR
+Override distribution/suite.  May be specified multiple times.
+When any \-\-dist/\-\-release/\-\-releases flag is given, the scanner uses
+exactly those suites.  The special value "all" writes every discovered
+suite into the config and disables automatic distribution expansion.
+.TP
+.BR \-R ", " \-\-releases " " \fIDISTS\fR
+Comma-separated list of distributions/suites.
+.TP
+.BR \-\-arch " " \fIARCH\fR
+Architecture to include.  May be specified multiple times.
+.TP
+.BR \-\-architectures " " \fIARCHES\fR
+Comma-separated list of architectures.
+.TP
+.BR \-\-component " " \fICOMPONENT\fR
+Component to include.  May be specified multiple times.
+.TP
+.BR \-\-components " " \fICOMPONENTS\fR
+Comma-separated list of components.
+.TP
+.BR \-\-repo-type " " \fITYPE\fR
+Force a specific repo type (e.g. "apt") for unusual layouts.
+.TP
+.BR \-G ", " \-\-gpg-key-url " " \fIURL\fR
+Explicit GPG key URL for this repository.  The scanner checks that the
+URL is reachable before writing the config.
+.TP
+.BR \-\-collapse-dists
+Collapse discovered distributions to base suites where possible.
+.TP
+.BR \-\-no-collapse-dists
+Do not collapse discovered distributions; emit all variants explicitly.
+.TP
+.BR \-\-out " " \fIDIR\fR
+Output directory for \-\-scan results (required for \-\-scan).
 .TP
 .BR \-\-list
-List available mirrors, showing which are active (enabled) and which are inactive.
+List available mirrors, showing which are active (repos-enabled) and
+which are inactive (repos-available only).
 .TP
-.BR \-\-activate " " \fIMIRROR\fR
-Activate a mirror by creating a symlink in \fIrepos-enabled/\fR.
+.BR \-\-activate " " \fINAME\fR
+Activate a mirror by creating a symlink in repos-enabled/.
 .TP
-.BR \-\-deactivate " " \fIMIRROR\fR
-Deactivate a mirror by removing its symlink from \fIrepos-enabled/\fR.
+.BR \-\-deactivate " " \fINAME\fR
+Deactivate a mirror by removing its symlink from repos-enabled/.
 .TP
-.BR \-\-test " " \fIMIRROR\fR
-Test a mirror configuration. This performs basic connectivity checks against the
-upstream URL (and configured GPG key URL, if present) and prints a summary of
-what the mirror is configured to fetch, without making any changes.
+.BR \-\-test " " \fINAME\fR
+Test a mirror configuration: check upstream reachability, GPG key URL,
+and print a summary of what will be synced.
 .TP
-.BR \-\-delete " " \fIMIRROR\fR
-Deactivate a mirror and delete its data directory. This is a destructive
-operation and requires an interactive PIN confirmation before proceeding.
+.BR \-\-reinitialise " " \fINAME\fR
+Snapshot a repo, then remove its data directory.  Activation status is
+preserved.  Requires interactive PIN confirmation (or \-\-force).
+.TP
+.BR \-\-list-repos
+List all known repos (config-based and additional).
+.TP
+.BR \-\-relink-pool
+Re-link pool hashes with all managed repos and snapshots.  Useful after
+manual pool manipulation.
+.TP
+.BR \-\-snapshot " " \fI[NAME]\fR
+Create a hardlink snapshot of a repo dest directory or ALL repos.
+Snapshots are stored under repo_root/Snapshots/.
+.TP
+.BR \-\-list-snapshots " " \fI[NAME]\fR
+List available snapshots for a repo or ALL.
+.TP
+.BR \-\-restore-snapshot " " \fINAME\fR
+Restore a snapshot.  Accepts NAME[:TS] format; defaults to the latest
+snapshot for NAME.
+.TP
+.BR \-\-delete-snapshot " " \fINAME\fR
+Delete a snapshot directory.  Requires interactive PIN confirmation
+(or \-\-force).
+.TP
+.BR \-\-stats " " \fI[NAME]\fR
+Print sync statistics for a repo dest or ALL.
+.TP
+.BR \-\-stats-reset " " \fI[NAME]\fR
+Truncate stats.ndjson for a repo dest or ALL.  Requires interactive PIN
+confirmation (or \-\-force).
+.TP
+.BR \-\-force
+Bypass PIN confirmation on destructive operations.
+.TP
+.BR \-\-no-backup
+Skip current-state backup before a restore operation.
 .SH CONFIGURATION
-Configuration files are located in \fI/etc/mirror-dedupe/\fR:
+.SS Global configuration (\fImirror-dedupe.conf\fR)
 .TP
-.I mirror-dedupe.conf
-Main configuration file containing global settings such as buffer size,
-parallel downloads, and curl timeout. It also supports a global
-.B architectures
-mask to restrict which architectures are mirrored, and a boolean
-.B no_hardlinks
-option which, when set to true, disables deduplication and causes
-.B mirror-dedupe
-to behave as a plain mirror.
+.I repo_root
+Root directory for mirrored repository data.  Must be on the same
+filesystem as pool_root.
 .TP
-.I repos-available/*.conf
-Available mirror configuration files. Each file defines a repository mirror
-with settings including:
+.I pool_root
+Content-addressable pool directory for deduplicated storage.  Files are
+stored under by-hash/SHA256/*/.  Must be on the same filesystem as
+repo_root.
+.TP
+.I architectures
+Global architecture mask.  Only architectures present in both this list
+and each mirror's own list are synced.  "*" or "all" means passthrough.
+Default: "*".
+.TP
+.I collapse_distributions
+When true, collapse distribution directory names (e.g. "dists/stable"
+to "stable").  Default: false.
+.TP
+.I parallel_downloads
+Number of concurrent downloads per-repo.  Default: 10.
+.TP
+.I max_concurrent_syncs
+Maximum number of repos to sync simultaneously.  Default: 2.
+.TP
+.I connect_timeout
+Connection timeout for curl in seconds.  No \-\-max-time is sent;
+downloads run as long as upstream delivers bytes.  Default: 10.
+.TP
+.I max_retries
+Maximum retries for failed downloads.  Default: 2.
+.TP
+.I sweep_pool_after_sync
+Whether to run a pool orphan sweep automatically after the last repo
+finishes syncing.  Default: false.
+.TP
+.I log_colour
+Terminal colour scheme.  Valid values: DEFAULT, DARK, LIGHT, NONE.
+Default: DEFAULT.
+.TP
+.I log_colour_bg
+Background colour for log output.  Valid values: NONE, DARK, LIGHT.
+Default: NONE.
+.TP
+.I additional_repos
+List of repos not in repos-enabled/ but recognised by \-\-list-repos,
+\-\-delete, snapshot ops, and Config.resolve_dest().  Each entry has a
+name and dest (relative to repo_root or absolute).
+.SS Per-mirror configuration (\fIrepos-available/*.conf\fR)
+Each YAML file defines one repository mirror:
+.TP
+.I name
+Mirror identifier (required).
+.TP
+.I dest
+Local destination path relative to repo_root.
+.TP
+.I repo_type
+Repo type override (e.g. "apt").  Normally auto-detected.
+.TP
+.I upstreams
+List of upstream repository URLs.  The first healthy upstream is used
+for each file; fallbacks are tried on failure.
+.TP
+.I architectures
+List of architectures to mirror (e.g. amd64, arm64).
+If absent, all architectures from the Release file are used.
+.TP
+.I components
+List of repository components (e.g. main, universe, multiverse).
+If absent, all components from the Release file are used.
+.TP
+.I distributions
+List of releases/suites to mirror (e.g. noble, jammy).
+.TP
+.I expand_distributions
+Controls automatic pocket expansion at sync time.  When true (the
+default if the field is absent), a base distribution like "noble" is
+automatically expanded to include "noble-updates", "noble-security",
+"noble-backports", and "noble-proposed" \*(em so a single entry in
+\fBdistributions:\fR results in 5 suites being synced.  Expansion only
+applies to distributions that do not already contain a hyphen (e.g.
+"noble-pgdg" is left as-is).  Set to false to sync only the
+distributions listed, with no automatic expansion.
+.TP
+.I gpg_key_url
+URL to the repository's GPG signing key.
+.TP
+.I gpg_key_path
+Relative path under repo_root where the GPG key is stored.
+.TP
+.I params
+Optional per-repo parameter overrides:
 .RS
 .TP
-.B name
-Mirror identifier
+.I discovery_method
+Upstream layout discovery method: "html_bfs" or "explicit".
 .TP
-.B upstream
-Source repository URL
+.I log_colour / log_colour_bg
+Per-repo log colour overrides.
 .TP
-.B dest
-Local destination path (relative to repo_root)
-.TP
-.B sync_method
-Synchronisation method (https)
-.TP
-.B architectures
-List of architectures to mirror (e.g., amd64, arm64)
-.TP
-.B components
-Repository components (e.g., main, universe, multiverse)
-.TP
-.B distributions
-Ubuntu releases to mirror (e.g., noble, jammy)
-.TP
-.B gpg_key_url
-URL to repository GPG key (optional)
-.TP
-.B storage_filters
-Optional per-mirror storage filters that control which files are
-downloaded and kept on disk without modifying upstream indices.
-This is a mapping that may contain:
-.RS
-.TP
-.B exclude_packages
-List of shell-style patterns matched against the package name (the
-\fBPackage:\fR field in \fBPackages\fR/\fBSources\fR). Any entry
-whose package name matches one of these patterns is skipped during
-planning: it will not be downloaded and will be removed by the
-cleanup phase if it already exists in the pool.
-.TP
-.B exclude_paths
-List of shell-style patterns matched against the relative pool path
-(for example, \fIp\%ool/main/g/grafana/grafana-enterprise-nightly_*\fR).
-Entries whose paths match one of these patterns are also skipped.
+.I parallel_downloads
+Per-repo concurrency override.
+.RE
+.SH DEDUPLICATION
+mirror-dedupe stores every unique package file once in the pool, keyed
+by its SHA-256 hash (pool/by-hash/SHA256/ab/cd/<hash>).  Pool entries
+are hardlinked into each repo's pool/ tree.  When multiple repos or
+architectures share identical files (same hash), they share the same
+pool inode — no extra disk space is consumed.
 .PP
-   These filters only affect what is stored locally. The upstream
-   \fBRelease\fR/\fBInRelease\fR and index files are always mirrored
-   unchanged and retain their original signatures. Mirrors that use
-   \fBstorage_filters\fR may advertise packages that are not present on disk.
-.RE
-.RE
-.TP
-.I repos-enabled/*.conf
-Symlinks to configuration files in \fIrepos-available/\fR for mirrors that are
-currently enabled.
+A pool sweep (\-\-sweep-pool) walks the pool and removes files whose link
+count has dropped to 1 (i.e., no repo references them anymore).
 .SH EXAMPLES
 .TP
-Run full synchronisation and deduplication:
-.B mirror-dedupe
+Sync all enabled mirrors:
+.B mirror-dedupe \-\-sync
 .TP
-Dry run to see what would be changed:
-.B mirror-dedupe \-\-dry\-run
+Sync specific mirror:
+.B mirror-dedupe \-\-sync \-\-mirror ubuntu
 .TP
-Process only the 'ubuntu' mirror:
-.B mirror-dedupe \-\-mirror ubuntu
+Scan a repository and generate config:
+.B mirror-dedupe \-\-scan \-\-name grafana \-\-out /etc/mirror-dedupe/repos-available https://apt.grafana.com
 .TP
-Only perform deduplication (skip sync):
-.B mirror-dedupe \-\-dedupe\-only
+Test a mirror configuration:
+.B mirror-dedupe \-\-test grafana
 .TP
-Use custom configuration directory:
-.B mirror-dedupe \-\-config /path/to/config
+Activate a mirror:
+.B mirror-dedupe \-\-activate grafana
+.TP
+Run pool orphan sweep:
+.B mirror-dedupe \-\-sweep-pool
+.TP
+Create a snapshot of all repos:
+.B mirror-dedupe \-\-snapshot
+.TP
+Restore latest snapshot for a repo:
+.B mirror-dedupe \-\-restore-snapshot ubuntu
+.SH FILES
+.TP
+.I /etc/mirror-dedupe/mirror-dedupe.conf
+Main configuration file.
+.TP
+.I /etc/mirror-dedupe/repos-available/
+Available mirror configurations.
+.TP
+.I /etc/mirror-dedupe/repos-enabled/
+Enabled mirror configurations (symlinks to repos-available).
+.TP
+.I /srv/mirror/repos/
+Default repo_root.
+.TP
+.I /srv/mirror/pool/
+Default pool_root.
 .SH SYSTEMD INTEGRATION
 The package includes systemd timer and service units:
 .TP
 .B mirror-dedupe.timer
 Scheduled timer that runs the sync daily at a randomised time between
-00:00-06:00 UTC.
+00:00\(en06:00 UTC.
 .TP
 .B mirror-dedupe.service
-Service unit that executes the mirror synchronisation and deduplication.
+Service unit that executes the sync.
 .PP
 To check timer status:
 .RS
 .B systemctl status mirror-dedupe.timer
 .RE
 .PP
-To manually trigger a sync:
+To trigger a sync manually:
 .RS
 .B systemctl start mirror-dedupe.service
 .RE
@@ -183,55 +386,21 @@ To view logs:
 .RS
 .B journalctl -u mirror-dedupe.service
 .RE
-.SH FILES
-.TP
-.I /etc/mirror-dedupe/mirror-dedupe.conf
-Main configuration file
-.TP
-.I /etc/mirror-dedupe/repos-available/
-Directory containing available mirror configurations
-.TP
-.I /etc/mirror-dedupe/repos-enabled/
-Directory containing symlinks to enabled mirror configurations
-.TP
-.I /srv/mirror/repos/
-Default base directory for mirrored repositories
-.TP
-.I /var/run/mirror_dedupe.*.pid
-Lock files to prevent concurrent processing of the same mirror
-.TP
-.I /usr/lib/systemd/system/mirror-dedupe.service
-Systemd service unit
-.TP
-.I /usr/lib/systemd/system/mirror-dedupe.timer
-Systemd timer unit
-.SH DEDUPLICATION
-The tool performs global deduplication by:
-.IP 1. 3
-Collecting all package files across all configured mirrors
-.IP 2. 3
-Grouping files by SHA256 hash
-.IP 3. 3
-Downloading the first occurrence of each unique file
-.IP 4. 3
-Creating hardlinks for duplicate files (same hash, different paths)
-.PP
-This approach significantly reduces disk usage when hosting multiple mirrors
-or architectures, as identical packages are stored only once.
 .SH EXIT STATUS
 .TP
 .B 0
-Success
+Success.
 .TP
 .B 1
-Error occurred during synchronisation or deduplication
+Error occurred during synchronisation or deduplication.
 .SH AUTHOR
 Written by Tim Hosking.
 .SH COPYRIGHT
-Copyright 2025 Tim Hosking.
+Copyright 2025\(en2026 Tim Hosking.
 .br
 Licence: MIT
 .SH SEE ALSO
+.BR mirror-dedupe-scan (1),
 .BR curl (1),
 .BR systemctl (1),
 .BR journalctl (1)

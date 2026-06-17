@@ -129,6 +129,114 @@ class CurlException(ExceptionMsg):
 # -- public API ---------------------------------------------------------------
 
 
+# ── Probe / lightweight helpers ───────────────────────────────────────────────
+#
+# These functions are designed for one-shot probing (scan discovery, health
+# checks) where the caller only needs to know if a URL is reachable or wants
+# a small file's content.  Unlike HTTPFetch / HTTPDownload they are:
+#
+#   • stateless — no resume, no retries, no temp file for HEAD
+#   • bounded   — every call has a built-in 30-second total timeout
+#   • safe      — never affect the sync pipeline's download machinery
+#
+# A probe is always a two-step dance:
+#   1. HTTPPing  — HEAD request to see if the URL exists (fast, no body)
+#   2. HTTPGet   — GET request to read the body (only when ping succeeds)
+#
+# Both functions return None on failure instead of raising, so the caller
+# can safely skip unreachable URLs without exception handling.
+
+
+def HTTPPing(uri: str, *, connect_timeout: int = 10, max_time: int = 30) -> bool:
+    ## @brief Check whether a URL is reachable via HTTP HEAD.
+    ##
+    ## Issues ``curl -sI`` (HEAD request) with bounded timeouts and
+    ## returns ``True`` when the remote responds with HTTP 200 or 405.
+    ##
+    ## HTTP 200 means the URL is reachable and HEAD is supported.
+    ## HTTP 405 (Method Not Allowed) means the URL exists but the server
+    ##     does not support HEAD — the caller should still attempt GET.
+    ##
+    ## All other outcomes (404, 5xx, DNS failure, timeout, connection
+    ## refused) return ``False`` — the caller should treat them as
+    ## "not worth fetching".
+    ##
+    ## No retry, no resume, no body.  Stderr is silently discarded so
+    ## transient errors do not clutter the scan output.
+    ##
+    ## @param uri              Fully-qualified URL to probe.
+    ## @param connect_timeout  Seconds to wait for TCP connect (default 10).
+    ## @param max_time         Total seconds before curl gives up (default 30).
+    ## @return ``True`` if the URL appears reachable, ``False`` otherwise.
+
+    if not uri:
+        return False
+
+    args = [
+        "curl", "-sI",
+        "--connect-timeout", str(connect_timeout),
+        "--max-time", str(max_time),
+        "-o", "/dev/null",
+        "-w", "%{http_code}",
+        uri,
+    ]
+    try:
+        rc, out, _err = run_subprocess(args)
+        if rc != 0:
+            return False
+        if out:
+            code = int(out.decode().strip())
+            return code in (200, 405)
+    except Exception:
+        pass
+    return False
+
+
+def HTTPGet(uri: str, *, connect_timeout: int = 10, max_time: int = 30) -> bytes | None:
+    ## @brief Fetch a URI's body into memory with bounded timeout.
+    ##
+    ## Lightweight alternative to ``HTTPFetch`` for small files (Release
+    ## files, index pages) where retry/resume machinery is overkill.
+    ##
+    ## Unlike ``HTTPFetch``:
+    ##   * No retries — a single failure returns ``None``.
+    ##   * No resume  — ``-C -`` is not passed.
+    ##   * No hash validation — the caller must verify content.
+    ##   * No temp file — output goes directly to stdout.
+    ##
+    ## Uses ``curl -sL`` with ``--connect-timeout`` and ``--max-time``
+    ## to guarantee bounded wall time.  HTTP 4xx/5xx, DNS failure,
+    ## connection refused, and timeouts all return ``None`` without
+    ## raising.
+    ##
+    ## @param uri              Fully-qualified URL to fetch.
+    ## @param connect_timeout  Seconds to wait for TCP connect (default 10).
+    ## @param max_time         Total seconds before curl gives up (default 30).
+    ## @return The raw response bytes, or ``None`` on any failure.
+
+    if not uri:
+        return None
+
+    args = [
+        "curl", "-sL",
+        "--connect-timeout", str(connect_timeout),
+        "--max-time", str(max_time),
+        uri,
+    ]
+    try:
+        rc, out, _err = run_subprocess(args)
+        if rc != 0:
+            return None
+        if out is None:
+            return None
+        return out
+    except Exception:
+        return None
+
+
+# ── Full download machinery ───────────────────────────────────────────────────
+
+
 def HTTPFetch(uri: str, *, expected_hash: str | None = None) -> bytes:
     ## @brief Fetch a URI into memory via ``curl -sL`` with retry and resume.
     ##

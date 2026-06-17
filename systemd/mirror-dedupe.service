@@ -1,11 +1,12 @@
 [Unit]
-Description=Mirror Deduplication Sync
+Description=mirror-dedupe sync — content-addressable APT mirror sync
+Documentation=man:mirror-dedupe(1)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
 User=root
-ExecStart=/usr/bin/mirror-dedupe --config /etc/mirror-dedupe
+ExecStart=/usr/bin/mirror-dedupe --sync --config /etc/mirror-dedupe/mirror-dedupe.conf
 StandardOutput=journal
 StandardError=journal

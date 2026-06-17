@@ -1,180 +1,134 @@
-.TH MIRROR-DEDUPE-SCAN 1 "December 2025" "mirror-dedupe 0.2.10" "User Commands"
+.TH MIRROR-DEDUPE-SCAN 1 "June 2026" "mirror-dedupe 1.0.0" "User Commands"
 .SH NAME
-mirror-dedupe-scan \- scan and generate repository configuration for mirror-dedupe
+mirror-dedupe-scan \- generate repository configuration for mirror-dedupe (invoked as \fBmirror-dedupe \-\-scan\fR)
 .SH SYNOPSIS
-.B mirror-dedupe-scan
+.B mirror-dedupe \-\-scan
 .RB [ \-\-name
 .IR NAME ]
 .RB [ \-\-dest
 .IR DEST ]
-.RB [ \-\-config-dir
+.RB [ \-\-out
 .IR DIR ]
+.RB [ \-U
+.IR URL .\|.\|.]
 .RB [ \-r
 .IR DIST ]
 .RB [ \-R
 .IR DISTS ]
-.RB [ \-a
+.RB [ \-\-arch
 .IR ARCH ]
-.RB [ \-A
+.RB [ \-\-architectures
 .IR ARCHES ]
-.RB [ \-c
+.RB [ \-\-component
 .IR COMPONENT ]
-.RB [ \-C
-.IR COMPONENTS ]
+.RB [ \-\-components
+.IR COMPS ]
+.RB [ \-\-repo-type
+.IR TYPE ]
 .RB [ \-G
 .IR URL ]
-.RB [ \-g
-.IR PATH ]
-.RB [ \-\-method
-.IR METHOD ]
-.IR UPSTREAM-URL
+.RB [ \-\-collapse-dists | \-\-no-collapse-dists ]
+.RB [ \-\-emit-json ]
+.RB [ \-\-no-filter ]
+.RI [ UPSTREAM-URL ]
 .SH DESCRIPTION
-.B mirror-dedupe-scan
-automatically scans a Debian/Ubuntu repository and generates a configuration file for use with mirror-dedupe.
-It detects the sync method (HTTPS), available architectures, components, distributions, and GPG key locations.
+.B mirror-dedupe \-\-scan
+probes a Debian/Ubuntu repository upstream, discovers its available
+distributions, architectures, and components, and generates a YAML
+configuration file suitable for use with
+.BR mirror-dedupe .
 .PP
-The generated configuration is saved to
-.I /etc/mirror-dedupe/repos-available/
-and can be enabled by creating a symlink in
-.IR /etc/mirror-dedupe/repos-enabled/ .
+The generated file is written to \fB\-\-out\fR/\fINAME\fB.conf\fR.
+Copy it to repos-available/ and enable via \fBmirror-dedupe \-\-activate\fR.
+.PP
+This replaces the former standalone \fBmirror-dedupe-scan\fR binary.
 .SH OPTIONS
 .TP
 .BR \-\-name " " \fINAME\fR
-Repository name (required). Used for the configuration filename and as the default
+Repository name (required).  Used as the config filename and the default
 destination path when \fB\-\-dest\fR is omitted.
 .TP
 .BR \-\-dest " " \fIDEST\fR
-Destination path relative to repo_root. Defaults to the value of \fB\-\-name\fR if
-not specified.
+Destination path relative to repo_root.  Defaults to \-\-name.
 .TP
-.BR \-\-config-dir " " \fIDIR\fR
-Configuration directory (default: /etc/mirror-dedupe).
+.BR \-\-out " " \fIDIR\fR
+Output directory for the generated config (required).
 .TP
-.BR \-r ", " \-\-dist ", " \-\-release " " " \fIDIST\fR
-Add a distribution/suite. May be specified multiple times. When any
-\fB\-r\fR/\fB\-\-dist\fR/\fB\-\-release\fR/\fB\-R\fR/\fB\-\-releases\fR
-option is supplied, the scanner uses exactly the suites given (with special
-handling for the value \(lqall\(rq; see below).
+.BR \-U ", " \-\-upstream " " \fIURL\fR
+Upstream URL(s).  May be specified multiple times for mirror fallbacks.
+The first URL is the primary; subsequent entries are used when the
+primary is unreachable.
 .TP
-.BR \-R ", " \-\-releases " " " \fIDISTS\fR
-Comma-separated list of distributions/suites. This is equivalent to specifying
-multiple \fB\-r\fR options. If any item is the literal \(lqall\(rq, the
-scanner writes every discovered suite into the generated configuration and
-disables automatic distribution expansion.
+.BR \-r ", " \-\-dist ", " \-\-release " " \fIDIST\fR
+Add a distribution/suite.  May be specified multiple times.  When any
+\fB\-r\fR/\fB\-\-dist\fR/\fB\-\-release\fR/\fB\-R\fR option is given, the
+scanner uses exactly those suites.  The special value "all" writes every
+discovered suite into the config and disables automatic distribution
+expansion.
 .TP
-.BR \-a ", " \-\-arch " " \fIARCH\fR
-Architecture to include. May be specified multiple times.
+.BR \-\-no-collapse-dists
+Do not collapse discovered distributions; emit all variants explicitly.
 .TP
-.BR \-A ", " \-\-architectures " " \fIARCHES\fR
-Comma-separated list of architectures to include. When present, these values
-override any architectures parsed from Release files.
+.BR \-\-emit-json
+Emit a JSON snapshot file alongside the YAML configuration.  The snapshot
+contains the full repository structure as parsed from the upstream, which
+can be useful for debugging or manual inspection.  When omitted (default)
+only the YAML config is written.
 .TP
-.BR \-c ", " \-\-component " " \fICOMPONENT\fR
-Component to include (for example, \fBmain\fR or \fBuniverse\fR).
-May be specified multiple times.
+.BR \-\-no-filter
+Ignore architecture filters from the global \fBmirror-dedupe.conf\fR and
+emit every architecture discovered upstream.  By default, architectures
+listed in the global config are used as a mask \*(em any architecture not
+in that list is dropped from the generated config.  This flag disables that
+mask entirely, writing all discovered architectures regardless of the
+global setting.
 .TP
-.BR \-C ", " \-\-components " " \fICOMPONENTS\fR
-Comma-separated list of components to include. When present, these values
-override any components parsed from Release files.
+.BR \-\-repo-type " " \fITYPE\fR
+Force a specific repo type (e.g. "apt") for unusual repository layouts.
 .TP
 .BR \-G ", " \-\-gpg-key-url " " \fIURL\fR
-Explicit GPG key URL for this repository. Must be used together with
-\fB\-g\fR/\fB\-\-gpg-key-path\fR. If given, the scanner validates that the URL
-is reachable before writing the configuration.
+Explicit GPG key URL for this repository.  The scanner checks that the
+URL is reachable before writing the config.  The key itself is not
+downloaded by the sync pipeline — the operator should fetch and verify
+it separately.
 .TP
-.BR \-g ", " \-\-gpg-key-path " " \fIPATH\fR
-Relative GPG key path under repo_root (for example, \fBkeys/vendor.asc\fR).
-Must be used together with \fB\-G\fR/\fB\-\-gpg-key-url\fR.
-.TP
-.BR \-\-method " " \fIMETHOD\fR
-Force the sync method to use \fBhttps\fR. When omitted,
-the sync method defaults to https.
+.BR \-\-collapse-dists
+Collapse discovered distributions to base suites where possible (e.g.
+"noble-updates" becomes "noble" with automatic expansion).
 .TP
 .IR UPSTREAM-URL
-URL of the upstream repository to scan.
+Upstream repository URL to scan.  May also be specified via \fB\-U\fR.
+.SH AUTO\-DETECTION
+.PP
+When no explicit dist/release/arch/component flags are given, the scanner:
+.IP \(bu 3
+Lists available distributions by probing the upstream's \fBdists/\fR
+directory via HTML directory listing.
+.IP \(bu 3
+Parses architectures and components from each selected suite's
+\fBRelease\fR file.
+.IP \(bu 3
+Behaves as if \fB\-\-releases all\fR was specified — writes every
+discovered suite into the config with \fBexpand_distributions: false\fR.
 .SH EXAMPLES
-Scan the Ubuntu archive (noble):
-.PP
-.nf
-.RS
-mirror-dedupe-scan --name ubuntu --dest ubuntu \\
-    --release noble \\
-    http://archive.ubuntu.com/ubuntu
-.RE
-.fi
-.PP
-Scan the Grafana repository:
-.PP
-.nf
-.RS
-mirror-dedupe-scan --name grafana --dest grafana \\
-    --gpg-key-url https://apt.grafana.com/gpg.key \\
-    --gpg-key-path gpg.key \\
-    https://apt.grafana.com
-.RE
-.fi
-.PP
-Scan the Docker repository (Ubuntu, noble):
-.PP
-.nf
-.RS
-mirror-dedupe-scan --name docker --dest docker \\
-    --release noble \\
-    --gpg-key-url https://download.docker.com/linux/ubuntu/gpg \\
-    --gpg-key-path gpg \\
-    https://download.docker.com/linux/ubuntu
-.RE
-.fi
-.SH AUTO-DETECTION
-The scanner automatically detects:
 .TP
-.B Sync method
-Always uses HTTPS. If
-.B \-\-method
-is supplied, its value is used instead.
+Scan Ubuntu noble:
+.B mirror-dedupe \-\-scan \-\-name ubuntu \-\-release noble \-\-out /etc/mirror-dedupe/repos-available http://archive.ubuntu.com/ubuntu
 .TP
-.B Architectures
-Parsed from the Release file
+Scan a third-party repo with GPG key:
+.B mirror-dedupe \-\-scan \-\-name grafana \-\-out /etc/mirror-dedupe/repos-available \-\-gpg-key-url https://apt.grafana.com/gpg.key https://apt.grafana.com
 .TP
-.B Components
-Parsed from the Release file
-.TP
-.B Distributions
-Discovered by listing the dists/ directory. When explicit distributions are
-provided via \fB\-r\fR/\fB\-R\fR, those values are used directly (with the
-special value \(lqall\(rq causing all discovered suites to be written to the
-configuration with distribution expansion disabled). When no distribution
-options are supplied at all, the scanner behaves as if \fB\-R all\fR had been
-specified: every discovered suite is written to \fBdistributions:\fR and
-distribution expansion is disabled.
-.TP
-.B GPG keys
-Checks common GPG key locations and per-suite Release.gpg locations. Explicit
-GPG key overrides provided via \fB\-G\fR/\fB\-g\fR are honoured directly after a
-reachability check.
-.SH ENABLING A REPOSITORY
-After scanning, enable the repository:
-.PP
-.nf
-.RS
-cd /etc/mirror-dedupe/repos-enabled
-ln -s ../repos-available/NAME.conf .
-.RE
-.fi
+Scan with multiple upstreams and custom component:
+.B mirror-dedupe \-\-scan \-\-name debian \-\-release bookworm \-\-component main \-\-out /tmp/scan \-\-upstream https://ftp.debian.org/debian https://mirror.yandex.ru/debian
 .SH FILES
 .TP
 .I /etc/mirror-dedupe/repos-available/
-Directory containing available repository configurations
-.TP
-.I /etc/mirror-dedupe/repos-enabled/
-Directory containing enabled repository configurations (symlinks)
+Directory for generated repository configurations.
 .SH SEE ALSO
 .BR mirror-dedupe (1)
 .SH AUTHOR
-Copyright (c) 2025 Tim Hosking
-.br
-Email: tim@mungerware.com
-.br
-Website: https://github.com/munger
+Written by Tim Hosking.
+.SH COPYRIGHT
+Copyright 2025\(en2026 Tim Hosking.
 .br
 Licence: MIT

@@ -10,7 +10,7 @@ mirror-dedupe (1.0.0-1) noble; urgency=medium
     - RepoLock (flock) per-repo sync isolation
     - SIGINT-safe subprocess tracking
   * New module layout: lib/, repos/apt/, schema/, pool/
-  * Changed CLI: --sweep replaces --sweep-pool, --scan with sub-flags
+  * Changed CLI: --scan with sub-flags
   * Removed: dedupe.py, download.py, indices.py, orchestrate.py,
     sync.py, utils.py (functionality replaced by new architecture)
   * Full git history preserved from both mirror-dedupe and
