@@ -10,8 +10,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -35,11 +35,14 @@ env/
 # macOS
 .DS_Store
 
+# Tooling
+.ruff_cache/
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
-tests/
+test_output/
+tests/root/
 
 # Debian packaging
 debian/files
@@ -53,3 +56,6 @@ debian/.debhelper/
 *.deb
 *.buildinfo
 *.changes
+
+
+

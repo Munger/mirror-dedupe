@@ -1,0 +1,8 @@
+# zabbix repository
+# Auto-generated from candidates.conf
+---
+name: zabbix
+dest: zabbix
+upstreams:
+- https://repo.zabbix.com/zabbix/8.0/release/ubuntu/
+gpg_key_url: https://repo.zabbix.com/zabbix-official-repo.key

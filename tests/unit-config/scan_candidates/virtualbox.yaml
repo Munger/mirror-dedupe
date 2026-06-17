@@ -1,0 +1,8 @@
+# virtualbox repository
+# Auto-generated from candidates.conf
+---
+name: virtualbox
+dest: virtualbox
+upstreams:
+- https://download.virtualbox.org/virtualbox/debian
+gpg_key_url: https://www.virtualbox.org/download/oracle_vbox_2016.asc

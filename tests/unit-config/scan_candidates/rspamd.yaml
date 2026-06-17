@@ -1,0 +1,8 @@
+# rspamd repository
+# Auto-generated from candidates.conf
+---
+name: rspamd
+dest: rspamd
+upstreams:
+- https://rspamd.com/apt-stable/
+gpg_key_url: https://rspamd.com/apt-stable/gpg.key

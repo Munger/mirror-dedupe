@@ -1,3 +1,23 @@
+mirror-dedupe (1.0.0-1) noble; urgency=medium
+
+  * Complete stream-architecture rewrite:
+    - Node-based schema tree model (MDNode) with streaming parsers
+    - ThreadPoolExecutor worker model with hash-locked staging
+    - Content-addressed pool inventory (hash↔inode bidi tracking)
+    - Per-repo path files via single-pass find_stream()
+    - APT repo discovery: HTML BFS, codename fallback, explicit candidates
+    - Snapshot/restore system with atomic rename
+    - RepoLock (flock) per-repo sync isolation
+    - SIGINT-safe subprocess tracking
+  * New module layout: lib/, repos/apt/, schema/, pool/
+  * Changed CLI: --sweep replaces --sweep-pool, --scan with sub-flags
+  * Removed: dedupe.py, download.py, indices.py, orchestrate.py,
+    sync.py, utils.py (functionality replaced by new architecture)
+  * Full git history preserved from both mirror-dedupe and
+    mirror-dedupe-dev repositories, joined at this merge commit.
+
+ -- Tim Hosking <tim@mungerware.com>  Wed, 17 Jun 2026 08:30:00 +0000
+
 mirror-dedupe (0.2.12-1) noble; urgency=medium
 
   * Add configurable rsync_timeout to prevent rsync hangs:
