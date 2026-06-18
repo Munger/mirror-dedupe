@@ -148,6 +148,12 @@ pool=$(cd "$pool" && pwd)
 hash_root="$pool/by-hash/SHA256"
 mkdir -pv "$hash_root"
 
+## Find tool: gfind (GNU find from Homebrew findutils on macOS, native on Linux).
+FIND_TOOL=$(command -v gfind || command -v find) || {
+  echo "ERROR: gfind not found. Install with: brew install findutils" >&2
+  exit 1
+}
+
 ## repo_seen:    inode -> 1  tracks inodes already queued this run so that
 ##               hardlinked duplicates within the repo tree are only hashed once.
 ## byhash_inode: inode -> 1  tracks inodes already present in the pool so
@@ -176,23 +182,15 @@ fi
 ## Build an inode set for every file currently in the pool.  Files whose
 ## inode is already in the pool are skipped in phase 2 without re-hashing —
 ## a significant speedup on subsequent runs where most files are unchanged.
-## stat -f is BSD (macOS); stat -c is GNU (Linux); the || chain handles both.
+## Uses GNU find's -printf for a single-process pipeline.
 log "INFO" "Indexing existing pool..."
 while IFS= read -r -d '' inode; do
   byhash_inode["$inode"]=1
-done < <(
-  find "$pool" -xdev -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
-    stat -f '%i' "$f" 2>/dev/null || stat -c '%i' "$f" 2>/dev/null
-    printf '\0'
-  done
-  ## 'true' prevents a non-zero exit from find/stat propagating to the
-  ## outer while loop, which would terminate the read prematurely.
-  true
-)
+done < <($FIND_TOOL "$pool" -xdev -type f -printf '%i\0' 2>/dev/null || true)
 
 ## --- PHASE 2: Processing ---------------------------------------------------
-## A named FIFO decouples the find/stat pipeline from the sha256sum worker.
-## find and stat run in one process; sha256sum batching runs in another;
+## A named FIFO decouples the find pipeline from the sha256sum worker.
+## find runs in one process; sha256sum batching runs in another;
 ## both execute concurrently so CPU and disk I/O overlap.
 ##
 ## FIFO setup: mktemp gives a unique path on any filesystem, then we
@@ -297,8 +295,8 @@ exec {wf_fd}>"$work_fifo"
 trap 'exec {wf_fd}>&- 2>/dev/null; exec {wf_ka}>&- 2>/dev/null; kill $worker_pid 2>/dev/null; exit 130' INT TERM
 
 ## --- Main feed loop --------------------------------------------------------
-## Process substitution runs find and stat in a pipeline; the outer while
-## loop reads null-delimited inode\0path\0 pairs from it.
+## Process substitution runs find -printf; the outer while loop reads
+## null-delimited inode\0path\0 pairs from it.
 ## find prunes .mirror-dedupe directories to exclude stats and lock files.
 while IFS= read -r -d '' inode && IFS= read -r -d '' repo_file; do
   set +e
@@ -340,15 +338,7 @@ while IFS= read -r -d '' inode && IFS= read -r -d '' repo_file; do
   if ! printf '%s|%s\0' "$inode" "$repo_file" >&$wf_fd 2>/dev/null; then
     break
   fi
-done < <(
-  find "${find_roots[@]}" -xdev \( -type d -name ".mirror-dedupe" -prune \) -o -type f -print0 2>/dev/null | while IFS= read -r -d '' f; do
-    inode=$(stat -f '%i' "$f" 2>/dev/null || stat -c '%i' "$f" 2>/dev/null)
-    printf '%s\0%s\0' "$inode" "$f"
-  done
-  ## 'true' swallows non-zero exit codes from find/stat so the outer
-  ## while loop is not terminated prematurely by permission errors.
-  true
-)
+done < <($FIND_TOOL "${find_roots[@]}" -xdev \( -type d -name ".mirror-dedupe" -prune \) -o -type f -printf '%i\0%p\0' 2>/dev/null || true)
 
 set -e
 
@@ -371,14 +361,14 @@ pruned=0
 while IFS= read -r -d '' hfile; do
   rm -f "$hfile"
   ((pruned++))
-done < <(find "$hash_root" -xdev -type f -links 1 -print0)
+done < <($FIND_TOOL "$hash_root" -xdev -type f -links 1 -print0)
 
 ## Prune bottom-up (-depth) so parent directories are only removed after
 ## their children, avoiding rmdir failures on non-empty dirs.
 log "INFO" "Pruning empty directories..."
 while IFS= read -r d; do
   rmdir "$d" 2>/dev/null || true
-done < <(find "$hash_root" -xdev -depth -type d -empty -print)
+done < <($FIND_TOOL "$hash_root" -xdev -depth -type d -empty -print)
 
 ## --- Summary ----------------------------------------------------------------
 total=$(( hash_done + skip_seen ))
