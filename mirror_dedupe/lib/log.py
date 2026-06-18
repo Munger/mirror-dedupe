@@ -217,6 +217,8 @@ class _CustomFormatter(logging.Formatter):
             if record.threadName and record.threadName != "MainThread"
             else ""
         )
+        if tag:
+            msg = msg.lstrip()
         if lvl == "INFO":
             prefix = f"  {tag}"
         elif lvl == "WARNING":
@@ -254,13 +256,24 @@ def get_logger(name: str | None = None) -> logging.Logger:
 
         if not _ROOT_LOGGER.handlers:
             handler = logging.StreamHandler(sys.stderr)
-            handler.setLevel(logging.DEBUG)
+            handler.setLevel(logging.INFO)
             handler.setFormatter(_CustomFormatter())
             _ROOT_LOGGER.addHandler(handler)
 
     if name:
         return logging.getLogger(f"mirror-dedupe.{name}")
     return _ROOT_LOGGER
+
+
+def set_debug(enabled: bool = True) -> None:
+    ## @brief Enable or disable DEBUG-level log output.
+    ## @param enabled  ``True`` to show DEBUG messages (default); ``False`` for INFO+.
+    ## @return None
+    level = logging.DEBUG if enabled else logging.INFO
+    logger = get_logger()
+    logger.setLevel(level)
+    for h in logger.handlers:
+        h.setLevel(level)
 
 
 def log(msg: str, level: str | None = None) -> None:

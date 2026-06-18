@@ -749,6 +749,7 @@ def _pool_sweep(pool_root: str) -> None:
     if not by_hash.exists():
         return
 
+    log("Sweeping the pool and removing floaters...", level="INFO")
     removed = 0
     try:
         result = subprocess.run(
