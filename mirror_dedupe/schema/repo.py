@@ -656,16 +656,16 @@ class Repo(Node):
 class RepoLock:
     ## @brief Per-repo file lock to prevent concurrent syncs.
 
-    FLOCK_DIR = ".mirror-dedupe"
+    FLOCK_DIR = "mirror-dedupe"
     LOCK_FILE = "sync.lock"
 
-    def __init__(self, repo_root: str, repo_name: str) -> None:
-        ## @brief Initialise a RepoLock for *repo_name* under *repo_root*.
+    def __init__(self, mirror_root: str, repo_name: str) -> None:
+        ## @brief Initialise a RepoLock for *repo_name* under *mirror_root*.
         ##
-        ## @param repo_root  Root directory for all repos.
-        ## @param repo_name  Name of the repo to lock.
+        ## @param mirror_root  Root directory for all mirror data.
+        ## @param repo_name    Name of the repo to lock.
         ## @return None
-        self.path = Path(repo_root) / self.FLOCK_DIR / repo_name / self.LOCK_FILE
+        self.path = Path(mirror_root) / self.FLOCK_DIR / repo_name / self.LOCK_FILE
         self.fd: int | None = None
 
     def acquire(self, timeout: float = 600) -> None:
@@ -781,17 +781,17 @@ def _build_repo_path_files(repo_root: str, dest_names: List[str]) -> None:
         log(f"WARNING: build-repo-paths.sh failed (exit {e.returncode}) — per-repo inventories will be empty", level="WARN")
 
 
-def _check_any_sync_lock(repo_root: str, repo_names: list[str]) -> str | None:
+def _check_any_sync_lock(mirror_root: str, repo_names: list[str]) -> str | None:
     ## @brief Check if any named repo has an active sync lock.
     ##
     ## Uses ``LOCK_NB`` so this is a non-blocking probe.  Returns the
     ## first repo name whose lock is held, or ``None`` if all are free.
     ##
-    ## @param repo_root   Root directory for all repos.
-    ## @param repo_names  List of repo names to check.
+    ## @param mirror_root  Root directory for all mirror data.
+    ## @param repo_names   List of repo names to check.
     ## @return Name of the first locked repo, or ``None``.
     for name in repo_names:
-        lock_path = Path(repo_root) / RepoLock.FLOCK_DIR / name / RepoLock.LOCK_FILE
+        lock_path = Path(mirror_root) / RepoLock.FLOCK_DIR / name / RepoLock.LOCK_FILE
         if not lock_path.exists():
             continue
         try:
@@ -821,7 +821,7 @@ def pool_sweep_safe(cfg: "Config", *, fail_if_locked: bool = False) -> bool:
     ## @param fail_if_locked If ``True``, fail when a lock is held.
     ## @return ``True`` on success or harmless skip; ``False`` on error.
     names = cfg.list_repo_names()
-    busy = _check_any_sync_lock(cfg.repo_root, names)
+    busy = _check_any_sync_lock(cfg.mirror_root, names)
     if busy:
         if fail_if_locked:
             log(
@@ -878,22 +878,20 @@ class Repos(NodeList[Repo]):
     def from_names(
         cls,
         repo_names: List[str],
-        config_path: Optional[str] = None,
+        config_dir: Optional[str] = None,
     ) -> "Repos":
         ## @brief Build a ``Repos`` instance from a list of enabled repo names.
         ##
-        ## Loads ``<config-dir>/repos-enabled/{name}.conf`` for each name,
-        ## where ``config-dir`` is the parent directory of the config file
-        ## at *config_path*.
+        ## Loads ``<config_dir>/repos-enabled/{name}.conf`` for each name.
         ##
         ## @param repo_names  List of repo names (``*.conf`` filenames without
         ##                    the extension).
-        ## @param config_path Path to the configuration file.
+        ## @param config_dir  Path to the configuration directory.
         ## @return A ``Repos`` instance containing the resolved repos.
 
         from ..config import Config
 
-        cfg = Config.load(config_path)
+        cfg = Config.load(config_dir)
         repos_dir = Path(cfg.config_dir) / "repos-enabled"
 
         instances = cls()
@@ -909,7 +907,7 @@ class Repos(NodeList[Repo]):
 
         return instances
 
-    def sync_all(self, config_path: Optional[str] = None) -> None:
+    def sync_all(self, config_dir: Optional[str] = None) -> None:
         ## @brief Sync all repos in this collection.
         ##
         ## Sets ``session_ts``, registers a SIGINT handler that kills
@@ -918,13 +916,12 @@ class Repos(NodeList[Repo]):
         ## NDJSON, and prints a cross-repo summary table.
         ## Pool sweep is handled by the caller.
         ##
-        ## @param config_path  Path to the configuration file (passed to
-        ##                     ``from_names`` if used externally).
+        ## @param config_dir  Path to the configuration directory.
         ## @return None
 
         from ..config import Config
 
-        cfg = Config.load(config_path)
+        cfg = Config.load(config_dir)
 
         if not self:
             log("No repos to sync", level="WARN")
@@ -1008,6 +1005,7 @@ class Repos(NodeList[Repo]):
         for repo in self:
             repo._repo_vars = RepoVars(
                 pool_inv=pool_inv,
+                mirror_root=cfg.mirror_root,
                 repo_root=cfg.repo_root,
                 pool_root=cfg.pool_root,
             )
@@ -1051,7 +1049,7 @@ class Repos(NodeList[Repo]):
             for repo in self:
                 stats.write_ndjson(
                     self.session_ts, repo,
-                    repo_root=repo._repo_vars.repo_root if repo._repo_vars else "",
+                    mirror_root=repo._repo_vars.mirror_root if repo._repo_vars else "",
                     peak_rss_mb=rss_mb,
                 )
 
@@ -1121,7 +1119,7 @@ class Repos(NodeList[Repo]):
             cfg.repo_root,
         )
 
-        with RepoLock(cfg.repo_root, name):
+        with RepoLock(cfg.mirror_root, name):
             log(f"Syncing repo '{name}' to '{repo.get('dest', '')}'", level="INFO")
             # Thread-safety: each repo is processed by exactly one worker
             # thread (_sync_one is never submitted twice for the same repo),
@@ -1154,13 +1152,11 @@ class Repos(NodeList[Repo]):
         if not rows:
             return
 
-        from ..lib import fmt_duration
-
         print_summary_table(
             rows,
             session_start=fmt_datetime(self.session_start),
             session_end=fmt_datetime(self.session_end),
-            session_elapsed=fmt_duration(self.session_elapsed),
+            session_elapsed=self.session_elapsed,
         )
 
     @staticmethod

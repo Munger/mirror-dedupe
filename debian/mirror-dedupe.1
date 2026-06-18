@@ -5,8 +5,8 @@ mirror-dedupe \- Ubuntu/Debian mirror synchronisation with global deduplication 
 .B mirror-dedupe
 .RB [ \-\-help ]
 .RB [ \-\-version ]
-.RB [ \-\-config
-.IR PATH ]
+.RB [ \-\-config-dir
+.IR DIR ]
 .RB [ \-\-sync ]
 .RB [ \-\-mirror
 .IR NAME ]
@@ -57,8 +57,10 @@ mirror-dedupe \- Ubuntu/Debian mirror synchronisation with global deduplication 
 .B mirror-dedupe
 synchronises Debian/Ubuntu package repositories into a pool-based,
 content-addressable store and uses hardlinks for global deduplication
-across all mirrored repositories.  Pool and repository must reside on
-the same filesystem; hardlinks are a fundamental requirement.
+across all mirrored repositories.  Both the repository tree and the
+deduplication pool are always subdirectories of \fBmirror_root\fR, which
+guarantees they reside on the same logical volume \(em a requirement for
+hardlink-based deduplication.
 .PP
 Modes of operation:
 .IP \(bu 3
@@ -86,8 +88,10 @@ Show help message and exit.
 .BR \-\-version ", " \-v
 Show program version and exit.
 .TP
-.BR \-\-config " " \fIPATH\fR
-Path to mirror-dedupe.conf (default: /etc/mirror-dedupe/mirror-dedupe.conf).
+.BR \-\-config-dir " " \fIDIR\fR
+Path to the configuration directory (default: /etc/mirror-dedupe).
+The directory must contain \fBmirror-dedupe.conf\fR and may contain
+\fBrepos-available/\fR and \fBrepos-enabled/\fR subdirectories.
 .TP
 .BR \-\-sync
 Run the full sync pipeline for all enabled mirrors (or a single mirror
@@ -111,7 +115,7 @@ documented in mirror-dedupe-scan(1).
 Repository name (required for \-\-scan).
 .TP
 .BR \-\-dest " " \fIDEST\fR
-Destination path relative to repo_root (defaults to \-\-name).
+Destination path relative to mirror_root/repos (defaults to \-\-name).
 .TP
 .BR \-U ", " \-\-upstream " " \fIURL\fR
 Upstream URL(s) for scanning.  May be specified multiple times.
@@ -181,7 +185,7 @@ manual pool manipulation.
 .TP
 .BR \-\-snapshot " " \fI[NAME]\fR
 Create a hardlink snapshot of a repo dest directory or ALL repos.
-Snapshots are stored under repo_root/Snapshots/.
+Snapshots are stored under mirror_root/repos/Snapshots/.
 .TP
 .BR \-\-list-snapshots " " \fI[NAME]\fR
 List available snapshots for a repo or ALL.
@@ -209,14 +213,11 @@ Skip current-state backup before a restore operation.
 .SH CONFIGURATION
 .SS Global configuration (\fImirror-dedupe.conf\fR)
 .TP
-.I repo_root
-Root directory for mirrored repository data.  Must be on the same
-filesystem as pool_root.
-.TP
-.I pool_root
-Content-addressable pool directory for deduplicated storage.  Files are
-stored under by-hash/SHA256/*/.  Must be on the same filesystem as
-repo_root.
+.I mirror_root
+Root directory for all mirror data.  The repository tree is stored under
+\fB<mirror_root>/repos\fR and the content-addressable pool under
+\fB<mirror_root>/pool\fR.  Both subdirectories always reside on the same
+logical volume.  Default: \fB/srv/mirror\fR.
 .TP
 .I architectures
 Global architecture mask.  Only architectures present in both this list
@@ -255,7 +256,7 @@ Default: NONE.
 .I additional_repos
 List of repos not in repos-enabled/ but recognised by \-\-list-repos,
 \-\-delete, snapshot ops, and Config.resolve_dest().  Each entry has a
-name and dest (relative to repo_root or absolute).
+name and dest (relative to mirror_root/repos or absolute).
 .SS Per-mirror configuration (\fIrepos-available/*.conf\fR)
 Each YAML file defines one repository mirror:
 .TP
@@ -263,7 +264,7 @@ Each YAML file defines one repository mirror:
 Mirror identifier (required).
 .TP
 .I dest
-Local destination path relative to repo_root.
+Local destination path relative to mirror_root/repos.
 .TP
 .I repo_type
 Repo type override (e.g. "apt").  Normally auto-detected.
@@ -297,7 +298,7 @@ distributions listed, with no automatic expansion.
 URL to the repository's GPG signing key.
 .TP
 .I gpg_key_path
-Relative path under repo_root where the GPG key is stored.
+Relative path under mirror_root/repos where the GPG key is stored.
 .TP
 .I params
 Optional per-repo parameter overrides:
@@ -348,6 +349,9 @@ Restore latest snapshot for a repo:
 .B mirror-dedupe \-\-restore-snapshot ubuntu
 .SH FILES
 .TP
+.I /etc/mirror-dedupe/
+Default configuration directory.
+.TP
 .I /etc/mirror-dedupe/mirror-dedupe.conf
 Main configuration file.
 .TP
@@ -357,11 +361,27 @@ Available mirror configurations.
 .I /etc/mirror-dedupe/repos-enabled/
 Enabled mirror configurations (symlinks to repos-available).
 .TP
+.I /srv/mirror/
+Default mirror_root.
+.TP
 .I /srv/mirror/repos/
-Default repo_root.
+Repository tree (derived from mirror_root).
 .TP
 .I /srv/mirror/pool/
-Default pool_root.
+Content-addressable pool (derived from mirror_root).
+.TP
+.I /srv/mirror/mirror-dedupe/
+Tool metadata directory (derived from mirror_root).
+Contains one subdirectory per repo, each holding a \fBsync.lock\fR file
+(an \fBflock\fR(2) exclusive lock held during sync) and a
+\fBstats.ndjson\fR file (append-only sync history).
+This directory is intentionally excluded from snapshots — lock files are
+transient and stats are non-critical; restoring a snapshot leaves mirror
+content correct regardless of whether stats are current.
+This directory is safe to delete when no sync is running.
+Deleting it during a sync removes the mutual exclusion that prevents
+concurrent syncs on the same repo.
+Use \fB\-\-stats-reset\fR to clear statistics via the normal CLI.
 .SH SYSTEMD INTEGRATION
 The package includes systemd timer and service units:
 .TP

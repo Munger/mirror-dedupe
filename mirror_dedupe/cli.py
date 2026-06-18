@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from . import __version__
-from .config import Config, DEFAULT_CONFIG_PATH
+from .config import Config, DEFAULT_CONFIG_DIR
 from .lib.log import log
 
 
@@ -56,7 +56,7 @@ def _list_dests(cfg: Config) -> List[str]:
     ## @brief Return all dest directories under ``repo_root``.
     ##
     ## Iterates first-level subdirectories of ``repo_root``, excluding
-    ## ``Snapshots/`` and ``.mirror-dedupe/``, and adds any
+    ## ``Snapshots/`` and any hidden directories, and adds any
     ## ``additional_repos`` dests that may not yet exist on disk.
     ##
     ## @param cfg  Global ``Config`` singleton.
@@ -221,8 +221,8 @@ def main():
     global_grp = parser.add_argument_group('Global options')
     global_grp.add_argument('--version', '-v', action='version',
                             version=f'mirror-dedupe {__version__}')
-    global_grp.add_argument('--config', dest='config_path', default=None,
-                            help='Path to config file (default: /etc/mirror-dedupe/mirror-dedupe.conf)')
+    global_grp.add_argument('--config-dir', dest='config_path', default=None,
+                            help=f'Path to config directory (default: {DEFAULT_CONFIG_DIR})')
 
     # ── Sync options ──────────────────────────────────────────────────
     sync_grp = parser.add_argument_group('Sync options')
@@ -240,7 +240,7 @@ def main():
     scan_grp.add_argument('--name', metavar='NAME',
                           help='Repository name (required for --scan)')
     scan_grp.add_argument('--dest', metavar='DEST',
-                          help='Destination path relative to repo_root (defaults to --name)')
+                          help='Destination path relative to mirror_root/repos (defaults to --name)')
     scan_grp.add_argument('--out', dest='out_dir', metavar='DIR',
                           help='Output directory for generated config (required for --scan)')
     scan_grp.add_argument('-U', '--upstream', '--upstreams', dest='upstreams',
@@ -306,8 +306,8 @@ def main():
                           help='Re-link pool hashes with all managed repos and snapshots')
     mgmt_grp.add_argument('--migrate', action='store_true',
                           help='Migrate a legacy repo tree to the current layout (not yet implemented)')
-    mgmt_grp.add_argument('--stats', metavar='NAME', nargs='?', const='ALL',
-                          help='Print sync statistics for a repo or ALL repos')
+    mgmt_grp.add_argument('--stats', metavar='NAME', nargs='?', const='_SUMMARY',
+                          help='Print sync statistics: latest per repo (no arg), full history per repo (ALL), or full history for NAME')
     mgmt_grp.add_argument('--stats-reset', metavar='NAME', nargs='?', const='ALL',
                           help='Truncate stats.ndjson for a repo or ALL (requires PIN)')
 
@@ -387,8 +387,8 @@ def main():
                 )
                 sys.exit(1)
 
-        repos = Repos.from_names(repo_names, config_path=args.config_path)
-        repos.sync_all(config_path=args.config_path)
+        repos = Repos.from_names(repo_names, config_dir=args.config_path)
+        repos.sync_all(config_dir=args.config_path)
         if args.sweep or cfg_main.sweep_pool_after_sync:
             pool_sweep_safe(cfg_main, fail_if_locked=False)
         sys.exit(0)
@@ -587,7 +587,7 @@ def main():
 
         include_dirs: list[str] = []
         if not os.path.isdir(cfg_main.repo_root):
-            log(f"ERROR: repo_root '{cfg_main.repo_root}' does not exist", level="ERROR")
+            log(f"ERROR: mirror_root/repos '{cfg_main.repo_root}' does not exist", level="ERROR")
             sys.exit(1)
 
         for entry in sorted(os.listdir(cfg_main.repo_root)):
@@ -880,40 +880,57 @@ def main():
         from .stats import read_ndjson, format_row, print_summary_table
 
         name = args.stats
-        if name != "ALL":
-            candidates = cfg_main.list_repo_names()
-            if not candidates:
-                print("No repos found")
-                sys.exit(1)
-            name = _resolve_name_or_index(name, candidates, "repo")
 
-            records = list(read_ndjson(cfg_main.repo_root, name))
-            if not records:
-                print(f"No stats records for '{name}'")
+        def _enabled_names() -> List[str]:
+            enabled_dir = Path(cfg_main.config_dir) / "repos-enabled"
+            if not enabled_dir.is_dir():
+                print("No active repos")
                 sys.exit(0)
-            rows = [format_row(r, name) for r in records]
+            ns = sorted(f.stem for f in enabled_dir.glob("*.conf"))
+            if not ns:
+                print("No active repos")
+                sys.exit(0)
+            return ns
+
+        if name == "_SUMMARY":
+            # No arg: one row per enabled repo showing their latest sync
+            rows: List[Dict[str, str]] = []
+            for n in _enabled_names():
+                rec = next(read_ndjson(cfg_main.mirror_root, n), None)
+                if rec:
+                    rows.append(format_row(rec, n))
+            if not rows:
+                print("No stats records found")
+                sys.exit(0)
             print_summary_table(rows)
             sys.exit(0)
 
-        # ALL: most recent record per enabled repo
-        enabled_dir = Path(cfg_main.config_dir) / "repos-enabled"
-        if not enabled_dir.is_dir():
-            print("No active repos")
-            sys.exit(0)
-        names = sorted(f.stem for f in enabled_dir.glob("*.conf"))
-        if not names:
-            print("No active repos")
+        if name == "ALL":
+            # Full history per enabled repo, one labelled table per repo
+            any_records = False
+            for n in _enabled_names():
+                records = list(read_ndjson(cfg_main.mirror_root, n))
+                if not records:
+                    continue
+                any_records = True
+                print_summary_table([format_row(r, n) for r in records],
+                                    show_name=False, show_total=False, title=n)
+            if not any_records:
+                print("No stats records found")
             sys.exit(0)
 
-        rows: List[Dict[str, str]] = []
-        for n in names:
-            rec = next(read_ndjson(cfg_main.repo_root, n), None)
-            if rec:
-                rows.append(format_row(rec, n))
-        if not rows:
-            print("No stats records found")
+        # Named repo: full history
+        candidates = cfg_main.list_repo_names()
+        if not candidates:
+            print("No repos found")
+            sys.exit(1)
+        name = _resolve_name_or_index(name, candidates, "repo")
+        records = list(read_ndjson(cfg_main.mirror_root, name))
+        if not records:
+            print(f"No stats records for '{name}'")
             sys.exit(0)
-        print_summary_table(rows)
+        print_summary_table([format_row(r, name) for r in records],
+                            show_name=False, show_total=False, title=name)
         sys.exit(0)
 
     # ------------------------------------------------------------------
@@ -930,11 +947,11 @@ def main():
 
         def _reset_stats(repo_name: str) -> None:
             ## @brief Truncate the NDJSON stats file for a repo.
-            ## @param repo_name  Name of the repo (subdirectory under ``.mirror-dedupe/``).
+            ## @param repo_name  Name of the repo (subdirectory under ``mirror-dedupe/``).
             ## @return None
-            cleared = clear_ndjson(cfg_main.repo_root, repo_name)
+            cleared = clear_ndjson(cfg_main.mirror_root, repo_name)
             if cleared is None:
-                p = Path(cfg_main.repo_root) / ".mirror-dedupe" / repo_name / "stats.ndjson"
+                p = Path(cfg_main.mirror_root) / "mirror-dedupe" / repo_name / "stats.ndjson"
                 print(f"[{repo_name}] No stats.ndjson at {p} (nothing to reset)")
             else:
                 print(f"[{repo_name}] Reset stats.ndjson at {cleared}")
@@ -1126,17 +1143,18 @@ def main():
             print("    ERROR: Upstream is not reachable over HTTP/HTTPS (curl failed)")
             sys.exit(1)
 
-        print("  Filesystem check (pool vs repo)...")
+        print("  Filesystem check (mirror_root/repos vs mirror_root/pool)...")
         try:
             pool_dev = os.stat(cfg_main.pool_root).st_dev
             repo_dev = os.stat(cfg_main.repo_root).st_dev
             same_fs = "yes" if pool_dev == repo_dev else "NO"
-            print(f"    pool ({cfg_main.pool_root}) and repo ({cfg_main.repo_root}): "
+            print(f"    repos ({cfg_main.repo_root}) and pool ({cfg_main.pool_root}): "
                   f"same filesystem = {same_fs}")
             if pool_dev != repo_dev:
-                print("    WARNING: Hardlink deduplication requires pool and repo to be on the same volume.")
+                print("    WARNING: A symlink or bind mount is redirecting one of these "
+                      "directories to a foreign volume — hardlink deduplication will not work.")
         except OSError as e:
-            print(f"    ERROR: Cannot stat pool or repo root: {e}")
+            print(f"    ERROR: Cannot stat mirror_root/repos or mirror_root/pool: {e}")
 
         if gpg_key_url:
             print("")
@@ -1183,7 +1201,7 @@ def main():
 
         data_path = os.path.abspath(data_path)
         if not data_path.startswith(os.path.abspath(cfg_main.repo_root)):
-            log(f"ERROR: Refusing to reinitialise data directory outside repo_root: {data_path}", level="ERROR")
+            log(f"ERROR: Refusing to reinitialise data directory outside mirror_root/repos: {data_path}", level="ERROR")
             sys.exit(1)
 
         if not os.path.exists(data_path):

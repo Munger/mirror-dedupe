@@ -15,12 +15,12 @@
 ## discovery.
 ##
 ## Usage:
-##   bash tests/unit-config/batch-scan.sh --outdir <dir> [--config <path>]
+##   bash tests/unit-config/batch-scan.sh --outdir <dir> [--config-dir <dir>]
 ##
 ## Options:
-##   --outdir <dir>    Output directory for scan results (created if absent).
-##   --config <path>   Path to mirror-dedupe.conf.  If omitted a minimal
-##                     config is generated at <outdir>/mirror-dedupe.conf.
+##   --outdir <dir>       Output directory for scan results (created if absent).
+##   --config-dir <dir>   Config directory containing mirror-dedupe.conf.
+##                        If omitted a minimal config is generated inside <outdir>.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -29,21 +29,21 @@ set -uo pipefail
 
 trap 'echo "" >&2; echo "Aborted by user." >&2; exit 130' INT
 
-CONFIG=""
+CONFIG_DIR=""
 OUTDIR=""
 NO_FILTER=false
 EMIT_JSON=false
 
 usage() {
   cat <<EOF >&2
-Usage: $(basename "$0") --outdir <dir> [--config <path>] [--no-filter] [--emit-json]
+Usage: $(basename "$0") --outdir <dir> [--config-dir <dir>] [--no-filter] [--emit-json]
 
 Required:
-  --outdir <dir>    Output directory (created if it does not exist)
+  --outdir <dir>       Output directory (created if it does not exist)
 
 Optional:
-  --config <path>   Path to mirror-dedupe.conf. If omitted, a minimal config
-                    is generated at <outdir>/mirror-dedupe.conf.
+  --config-dir <dir>   Config directory containing mirror-dedupe.conf.
+                       If omitted, a minimal config is generated inside <outdir>.
   --no-filter       Discover every distribution and architecture from each
                     upstream, ignoring filters in the YAML candidate and
                     architecture restrictions in mirror-dedupe.conf.
@@ -56,12 +56,12 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --config)
+    --config-dir)
       if [[ -z "${2:-}" ]]; then
-        echo "ERROR: --config requires an argument" >&2
+        echo "ERROR: --config-dir requires an argument" >&2
         usage
       fi
-      CONFIG="$2"
+      CONFIG_DIR="$2"
       shift 2
       ;;
     --outdir)
@@ -96,17 +96,16 @@ OUTDIR="$(cd "$OUTDIR" 2>/dev/null && pwd -P || echo "${OUTDIR}")"
 
 mkdir -p "${OUTDIR}"
 
-# Generate minimal config file when --config was not provided
-if [[ -z "${CONFIG}" ]]; then
-  CONFIG="${OUTDIR}/mirror-dedupe.conf"
-  if [[ ! -f "${CONFIG}" ]]; then
-    cat > "${CONFIG}" <<CONF
-repo_root: /tmp/scan-root/repos
-pool_root: /tmp/scan-root/pool
+# Generate minimal config directory/file when --config-dir was not provided
+if [[ -z "${CONFIG_DIR}" ]]; then
+  CONFIG_DIR="${OUTDIR}"
+  if [[ ! -f "${CONFIG_DIR}/mirror-dedupe.conf" ]]; then
+    cat > "${CONFIG_DIR}/mirror-dedupe.conf" <<CONF
+mirror_root: /tmp/scan-root
 architectures: ['amd64']
 collapse_distributions: true
 CONF
-    echo "Created ${CONFIG}" >&2
+    echo "Created ${CONFIG_DIR}/mirror-dedupe.conf" >&2
   fi
 fi
 
@@ -165,7 +164,7 @@ for yaml_file in "${CANDIDATES_DIR}"/*.yaml; do
     scan_flags+=(--emit-json)
   fi
 
-  if ! ${SCAN_CMD} --config "${CONFIG}" --out "${OUTDIR}" ${scan_flags[@]+"${scan_flags[@]}"} ${extra_args}; then
+  if ! ${SCAN_CMD} --config-dir "${CONFIG_DIR}" --out "${OUTDIR}" ${scan_flags[@]+"${scan_flags[@]}"} ${extra_args}; then
     echo "ERROR: scan for ${name} failed (see above); continuing with next candidate" >&2
   fi
   echo "" >&2
@@ -179,5 +178,5 @@ Output directory: ${OUTDIR}
 Config files:    ${OUTDIR}/*.conf
 
 Next steps for each NAME above:
-  mirror-dedupe --config ${CONFIG} --test NAME
+  mirror-dedupe --config-dir ${CONFIG_DIR} --test NAME
 EOF

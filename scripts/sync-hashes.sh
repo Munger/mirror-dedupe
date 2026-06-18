@@ -297,7 +297,6 @@ trap 'exec {wf_fd}>&- 2>/dev/null; exec {wf_ka}>&- 2>/dev/null; kill $worker_pid
 ## --- Main feed loop --------------------------------------------------------
 ## Process substitution runs find -printf; the outer while loop reads
 ## null-delimited inode\0path\0 pairs from it.
-## find prunes .mirror-dedupe directories to exclude stats and lock files.
 while IFS= read -r -d '' inode && IFS= read -r -d '' repo_file; do
   set +e
 
@@ -338,7 +337,7 @@ while IFS= read -r -d '' inode && IFS= read -r -d '' repo_file; do
   if ! printf '%s|%s\0' "$inode" "$repo_file" >&$wf_fd 2>/dev/null; then
     break
   fi
-done < <($FIND_TOOL "${find_roots[@]}" -xdev \( -type d -name ".mirror-dedupe" -prune \) -o -type f -printf '%i\0%p\0' 2>/dev/null || true)
+done < <($FIND_TOOL "${find_roots[@]}" -xdev -type f -printf '%i\0%p\0' 2>/dev/null || true)
 
 set -e
 

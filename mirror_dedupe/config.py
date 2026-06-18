@@ -21,49 +21,58 @@ from typing import Dict, List
 from mirror_dedupe.lib.log import log, setup_log_colours
 
 
-DEFAULT_CONFIG_PATH = "/etc/mirror-dedupe/mirror-dedupe.conf"
+DEFAULT_CONFIG_DIR = "/etc/mirror-dedupe"
+CONFIG_FILENAME = "mirror-dedupe.conf"
 
 
 class Config:
     ## @brief Singleton-style loader for global config with attribute access.
 
     _instance: "Config | None" = None
-    _config_path: str | None = None
+    _config_dir: str | None = None
 
     @classmethod
-    def load(cls, config_path: str | None = None) -> "Config":
-        ## @brief Load (or return cached) Config for *config_path*.
+    def load(cls, config_dir: str | None = None) -> "Config":
+        ## @brief Load (or return cached) Config for *config_dir*.
         ##
         ## Returns the cached instance if one exists for the default
-        ## path when called without an explicit override.  When an
-        ## explicit *config_path* is given, reloads if different from
-        ## the cached path.
+        ## directory when called without an explicit override.  When an
+        ## explicit *config_dir* is given, reloads if different from
+        ## the cached directory.
         ##
-        ## @param config_path  Path to the configuration file.
+        ## @param config_dir  Path to the configuration directory.
         ## @return A Config instance.
 
-        config_path_resolved = str(Path(config_path or DEFAULT_CONFIG_PATH).resolve())
+        config_dir_resolved = str(Path(config_dir or DEFAULT_CONFIG_DIR).resolve())
         if cls._instance is not None:
-            if config_path is None or config_path == DEFAULT_CONFIG_PATH:
+            if config_dir is None or config_dir == DEFAULT_CONFIG_DIR:
                 return cls._instance
-            if cls._config_path == config_path_resolved:
+            if cls._config_dir == config_dir_resolved:
                 return cls._instance
-        cls._instance = cls(config_path_resolved)
-        cls._config_path = config_path_resolved
+        cls._instance = cls(config_dir_resolved)
+        cls._config_dir = config_dir_resolved
         return cls._instance
 
-    def __init__(self, config_file_resolved: str) -> None:
-        ## @brief Initialise Config from a resolved config file path.
+    def __init__(self, config_dir_resolved: str) -> None:
+        ## @brief Initialise Config from a resolved configuration directory.
         ##
-        ## Loads *config_file_resolved* and extracts global settings
-        ## (``repo_root``, ``pool_root``,
-        ## ``architectures``, ``collapse_distributions``,
+        ## The configuration directory has a fixed structure:
+        ##   ``<config_dir>/mirror-dedupe.conf`` — global settings
+        ##   ``<config_dir>/repos-available/``   — available repo configs
+        ##   ``<config_dir>/repos-enabled/``     — enabled repo configs
+        ##
+        ## Loads ``mirror-dedupe.conf`` and extracts global settings
+        ## (``mirror_root``, ``architectures``, ``collapse_distributions``,
         ## ``parallel_downloads``, ``connect_timeout``,
         ## ``sweep_pool_after_sync``) into named attributes.
         ##
-        ## Validates that ``repo_root`` and ``pool_root`` are on the same
-        ## filesystem (``st_dev`` comparison) — hardlink deduplication
-        ## requires both directories to reside on the same logical volume.
+        ## ``repo_root`` and ``pool_root`` are always derived from
+        ## ``mirror_root`` as ``<mirror_root>/repos`` and
+        ## ``<mirror_root>/pool`` respectively — they are never specified
+        ## independently in the config file.  When both directories exist,
+        ## their ``st_dev`` values are compared to detect symlinks or bind
+        ## mounts that could graft in a foreign volume; hardlink-based
+        ## deduplication requires both to reside on the same logical volume.
         ##
         ## Iterates ``repos-enabled/*.conf`` for mirror definitions,
         ## resolves relative ``dest`` paths against ``repo_root``.
@@ -75,42 +84,42 @@ class Config:
         ## that both attribute and dict-style access return identical
         ## values.
         ##
-        ## @param config_file_resolved  Absolute path to the configuration
-        ##                              file.
+        ## @param config_dir_resolved  Absolute path to the configuration
+        ##                             directory.
 
-        self._config_file = config_file_resolved
-        self._config_dir = str(Path(config_file_resolved).parent)
+        self._config_dir = config_dir_resolved
+        self._config_file = str(Path(config_dir_resolved) / CONFIG_FILENAME)
         try:
-            with open(config_file_resolved, 'r') as f:
+            with open(self._config_file, 'r') as f:
                 self._data = yaml.safe_load(f) or {}
         except Exception as e:
-            log(f"Error loading configuration from {config_file_resolved}: {e}", level="ERROR")
+            log(f"Error loading configuration from {self._config_file}: {e}", level="ERROR")
             sys.exit(1)
 
-        self.repo_root = self._data.get('repo_root', '/srv/mirror/repos')
-        self.pool_root = self._data.get('pool_root', '/srv/mirror/pool')
+        mirror_root = self._data.get('mirror_root', '/srv/mirror')
+        self.mirror_root = mirror_root
+        self.repo_root = str(Path(mirror_root) / 'repos')
+        self.pool_root = str(Path(mirror_root) / 'pool')
 
-        # Verify pool and repo are on the same filesystem (hardlinks required)
+        # Guard against symlinks or bind mounts grafting a foreign volume
+        # under mirror_root.  Only checked when both directories exist; on a
+        # fresh install they will be created under mirror_root and will
+        # naturally share the same device.
         try:
-            pool_dev = os.stat(self.pool_root).st_dev
-            repo_dev = os.stat(self.repo_root).st_dev
-        except OSError as e:
-            log(
-                f"ERROR: Cannot access pool_root or repo_root: {e}",
-                level="ERROR"
-            )
-            sys.exit(1)
-        if pool_dev != repo_dev:
-            log(
-                "ERROR: pool_root and repo_root are on different filesystems. "
-                "mirror-dedupe requires pool and repository to reside on the same "
-                "logical volume for hardlink-based deduplication. "
-                f"pool st_dev={pool_dev}, repo st_dev={repo_dev}. "
-                "Use LVM to place both directories on the same volume, or "
-                "adjust pool_root/repo_root in mirror-dedupe.conf.",
-                level="ERROR"
-            )
-            sys.exit(1)
+            repos_stat = Path(self.repo_root).stat()
+            pool_stat = Path(self.pool_root).stat()
+            if repos_stat.st_dev != pool_stat.st_dev:
+                log(
+                    f"ERROR: mirror_root/repos and mirror_root/pool are on different "
+                    f"filesystems (st_dev {repos_stat.st_dev} vs {pool_stat.st_dev}). "
+                    f"A symlink or bind mount under '{mirror_root}' is redirecting one "
+                    f"of these directories to a foreign volume. "
+                    f"Hardlink-based deduplication requires both on the same logical volume.",
+                    level="ERROR",
+                )
+                sys.exit(1)
+        except FileNotFoundError:
+            pass  # directories not yet created — will land on the same volume
 
         self.architectures = self._data.get('architectures', '*')
         self.collapse_distributions = self._data.get('collapse_distributions', False)
@@ -187,6 +196,7 @@ class Config:
                     )
 
         self.mirrors = mirrors
+        self._data['mirror_root'] = self.mirror_root
         self._data['repo_root'] = self.repo_root
         self._data['pool_root'] = self.pool_root
         self._data['architectures'] = self.architectures
@@ -209,7 +219,7 @@ class Config:
 
     @property
     def config_dir(self) -> str:
-        ## @brief Return the configuration directory (parent of the config file).
+        ## @brief Return the configuration directory.
         ## @return Absolute path to the config directory.
         return self._config_dir
 

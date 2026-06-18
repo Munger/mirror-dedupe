@@ -24,7 +24,7 @@ rm /etc/mirror-dedupe/repos-enabled/<name>.conf
 
 ```yaml
 name: <name>
-dest: <relative/path/from/repo_root>
+dest: <relative/path/from/mirror_root/repos>
 repo_type: apt
 upstreams:
   - url: https://upstream.example.com/repo
