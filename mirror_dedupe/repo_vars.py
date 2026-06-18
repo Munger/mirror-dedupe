@@ -116,8 +116,9 @@ class RepoVars:
     ##                hardlinked into this repo's dest directory).
     ## ``pool_inv`` — the global pool ``Inventory`` (hash→inode for every
     ##                file in the content-addressed pool).
-    ## ``repo_root`` — root of the repository tree on disk.
-    ## ``pool_root`` — root of the content-addressed pool on disk.
+    ## ``mirror_root`` — root of all mirror data on disk.
+    ## ``repo_root``   — root of the repository tree (``<mirror_root>/repos``).
+    ## ``pool_root``   — root of the content-addressed pool (``<mirror_root>/pool``).
     ## ``sync_mode`` — ``True`` during a sync run (set on the specific
     ##                 repo before sync begins, cleared after).
     ## ``stats``    — accumulates per-node sync outcomes during a sync run;
@@ -125,6 +126,7 @@ class RepoVars:
 
     inv: Optional[Inventory] = None
     pool_inv: Optional[Inventory] = None
+    mirror_root: str = ""
     repo_root: str = ""
     pool_root: str = ""
     sync_mode: bool = False

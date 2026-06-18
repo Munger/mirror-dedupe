@@ -7,6 +7,6 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 User=root
-ExecStart=/usr/bin/mirror-dedupe --sync --config /etc/mirror-dedupe/mirror-dedupe.conf
+ExecStart=/usr/bin/mirror-dedupe --sync --config-dir /etc/mirror-dedupe
 StandardOutput=journal
 StandardError=journal

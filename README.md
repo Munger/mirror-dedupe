@@ -59,11 +59,13 @@ sudo ./install.sh
 
 Configuration files are located in `/etc/mirror-dedupe/`:
 
-- `mirror-dedupe.conf` — Global settings (repo_root, pool_root, concurrency, etc.)
+- `mirror-dedupe.conf` — Global settings (mirror_root, concurrency, etc.)
 - `repos-available/` — Available repository configurations
 - `repos-enabled/` — Enabled repositories (symlinks to repos-available)
 
-Pool and repository must reside on the same filesystem; hardlinks are a fundamental requirement.
+`mirror_root` is the single root for all mirror data.  Repositories are stored
+under `<mirror_root>/repos` and the deduplication pool under `<mirror_root>/pool`.
+Both always share the same logical volume, which is required for hardlinks.
 
 ### Adding a Repository
 
@@ -83,12 +85,12 @@ mirror-dedupe --test grafana
 mirror-dedupe --activate grafana
 ```
 
-### Advanced: Alternative config paths
+### Advanced: Alternative config directory
 
-Override the default config path with `--config`:
+Override the default config directory with `--config-dir`:
 
 ```bash
-mirror-dedupe --config /tmp/mirror/mirror-dedupe.conf --test grafana
+mirror-dedupe --config-dir /tmp/mirror --test grafana
 ```
 
 ### Pre-configured Repositories

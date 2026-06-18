@@ -338,7 +338,7 @@ def main() -> None:
     parser.add_argument('--name', required=True,
                         help='Repository name (used for config filename and mirror-dedupe NAME)')
     parser.add_argument('--dest',
-                        help='Destination path (relative to repo_root). Defaults to --name if omitted.')
+                        help='Destination path (relative to mirror_root/repos). Defaults to --name if omitted.')
     parser.add_argument('--out', dest='out_dir', required=True,
                         help='Output directory for scan results')
     parser.add_argument('-r', '--dist', '--release', action='append', dest='dist',

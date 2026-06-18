@@ -1,5 +1,5 @@
 <!--
-ARCHITECTURE.md : mirror-dedupe-dev architecture — sync pipeline design
+ARCHITECTURE.md : mirror-dedupe architecture — sync pipeline design
 
 Copyright (c) 2026 Tim Hosking
 Email: tim@mungerware.com
@@ -9,173 +9,235 @@ Licence: MIT
 
 # Architecture
 
-mirror-dedupe-dev is a pool-based content-addressable mirroring tool with
-schema-driven architecture.  This document covers the sync pipeline: how
-bucket-based workers transform upstream package metadata into pool-hardlinked
-repository trees.
-
-## Pipeline Overview
-
-```
-upstream                                  local
-─────────────────────────────────────     ─────────────────────────────────────
-Release + Packages.gz (HTTP)              .mirror-dedupe/pending/00/00/
-                                         .mirror-dedupe/pending/00/01/
-                                              ⋮
-                                         .mirror-dedupe/pending/ff/ff/
-                                         .mirror-dedupe/done/
-                                              ⋮
-pool/by-hash/SHA256/00/00/<fullhash>
-pool/by-hash/SHA256/00/01/<fullhash>
-      ⋮
-repo/dists/<suite>/<component>/...
-repo/pool/main/...
-```
-
-Four phases, executed in order:
-
-```
-  Scan  ──→  Partition  ──→  Execute  ──→  Cleanup
-```
-
-### Phase 1: Scan
-
-Discover repos, fetch Release files and Packages.gz, parse stanzas into
-metadata-only Index nodes.  Packages.gz bytes are stored on the Index node
-as `_raw_bytes` and serialised into `snapshot.json`.
-
-The snapshot contains Index nodes (path, kind, metadata, _raw_bytes) but
-**no Package children** — those are ephemeral and materialised only during
-partitioning.
-
-### Phase 2: Partition
-
-Load snapshot.json.  For each Index:
-
-1. Call `Index.parse()` — decompresses `_raw_bytes` and calls
-   `_parse_packages()`, which creates `Bucket` children instead of direct
-   `Package` children.
-2. Each Bucket covers a contiguous range of `sha256[:2]` prefix values
-   (e.g. `00`–`0F`), matching the pool directory layout
-   `by-hash/SHA256/{first2}/{next2}/`.
-3. Serialise each Bucket to a snapshot file at:
-   `pending/{first2}/{next2}/`
-4. The clone and its Buckets are garbage-collected before the next Index.
-
-The `pending/` directory mirrors the pool layout:
-
-```
-pending/             done/
-  ├── 00/              ├── 00/
-  │   ├── 00/          │   ├── 01/
-  │   └── 01/          │   └── 0a/
-  └── ab/              └── ab/
-      └── cd/              └── cd/
-```
-
-Only populated directories are created.  A Bucket at `pending/ab/cd/` covers
-all packages whose `sha256[:4]` starts with `abcd` — that is, `sha256[:2]`
-= `ab` and `sha256[2:4]` = `cd`.
-
-### Phase 3: Execute
-
-N worker processes share a per-repo quota.  Each worker:
-
-1. Lists `pending/` to find available directories (first two levels).
-2. Atomically claims a directory by `rename(pending/ab, working/ab)`.
-3. For each bucket file `working/ab/{prefix}.json`:
-   a. Deserialise the Bucket snapshot → Bucket node → Package children.
-   b. For each Package: `pool.check(hash)` → `pool.fetch(url, hash)` if
-      missing → `pool.link(hash, repo_path)`.
-4. On completion: `rename(working/ab, done/ab)`.
-
-Multiple workers claim directories in parallel; `rename()` provides atomic
-exclusion — two workers cannot claim the same directory.
-
-**Rebalancing**: each repo starts with a quota of worker slots.  When a
-repo's queue drains, its slots are reallocated to repos still processing.
-Since all `pending/` directories exist before execution starts, no per-file
-coordination or queue server is needed.
-
-### Phase 4: Cleanup
-
-- Remove all `done/` directories.
-- Remove stale `pending/` directories not in the current snapshot's set.
-- Pool sweep: walk `by-hash/SHA256/*/*/`, remove files with `st_nlink <= 1`,
-  prune empty directories.
+mirror-dedupe is a pool-based content-addressable mirroring tool with a
+schema-driven, stream architecture.  This document covers the directory
+layout, the schema tree, and the sync pipeline.
 
 ## Directory layout
 
-```
-<repo-root>/
-  dists/...
-  pool/...
-  .mirror-dedupe/
-    snapshot.json              ← metadata + _raw_bytes, no Package children
-    pending/                   ← per-sync generated buckets
-      00/                      ← first two hex chars of SHA-256
-        00/                    ← next two hex chars → bucket snapshot
-        01/
-        ...
-      ff/
-        ff/
-    done/                      ← claimed + completed buckets
-    working/                   ← claimed + in-progress buckets
-```
-
-## Data model (Bucket class)
+### Configuration
 
 ```
-Index
-  └── Bucket (Node subclass)
-        ├── first2: str       ← sha256[:2]
-        ├── next2: str        ← sha256[2:4]
-        └── packages: Packages
-              ├── Package      ← path, hash, size, uri
-              ├── Package
-              └── ...
+<config_dir>/                          default: /etc/mirror-dedupe/
+  mirror-dedupe.conf                   global settings
+  repos-available/<name>.conf          per-repo configurations
+  repos-enabled/<name>.conf            symlinks → repos-available/
 ```
 
-Each Bucket is a standalone Node that knows its pool directory range.  Its
-`sync()` method iterates Package children and delegates to `pool.fetch()` /
-`pool.link()`.
-
-## Worker model
+### Data
 
 ```
-┌─────────────────────────────────────┐
-│            Worker Pool              │
-│  ┌──────┐ ┌──────┐ ┌──────┐        │
-│  │  W1  │ │  W2  │ │  W3  │  ...   │
-│  └──┬───┘ └──┬───┘ └──┬───┘        │
-│     │        │        │            │
-│     ▼        ▼        ▼            │
-│  pending/  pending/  pending/      │
-│  claim     claim     claim         │
-│  rename    rename    rename        │
-│  ──────    ──────    ──────        │
-│  working/  working/  working/      │
-│  process   process   process       │
-│  ──────    ──────    ──────        │
-│  done/     done/     done/         │
-└─────────────────────────────────────┘
+<mirror_root>/                         default: /srv/mirror/
+  repos/                               repo_root
+    <dest>/                            per-repo tree (dest from repo config)
+      dists/
+        <suite>/
+          Release
+          Release.gpg
+          <component>/
+            binary-<arch>/
+              Packages.gz
+            source/
+              Sources.gz
+      pool/
+        <component>/
+          <prefix>/
+            <package>.deb              hardlinks into pool/by-hash/SHA256/
+  pool/                                pool_root
+    by-hash/SHA256/
+      <ab>/                            first 2 hex chars of SHA-256
+        <cd>/                          next 2 hex chars
+          <fullhash>                   canonical pool entry (64-char hex)
+    staging/                           temporary download area
+  mirror-dedupe/                       tool metadata — not mirror content
+    <name>/
+      sync.lock                        per-repo exclusive flock (flock(2))
+      stats.ndjson                     per-repo sync history (NDJSON, append-only)
 ```
 
-- Workers are multiprocessing (not threading), since `pool.fetch()` runs
-  curl subprocesses and I/O.
-- Worker count is configurable (`--workers N`).
-- Workers batch-claim 2–3 pending directories at a time to reduce
-  filesystem contention on `pending/`.
+The `mirror-dedupe/` directory holds tool metadata that is separate from
+mirror content.  Each per-repo subdirectory contains two files: `sync.lock`
+(an `flock(2)` exclusive lock held for the duration of a sync run) and
+`stats.ndjson` (an append-only record of historical sync statistics).
 
-## Cross-session behaviour
+**This directory is safe to delete when no sync is running.**  Deleting it
+during a sync is dangerous: the lock file disappearing mid-sync removes the
+mutual exclusion that prevents a second process from starting a concurrent
+sync on the same repo, and an in-progress write to `stats.ndjson` will be
+lost.  Use `--stats-reset` to clear statistics via the normal CLI.
 
-Each `mirror-dedupe sync` run:
+The directory is intentionally excluded from snapshots.  Lock files are
+transient by nature, and stats are non-critical — a snapshot restore leaves
+mirror content fully correct regardless of whether stats are current.
 
-1. Regenerates `pending/` from the fresh snapshot.
-2. Old pending directories from the previous run (left from a crash or
-   interrupt) are removed during cleanup or are overwritten by the new
-   partition phase.
-3. Each repo's worker quota is recalculated based on total workers and
-   repo sizes.
-4. Previously-synced pool content is reused — `pool.check(hash)` skips
-   files already present.
+`repo_root` and `pool_root` are always `<mirror_root>/repos` and
+`<mirror_root>/pool`.  Both reside on the same logical volume by
+construction; hardlink deduplication requires this.
+
+## Schema tree
+
+The in-memory schema mirrors the APT repository structure:
+
+```
+Repo  (Apt)
+  └── Distributions
+        └── Distribution
+              └── Release          one per suite
+                    └── Indices
+                          └── Index    Packages.gz / Sources.gz / etc.
+```
+
+Nodes are `MDNode` subclasses.  Each node carries:
+
+- `uri` — upstream HTTP URL
+- `path` — destination path relative to `repo_root`
+- `hash` / `size` — expected SHA-256 and byte count (set from Release or
+  Packages metadata; absent on Release nodes whose hash is not known ahead
+  of time)
+
+`stream()` is the lazy child-materialisation hook.  It is called after a
+node is synced and returns the node's children, which are then pushed onto
+the work queue.  This is what makes the pipeline streaming: Index children
+are only created after the Release file has been downloaded and parsed;
+Package children only after Packages.gz has been downloaded and parsed.
+
+## Inventories
+
+Two in-memory inventories are built at startup:
+
+**Pool inventory** (`Inventory.from_pool`) — one-time `find` scan of
+`pool/by-hash/SHA256/`, producing a bidirectional `{SHA-256 ↔ inode}` map.
+Built once before any repo sync starts and shared read-only across all
+worker threads.
+
+**Per-repo inventory** (`Inventory.from_path_file`) — built lazily when a
+repo's sync slot opens.  `build-repo-paths.sh` runs a single sequential
+`find` pass over all managed repo directories before sync workers start,
+writing null-delimited `path\0inode\0` pairs to
+`/tmp/mirror-dedupe/<dest>.paths` for each repo.  When a worker opens its
+path file:
+
+1. The file is unlinked immediately (kernel keeps the inode alive via the
+   open fd — vanishes even on crash).
+2. Every path found on disk is added to `stale_paths` — a stale candidate
+   until `Node.sync()` claims it.
+3. Each inode is cross-referenced against the pool inventory; matching
+   inodes populate the hash index for fast pool-hit detection.
+
+## Sync pipeline
+
+### Startup (coordinator thread)
+
+```
+Config.load()
+  └── derive repo_root, pool_root from mirror_root
+  └── verify repos and pool on same filesystem (st_dev check)
+
+Inventory.from_pool(pool_root)          single find pass over pool
+
+_build_repo_path_files(repo_root, ...)  bash: single find pass over repos
+                                        → /tmp/mirror-dedupe/<dest>.paths
+
+assign RepoVars to each repo            (no per-repo inventory yet)
+```
+
+### Concurrent repo syncs
+
+An outer `ThreadPoolExecutor(max_concurrent_syncs)` dispatches one thread
+per repo.  Each thread runs `_sync_one()`:
+
+```
+Inventory.from_path_file(...)           load path file, unlink it
+                                        → stale_paths + hash index
+
+RepoLock.acquire()                      exclusive flock on mirror-dedupe/<name>/sync.lock
+
+Repo.sync()
+  _build_sync_tree()                    construct Dist/Release/Index nodes
+                                        from config — no HTTP at this stage
+  _sync_content(pool)                   dynamic work queue (see below)
+  _sweep_stale()                        delete unclaimed files
+
+RepoLock.release()
+```
+
+### Dynamic work queue (`_sync_content`)
+
+An inner `ThreadPoolExecutor(parallel_downloads)` handles genuine downloads.
+The coordinator thread drives discovery:
+
+```
+stack ← all nodes from _tree_iter()
+
+while stack or futures:
+    for each node (uri + path set):
+
+        if pool_inv.has(node.hash):
+            ── fast path ──────────────────────────────────────────
+            node.sync()          os.link(pool_path, dest_path)
+                                 removes path from stale_paths
+            node.stream()    →   push children onto stack
+
+        else:
+            ── slow path ──────────────────────────────────────────
+            future = pool.submit(node.sync)
+            on completion:
+                node.stream() → push children onto stack
+```
+
+The fast path runs on the coordinator thread — a pool hit is a single
+`os.link()` call, cheap enough not to occupy a worker slot.  Discovery
+(Release → Index → Package) and downloading therefore overlap in time.
+
+### `Node.sync()` — three-phase strategy
+
+1. **Inventory fast path** — if the destination already exists on disk,
+   skip all I/O.  If the pool has the hash but the repo does not, hardlink
+   from pool to dest.
+
+2. **Staging lock + stat fallback** — acquire a per-hash `threading.Lock`
+   so concurrent threads downloading the same content race only once.
+   Double-checked locking: re-query inventories after acquiring the lock.
+   Fall back to `stat()` if inventories missed but files exist.
+
+3. **Genuine download** — curl downloads to `pool/staging/<hash>`, SHA-256
+   is verified on the fly, the staging file is atomically `os.replace`d
+   into `pool/by-hash/SHA256/<ab>/<cd>/<hash>`, then hardlinked into the
+   repo dest.
+
+### Stale sweep (`_sweep_stale`)
+
+`stale_paths` was populated at startup with every file found in the repo
+directory.  Every call to `Node.sync()` removes that node's path from the
+set the moment it is declared wanted — whether the outcome is a pool hit,
+a re-link, or a fresh download.
+
+After `_sync_content` drains, whatever remains in `stale_paths` existed on
+disk but was never wanted: old package versions, dropped architectures,
+removed distributions.  These are deleted, and empty directories are pruned
+bottom-up.
+
+## Deduplication
+
+Every unique file is stored exactly once in the pool, keyed by its SHA-256
+hash.  When a file is needed in a repo it is hardlinked from the pool —
+no bytes are copied.  Multiple repos or architectures sharing identical
+files share the same pool inode.
+
+A pool sweep (`--sweep-pool`) walks `pool/by-hash/SHA256/` and removes
+files whose link count has dropped to 1 (no repo references them).  It is
+safe to run only when no sync is in progress; `pool_sweep_safe()` checks
+all repo lock files before proceeding.
+
+## Concurrency safety
+
+- The pool inventory is written once before workers start and read-only
+  thereafter — no lock needed on reads.
+- Each per-repo inventory is owned by exactly one worker thread.
+- `Node.__setitem__` is protected by a per-node lock; workers update node
+  payloads (path, hash, size) safely.
+- Workers never add or remove structural children — the static tree
+  skeleton is fully built by `_build_sync_tree()` before `_sync_content`
+  runs.  The coordinator's `_tree_iter()` snapshot is therefore stable.
+- Per-hash staging locks prevent duplicate downloads when the same content
+  appears in multiple repos syncing concurrently.

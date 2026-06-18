@@ -87,10 +87,7 @@ mkdir -p "$dest_dir"
 ## needs no lookup table: it reads outfile\0rel\0inode\0 per file and
 ## routes directly.
 ##
-## .mirror-dedupe directories (stats files, lock files) are excluded
-## via -prune so they never appear in any repo's path list.
-
-find_expr=( "(" "-type" "d" "-name" ".mirror-dedupe" "-prune" ")" "-o" )
+find_expr=()
 
 first=1
 for name in "${dest_names[@]}"; do

@@ -3,7 +3,7 @@
 ## @brief Sync statistics lifecycle — write, read, format, and reset.
 ##
 ## Centralises all NDJSON stats management so callers never touch
-## ``.mirror-dedupe/<name>/stats.ndjson`` directly.  Provides the
+## ``mirror-dedupe/<name>/stats.ndjson`` directly.  Provides the
 ## formatting helpers used by the end-of-sync summary table and
 ## the ``--stats`` / ``--stats-reset`` CLI commands.
 ##
@@ -16,14 +16,14 @@ from pathlib import Path
 from typing import Dict, Generator, List, Optional
 
 
-def _ensure_dir(repo_root: str, name: str) -> Path:
+def _ensure_dir(mirror_root: str, name: str) -> Path:
     ## @brief Return the path to ``stats.ndjson``, creating the parent
     ##        directory if needed.
     ##
-    ## @param repo_root  Absolute path to the repository root.
-    ## @param name       Repo name (subdirectory under ``.mirror-dedupe/``).
+    ## @param mirror_root  Absolute path to the mirror root.
+    ## @param name         Repo name (subdirectory under ``mirror-dedupe/``).
     ## @return ``Path`` to ``stats.ndjson``.
-    stats_dir = Path(repo_root) / ".mirror-dedupe" / name
+    stats_dir = Path(mirror_root) / "mirror-dedupe" / name
     stats_dir.mkdir(parents=True, exist_ok=True)
     return stats_dir / "stats.ndjson"
 
@@ -31,32 +31,32 @@ def _ensure_dir(repo_root: str, name: str) -> Path:
 def write_ndjson(
     session_ts: str,
     repo: object,
-    repo_root: Optional[str] = None,
+    mirror_root: Optional[str] = None,
     peak_rss_mb: int = 0,
 ) -> None:
     ## @brief Append a stats NDJSON record for *repo* to its per-repo file.
     ##
-    ## Writes to ``<repo_root>/.mirror-dedupe/<name>/stats.ndjson``.
+    ## Writes to ``<mirror_root>/mirror-dedupe/<name>/stats.ndjson``.
     ## Computes delta_files and delta_bytes against the previous
     ## record for trend analysis.
     ##
     ## @param session_ts   ISO-8601 timestamp of the sync session start.
     ## @param repo         A ``Repo`` instance (duck-typed: needs a
     ##                     ``.stats()`` method and a ``.get("name")``).
-    ## @param repo_root    Optional repo_root override.  Falls back to
-    ##                     ``Config.repo_root`` when ``None``.
+    ## @param mirror_root  Optional mirror_root override.  Falls back to
+    ##                     ``Config.mirror_root`` when ``None``.
     ## @param peak_rss_mb  Peak RSS in MB for this sync session (default 0).
     ## @return None
     name = repo.get("name", "")
     if not name:
         return
 
-    if not repo_root:
+    if not mirror_root:
         from .config import Config
         cfg = Config.load()
-        repo_root = cfg.repo_root
+        mirror_root = cfg.mirror_root
 
-    stats_file = _ensure_dir(repo_root, name)
+    stats_file = _ensure_dir(mirror_root, name)
 
     from .lib.datetimeutils import fmt_isotimestamp
 
@@ -102,19 +102,19 @@ def write_ndjson(
 
 
 def read_ndjson(
-    repo_root: str, name: str
+    mirror_root: str, name: str
 ) -> Generator[Dict, None, None]:
     ## @brief Yield parsed NDJSON records for a repo, newest first.
     ##
-    ## Reads ``<repo_root>/.mirror-dedupe/<name>/stats.ndjson`` and
+    ## Reads ``<mirror_root>/mirror-dedupe/<name>/stats.ndjson`` and
     ## yields each line as a parsed dict, starting from the most
     ## recent record.
     ##
-    ## @param repo_root  Absolute path to the repository root.
-    ## @param name       Repo name.
+    ## @param mirror_root  Absolute path to the mirror root.
+    ## @param name         Repo name.
     ## @return Generator yielding dicts with raw NDJSON field names
     ##         (``file_count``, ``total_bytes``, etc.).
-    stats_file = Path(repo_root) / ".mirror-dedupe" / name / "stats.ndjson"
+    stats_file = Path(mirror_root) / "mirror-dedupe" / name / "stats.ndjson"
     if not stats_file.exists():
         return
     lines = stats_file.read_text().splitlines()
@@ -128,14 +128,14 @@ def read_ndjson(
             continue
 
 
-def clear_ndjson(repo_root: str, name: str) -> Optional[Path]:
+def clear_ndjson(mirror_root: str, name: str) -> Optional[Path]:
     ## @brief Truncate (clear) the NDJSON stats file for a repo.
     ##
-    ## @param repo_root  Absolute path to the repository root.
-    ## @param name       Repo name.
+    ## @param mirror_root  Absolute path to the mirror root.
+    ## @param name         Repo name.
     ## @return The ``Path`` that was cleared, or ``None`` if the file
     ##         did not exist.
-    stats_file = Path(repo_root) / ".mirror-dedupe" / name / "stats.ndjson"
+    stats_file = Path(mirror_root) / "mirror-dedupe" / name / "stats.ndjson"
     if not stats_file.exists():
         return None
     stats_file.write_text("")
@@ -147,12 +147,13 @@ def _col_widths(rows: List[Dict[str, str]]) -> Dict[str, int]:
     ##
     ## @param rows  List of formatted row dicts (output of ``format_row()``).
     ## @return Dict mapping column name to minimum width in characters.
-    widths = {"name": 20, "files": 8, "total": 10, "deduped": 12,
+    widths = {"dt": 17, "name": 20, "files": 8, "total": 10, "deduped": 12,
               "tx": 12, "hit": 8, "miss": 8, "errors": 6, "time": 11,
               "removed": 8}
     for r in rows:
         for k, v in r.items():
-            widths[k] = max(widths[k], len(v))
+            if k in widths:
+                widths[k] = max(widths[k], len(v))
     return widths
 
 
@@ -162,7 +163,9 @@ def _pad(s: str, width: int) -> str:
 
 
 # Column definitions: (dict_key, heading, alignment)
+# "dt" is omitted automatically when all rows have an empty dt value.
 _COLS = [
+    ("dt", "Date/Time", "left"),
     ("name", "Repository", "left"),
     ("files", "Files", "right"),
     ("total", "Total", "right"),
@@ -182,6 +185,9 @@ def print_summary_table(
     session_start: str = "",
     session_end: str = "",
     session_elapsed: str = "",
+    show_name: bool = True,
+    show_total: bool = True,
+    title: str = "",
 ) -> None:
     ## @brief Print a formatted cross-repo summary table to stdout.
     ##
@@ -199,8 +205,14 @@ def print_summary_table(
 
     from .lib import fmt_duration
 
+    show_dt = any(r.get("dt") for r in rows)
+    cols = [
+        (k, h, a) for k, h, a in _COLS
+        if (k != "dt" or show_dt) and (k != "name" or show_name)
+    ]
+
     cw = _col_widths(rows)
-    sep = "  ".join("-" * cw[k] for k, _, _ in _COLS)
+    sep = "  ".join("-" * cw[k] for k, _, _ in cols)
 
     total_files = sum(int(r["files"].replace(",", "")) for r in rows)
     total_bytes = sum(parse_fmt(r["total"]) for r in rows)
@@ -217,41 +229,54 @@ def print_summary_table(
     if session_end:
         print(f"  End:     {session_end}")
     if session_elapsed:
-        print(f"  Elapsed: {session_elapsed}")
+        print(f"  Elapsed: {fmt_duration(session_elapsed)}")
     if session_start or session_end or session_elapsed:
         print("")
-    print(sep)
+    if title:
+        label = f"  {title}  "
+        remaining = max(0, len(sep) - len(label))
+        left = remaining // 2
+        print("-" * left + label + "-" * (remaining - left))
+    else:
+        print(sep)
 
     header = ""
-    for key, heading, align in _COLS:
+    for key, heading, align in cols:
         w = cw[key]
-        if align == "left":
-            header += _pad(heading, w)
-        else:
-            header += heading.rjust(w)
+        header += _pad(heading, w) if align == "left" else heading.rjust(w)
         header += "  "
     print(header.rstrip("  "))
     print(sep)
 
     for r in rows:
-        line = _pad(r["name"], cw["name"]) + "  "
-        for key, _, _ in _COLS[1:]:
-            line += r[key].rjust(cw[key]) + "  "
+        line = ""
+        for key, _, align in cols:
+            val = r.get(key, "")
+            w = cw[key]
+            line += (_pad(val, w) if align == "left" else val.rjust(w)) + "  "
         print(line.rstrip("  "))
 
     print(sep)
-    total_line = _pad("Total", cw["name"]) + "  "
-    total_line += fmt_int(total_files).rjust(cw["files"]) + "  "
-    total_line += fmt_bytes(total_bytes).rjust(cw["total"]) + "  "
-    total_line += fmt_bytes(total_deduped).rjust(cw["deduped"]) + "  "
-    total_line += fmt_bytes(total_tx).rjust(cw["tx"]) + "  "
-    total_line += fmt_int(total_hits).rjust(cw["hit"]) + "  "
-    total_line += fmt_int(total_misses).rjust(cw["miss"]) + "  "
-    total_line += str(total_errors).rjust(cw["errors"]) + "  "
-    total_line += fmt_duration(session_elapsed).rjust(cw["time"]) if session_elapsed else " " * cw["time"]
-    total_line += "  "
-    total_line += fmt_int(total_removed).rjust(cw["removed"])
-    print(total_line)
+    if show_total:
+        total_vals = {
+            "dt": "",
+            "name": "Total",
+            "files": fmt_int(total_files),
+            "total": fmt_bytes(total_bytes),
+            "deduped": fmt_bytes(total_deduped),
+            "tx": fmt_bytes(total_tx),
+            "hit": fmt_int(total_hits),
+            "miss": fmt_int(total_misses),
+            "errors": str(total_errors),
+            "time": fmt_duration(session_elapsed) if session_elapsed else "",
+            "removed": fmt_int(total_removed),
+        }
+        total_line = ""
+        for key, _, align in cols:
+            val = total_vals.get(key, "")
+            w = cw[key]
+            total_line += (_pad(val, w) if align == "left" else val.rjust(w)) + "  "
+        print(total_line.rstrip("  "))
     print("")
 
 
@@ -297,9 +322,17 @@ def format_row(s: Dict, name: str) -> Dict[str, str]:
     ## @param s     Stats dict (from ``Repo.stats()`` or an NDJSON record).
     ## @param name  Repo name.
     ## @return Dict with string values for each column.
+    from datetime import datetime
     from .lib import fmt_duration
 
+    ts = s.get("ts")
+    try:
+        dt_str = datetime.fromtimestamp(ts).strftime("%x %X") if ts else ""
+    except (OSError, OverflowError, ValueError):
+        dt_str = ""
+
     return {
+        "dt": dt_str,
         "name": name,
         "files": fmt_int(s.get("file_count", 0)),
         "total": fmt_bytes(s.get("total_bytes", 0)),
