@@ -57,9 +57,9 @@ class Config:
         ## @brief Initialise Config from a resolved configuration directory.
         ##
         ## The configuration directory has a fixed structure:
-        ##   ``<config_dir>/mirror-dedupe.conf`` — global settings
-        ##   ``<config_dir>/repos-available/``   — available repo configs
-        ##   ``<config_dir>/repos-enabled/``     — enabled repo configs
+        ##   ``<config_dir>/mirror-dedupe.conf`` - global settings
+        ##   ``<config_dir>/repos-available/``   - available repo configs
+        ##   ``<config_dir>/repos-enabled/``     - enabled repo configs
         ##
         ## Loads ``mirror-dedupe.conf`` and extracts global settings
         ## (``mirror_root``, ``architectures``, ``collapse_distributions``,
@@ -68,7 +68,7 @@ class Config:
         ##
         ## ``repo_root`` and ``pool_root`` are always derived from
         ## ``mirror_root`` as ``<mirror_root>/repos`` and
-        ## ``<mirror_root>/pool`` respectively — they are never specified
+        ## ``<mirror_root>/pool`` respectively - they are never specified
         ## independently in the config file.  When both directories exist,
         ## their ``st_dev`` values are compared to detect symlinks or bind
         ## mounts that could graft in a foreign volume; hardlink-based
@@ -119,10 +119,11 @@ class Config:
                 )
                 sys.exit(1)
         except FileNotFoundError:
-            pass  # directories not yet created — will land on the same volume
+            pass  # directories not yet created - will land on the same volume
 
         self.architectures = self._data.get('architectures', '*')
         self.collapse_distributions = self._data.get('collapse_distributions', False)
+        self.check_gpg_signature = bool(self._data.get('check_gpg_signature', True))
         self.parallel_downloads = self._data.get('parallel_downloads', 10)
         self.max_concurrent_syncs = self._data.get('max_concurrent_syncs', 2)
         self.connect_timeout = self._data.get('connect_timeout', 10)
@@ -162,9 +163,9 @@ class Config:
         def _normalize_arch_mask(value):
             ## @brief Normalise an architecture mask value.
             ##
-            ## ``"*"``, ``"all"``, or empty → ``None`` (passthrough).
-            ## A single string → one-element list.  A list → itself.
-            ## Anything else → ``None``.
+            ## ``"*"``, ``"all"``, or empty -> ``None`` (passthrough).
+            ## A single string -> one-element list.  A list -> itself.
+            ## Anything else -> ``None``.
             ##
             ## @param value  Raw architecture mask from config.
             ## @return Normalised mask or ``None``.
@@ -247,8 +248,8 @@ class Config:
         ## @brief Resolve a repo *name* to its absolute ``dest`` path.
         ##
         ## Checks in order:
-        ## 1. ``repos-enabled/{name}.conf`` → ``dest`` field (if absolute already)
-        ## 2. ``repos-available/{name}.conf`` → ``dest`` field
+        ## 1. ``repos-enabled/{name}.conf`` -> ``dest`` field (if absolute already)
+        ## 2. ``repos-available/{name}.conf`` -> ``dest`` field
         ## 3. ``additional_repos`` prefs
         ## 4. Fallback: ``{repo_root}/{name}``
         ##

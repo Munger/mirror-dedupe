@@ -196,7 +196,7 @@ class Distribution(Schema.Distribution):
         repo = getattr(self, "_repo", None)
 
         if self._repo_vars is not None and self._repo_vars.sync_mode:
-            # Sync mode: Release downloads through the pool — no fetch needed here
+            # Sync mode: Release downloads through the pool - no fetch needed here
             dest = repo.get("dest", "") if repo else ""
             from .release import Release as AptRelease
             self.release = AptRelease(
@@ -243,7 +243,7 @@ class Distribution(Schema.Distribution):
         self["architectures"] = architectures
         self["metadata"] = release_metadata
 
-        # Create child Release — pre-cache the body so the Release
+        # Create child Release - pre-cache the body so the Release
         # does not re-fetch it from upstream.
         from .release import Release as AptRelease
 

@@ -4,8 +4,8 @@
 ##
 ## A ``Package`` represents a single downloadable file (e.g. a ``.deb``
 ## or ``.dsc``) discovered by parsing an index.  It carries the minimal
-## fields needed for pool-based sync — ``path``, ``hash``, ``size``,
-## ``uri`` — and inherits ``Node.sync()`` which handles pool check,
+## fields needed for pool-based sync - ``path``, ``hash``, ``size``,
+## ``uri`` - and inherits ``Node.sync()`` which handles pool check,
 ## stream download, and hardlink.
 ##
 ## ``Package`` nodes are **ephemeral**: created during index parsing,

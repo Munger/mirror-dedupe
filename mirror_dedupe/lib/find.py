@@ -2,7 +2,7 @@
 ##
 ## @brief Streaming ``find`` wrapper for mirror-dedupe.
 ##
-## Provides ``find_stream()`` — a generator that runs GNU ``find`` as a
+## Provides ``find_stream()`` - a generator that runs GNU ``find`` as a
 ## subprocess and yields null-delimited output fields one at a time as
 ## they arrive.  The underlying ``find`` process and Python parser run
 ## concurrently via the OS pipe; the Python side never buffers more than
@@ -68,7 +68,7 @@ def find_stream(
     ##
     ## Runs ``find <root> [extra_args] -type f -printf <fmt>`` and yields
     ## each null-delimited field as a decoded string, one at a time.
-    ## ``find`` and the Python parser run concurrently via the OS pipe —
+    ## ``find`` and the Python parser run concurrently via the OS pipe -
     ## the generator never holds more than one read chunk (64 KB) in memory
     ## regardless of how many files are found.
     ##

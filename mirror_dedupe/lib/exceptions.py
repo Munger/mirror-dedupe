@@ -24,7 +24,7 @@ class ExceptionMsg(RuntimeError):
     ## ``str(error)`` returns *message*.
     ##
     ## @param code     Numeric code (e.g. HTTP status, curl exit).
-    ## @param message  Optional — if omitted, derived via
+    ## @param message  Optional - if omitted, derived via
     ##                 ``_format_message(code)``.
 
     def __init__(self, code: int, message: str | None = None):
@@ -37,3 +37,22 @@ class ExceptionMsg(RuntimeError):
 
     def _format_message(self, code: int) -> str:
         raise NotImplementedError
+
+
+class RepoAbortError(Exception):
+    ## @brief Raised to abort a single repo's sync immediately.
+    ##
+    ## Caught specifically in ``Repos._sync_one()`` so it does not
+    ## propagate to the global error handler.  The stale sweep is
+    ## skipped automatically because the exception unwinds past it.
+    ##
+    ## Raise after calling ``MDNode.abort()`` - which sets the abort
+    ## event and kills the repo's curl processes - so the caller's
+    ## own context exits immediately rather than waiting for the
+    ## coordinator to detect the event.
+    ##
+    ## @param reason  Human-readable explanation logged at WARN level.
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)

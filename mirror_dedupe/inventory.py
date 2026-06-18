@@ -3,16 +3,16 @@
 ##
 ## @brief Thread-safe in-memory hash-to-inode inventory for mirror-dedupe.
 ##
-## ``Inventory`` wraps a pair of ``dict``s (hash→inode, inode→hash) with an
+## ``Inventory`` wraps a pair of ``dict``s (hash->inode, inode->hash) with an
 ## internal ``threading.Lock`` so that every read and write is atomic.  The
-## class has no concept of paths, pool layout, or repo structure — it is
+## class has no concept of paths, pool layout, or repo structure - it is
 ## purely a bidirectional lookup table.
 ##
 ## Two logical inventories exist at runtime:
 ##
-## 1. **Pool inventory** — every file in the content-addressed pool,
+## 1. **Pool inventory** - every file in the content-addressed pool,
 ##    built once at startup via ``Inventory.from_pool(pool_root)``.
-## 2. **Per-repo inventory** — a subset of the pool whose inodes are
+## 2. **Per-repo inventory** - a subset of the pool whose inodes are
 ##    hardlinked into a specific repo's directory tree, built by
 ##    ``Inventory.from_repos()`` via reverse lookup against the pool
 ##    inventory.
@@ -36,10 +36,10 @@ from .lib.find import find_binary, find_stream
 
 
 class Inventory:
-    ## @brief Thread-safe bidirectional ``{hash↔inode}`` lookup table.
+    ## @brief Thread-safe bidirectional ``{hash<->inode}`` lookup table.
     ##
-    ## ``_dict`` maps SHA-256 hex (64-char string) → inode (int).
-    ## ``_rev`` maps inode (int) → SHA-256 hex (64-char string).
+    ## ``_dict`` maps SHA-256 hex (64-char string) -> inode (int).
+    ## ``_rev`` maps inode (int) -> SHA-256 hex (64-char string).
     ##
     ## Both dicts are always updated under the same lock so they never
     ## drift apart.  Because the from-scratch factories are called before
@@ -63,7 +63,7 @@ class Inventory:
         ## the sync begins.  During sync, each node removes its own path via
         ## ``Node.sync()`` as soon as it is declared wanted.  Whatever remains
         ## when ``_sweep_stale`` runs is a file that exists on disk but was
-        ## never wanted — safe to delete.  Only meaningful on per-repo
+        ## never wanted - safe to delete.  Only meaningful on per-repo
         ## inventories; the pool inventory leaves this empty.
         self.stale_paths: set[str] = set()
 
@@ -98,14 +98,14 @@ class Inventory:
 
     def __len__(self) -> int:
         ## @brief Return the number of entries in the inventory.
-        ## @return The number of hash↔inode mappings.
+        ## @return The number of hash<->inode mappings.
         with self._lock:
             return len(self._dict)
 
     # -- writers ----------------------------------------------------------
 
     def add(self, hash: str, inode: int) -> None:
-        ## @brief Insert or update a single hash↔inode mapping.
+        ## @brief Insert or update a single hash<->inode mapping.
         ## @param hash   SHA-256 hex string.
         ## @param inode  Filesystem inode number.
         ## @return None
@@ -139,7 +139,7 @@ class Inventory:
         ## under ``/tmp/mirror-dedupe/<dest_name>.paths``.
         ##
         ## The file is unlinked immediately after opening so it vanishes
-        ## even if this process subsequently crashes — the kernel keeps the
+        ## even if this process subsequently crashes - the kernel keeps the
         ## inode alive via the open file descriptor until it is closed.
         ##
         ## File format: null-delimited ``rel_path\0inode\0`` pairs, where
@@ -157,7 +157,7 @@ class Inventory:
         try:
             fd = os.open(path_file, os.O_RDONLY)
         except OSError:
-            return inv  ## path file absent — empty inventory, no stale sweep
+            return inv  ## path file absent - empty inventory, no stale sweep
 
         ## Unlink while the fd is still open.  The file disappears from the
         ## directory immediately; the kernel frees the inode when the fd closes.
@@ -203,7 +203,7 @@ class Inventory:
         ## ``by-hash/SHA256/{ab}/{cd}/{hash}``, so ``%f`` (filename) is
         ## the SHA-256 hash and ``%i`` the inode.
         ##
-        ## No lock is needed during construction — the inventory is not
+        ## No lock is needed during construction - the inventory is not
         ## shared before this method returns.
         ##
         ## @param pool_root  Root directory of the content-addressed pool.
@@ -236,20 +236,20 @@ class Inventory:
         ## Runs ``find`` on *repo_root* once, collecting every regular
         ## file's relative path and inode.  Files whose first path
         ## component matches a name in *managed_dests* are
-        ## cross-referenced against *pool_inv* via reverse (inode→hash)
-        ## lookup — if the inode maps to a known pool hash, the pair is
+        ## cross-referenced against *pool_inv* via reverse (inode->hash)
+        ## lookup - if the inode maps to a known pool hash, the pair is
         ## stored in that dest's ``Inventory``.
         ##
         ## Directories not in *managed_dests* are silently skipped.
         ##
-        ## Lock-free during construction — none of the returned
+        ## Lock-free during construction - none of the returned
         ## inventories are shared until the caller distributes them.
         ##
         ## @param repo_root     Root of the repository tree.
         ## @param pool_inv      Already-populated pool ``Inventory``.
         ## @param managed_dests Set of directory names under *repo_root*
         ##                      to scan (e.g. ``{"postgresql", "test"}``).
-        ## @return ``{dest_name: Inventory}`` — one entry per managed
+        ## @return ``{dest_name: Inventory}`` - one entry per managed
         ##         destination.
         root = Path(repo_root)
         if not root.is_dir():
@@ -271,7 +271,7 @@ class Inventory:
                 if inv is None:
                     continue
 
-                # Record every path we find — pool-linked or not.  Release,
+                # Record every path we find - pool-linked or not.  Release,
                 # InRelease, Packages, and Sources files all land here even
                 # though they have no pool hash.  Node.sync() removes a path
                 # from this set the moment it is declared wanted, so anything

@@ -8,13 +8,13 @@
 ## ``StreamMixin`` (lazy child discovery), and ``Serialisable``
 ## (snapshot/restore/clone).  It adds:
 ##
-##   * ``_repo_vars`` / ``_cache`` — runtime wiring for the sync pipeline
-##   * ``probe_url()`` — HTTP reachability check
-##   * ``checksum`` — SHA-256 hash accessor
-##   * ``_open_binary()`` / ``_iter_lines()`` — file and decompression I/O
-##   * ``fetch()``, ``read()``, ``sync()`` — staged download pipeline
-##   * ``on_parse()``, ``parse()``, ``recurse()`` — tree-building protocol
-##   * ``stream()`` — lazy child discovery (virtual, overrides
+##   * ``_repo_vars`` / ``_cache`` - runtime wiring for the sync pipeline
+##   * ``probe_url()`` - HTTP reachability check
+##   * ``checksum`` - SHA-256 hash accessor
+##   * ``_open_binary()`` / ``_iter_lines()`` - file and decompression I/O
+##   * ``fetch()``, ``read()``, ``sync()`` - staged download pipeline
+##   * ``on_parse()``, ``parse()``, ``recurse()`` - tree-building protocol
+##   * ``stream()`` - lazy child discovery (virtual, overrides
 ##     ``StreamMixin`` with a ``data`` parameter)
 ##
 ## Module-level helpers ``_pool_path()`` and ``_sync_link()`` manage the
@@ -87,7 +87,7 @@ def _sync_link(pool_path: Path, dest: Path, rv: RepoVars, hash_val: str) -> int:
     ## @brief Hardlink a pool file into a repo destination directory.
     ##
     ## Creates the parent directory tree if needed, removes any existing
-    ## file at *dest*, links *pool_path* → *dest*, and records the
+    ## file at *dest*, links *pool_path* -> *dest*, and records the
     ## mapping in the repo inventory so future lookups are fast.
     ##
     ## @param pool_path  Existing file in the content-addressed pool.
@@ -131,7 +131,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         ## sets ``_cache`` (for scan-mode HTTP caching) and
         ## ``_repo_vars`` (for sync-mode repo wiring) to ``None``.
         ## These use ``object.__setattr__`` because they are private
-        ## instance attributes, not payload keys — the leading underscore
+        ## instance attributes, not payload keys - the leading underscore
         ## in ``__setattr__`` triggers the ``object.__setattr__`` branch
         ## automatically in the inherited ``Node.__setattr__``, but we
         ## write them before calling that method for clarity.
@@ -162,7 +162,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         # Node, NodeList, and dict are allowed.
         if isinstance(value, (Node, NodeList, dict)):
             return
-        # Reject raw lists — use NodeList for thread safety and freeze.
+        # Reject raw lists - use NodeList for thread safety and freeze.
         if isinstance(value, list):
             raise TypeError(
                 "MDNode cannot contain plain lists. "
@@ -192,7 +192,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         ## it further if needed.
         ##
         ## Unlike ``HTTPFetch`` (retry, resume, hash validation), this is a
-        ## lightweight single GET with ``--max-time 30`` — no HEAD probe,
+        ## lightweight single GET with ``--max-time 30`` - no HEAD probe,
         ## no retries, no temp files.
         ##
         ## @param uri  The URL to probe.
@@ -212,7 +212,7 @@ class MDNode(Node, StreamMixin, Serialisable):
     def checksum(self) -> str:
         ## @brief Return the SHA-256 checksum for this node.
         ##
-        ## Checks ``self["hash"]`` — populated at construction for
+        ## Checks ``self["hash"]`` - populated at construction for
         ## packages (from the Release file digest), or set by
         ## ``sync()`` after the first download for content that
         ## did not have a known hash (e.g. Release files on first
@@ -234,9 +234,9 @@ class MDNode(Node, StreamMixin, Serialisable):
         ## Two modes:
         ##
         ##   * **Scan mode** (*data* provided): wraps *data* in
-        ##     ``BytesIO`` — content is in memory from an HTTP fetch.
+        ##     ``BytesIO`` - content is in memory from an HTTP fetch.
         ##   * **Sync mode** (*data* is ``None``): opens
-        ##     ``repo_root / path`` in ``rb`` mode — content is on disk
+        ##     ``repo_root / path`` in ``rb`` mode - content is on disk
         ##     after pool synchronisation.
         ##
         ## Callers are responsible for closing the returned handle.
@@ -264,12 +264,12 @@ class MDNode(Node, StreamMixin, Serialisable):
         ##
         ## The decompression strategy is chosen per-extension:
         ##
-        ##   * ``.gz`` — ``gzip.GzipFile`` wrapping the raw streamy
-        ##   * ``.xz`` — ``lzma.LZMADecompressor`` with 64KB buffered
+        ##   * ``.gz`` - ``gzip.GzipFile`` wrapping the raw streamy
+        ##   * ``.xz`` - ``lzma.LZMADecompressor`` with 64KB buffered
         ##     reads for streaming (avoids loading the full archive)
-        ##   * ``.bz2`` — single-shot ``bz2.decompress`` (bzip2 is
+        ##   * ``.bz2`` - single-shot ``bz2.decompress`` (bzip2 is
         ##     not streamable; the whole file must be decompressed)
-        ##   * Other — raw bytestream decoded line-by-line
+        ##   * Other - raw bytestream decoded line-by-line
         ##
         ## @param data  Optional bytes to read from (scan mode).
         ## @yield Decoded text lines.
@@ -278,7 +278,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         path: str = self.get("path", "")
         try:
             if path.endswith(".gz"):
-                # gzip.GzipFile wraps a stream — random-access not needed.
+                # gzip.GzipFile wraps a stream - random-access not needed.
                 import gzip
 
                 f = gzip.GzipFile(fileobj=raw)
@@ -309,7 +309,7 @@ class MDNode(Node, StreamMixin, Serialisable):
                         "\n\r"
                     )
             elif path.endswith(".bz2"):
-                # bzip2 is not streamable — must decompress all at once.
+                # bzip2 is not streamable - must decompress all at once.
                 import bz2
 
                 text = bz2.decompress(raw.read()).decode(
@@ -318,7 +318,7 @@ class MDNode(Node, StreamMixin, Serialisable):
                 for line in text.splitlines():
                     yield line.rstrip("\n\r")
             else:
-                # Plain text — decode each readline() result.
+                # Plain text - decode each readline() result.
                 for line in raw:
                     yield line.decode("utf-8", errors="replace").rstrip(
                         "\n\r"
@@ -342,7 +342,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         ## after the node's content is available (e.g. packages parsed
         ## from a downloaded ``Packages.gz``).
         ##
-        ## ``stream()`` is always a local read — never touches the
+        ## ``stream()`` is always a local read - never touches the
         ## network.  In scan mode *data* receives bytes from an HTTP
         ## fetch.  In sync mode *data* is ``None`` and the method reads
         ## from disk via ``_open_binary()``.
@@ -404,7 +404,7 @@ class MDNode(Node, StreamMixin, Serialisable):
     ) -> MDNode:
         ## @brief Walk declared children and call ``parse()`` on each.
         ##
-        ## Skips this node's ``on_parse()`` — use when the tree already
+        ## Skips this node's ``on_parse()`` - use when the tree already
         ## has its structural children created (e.g. sync mode builds
         ## distributions from config, then recurses to populate them).
         ##
@@ -435,12 +435,12 @@ class MDNode(Node, StreamMixin, Serialisable):
         ##
         ## Three paths, checked in order:
         ##
-        ##   1. **Cache hit** — if ``_cache`` is set (from a previous
+        ##   1. **Cache hit** - if ``_cache`` is set (from a previous
         ##      fetch in the same mode), return it immediately.
-        ##   2. **Sync mode** — if ``_repo_vars.sync_mode`` is set,
+        ##   2. **Sync mode** - if ``_repo_vars.sync_mode`` is set,
         ##      redirect to ``self.read()`` which synchronises the file
         ##      through the pool and then reads it from disk.
-        ##   3. **Scan mode** — perform a pure in-memory HTTP fetch and
+        ##   3. **Scan mode** - perform a pure in-memory HTTP fetch and
         ##      cache the result in ``_cache`` for subsequent calls.
         ##
         ## @param uri     URL to fetch.
@@ -451,7 +451,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         if not uri:
             return None
         # Return cached result if available (avoids re-downloading when
-        # parse() calls fetch() and later read() calls sync() → read_bytes()).
+        # parse() calls fetch() and later read() calls sync() -> read_bytes()).
         if self._cache is not None:
             return self._cache
         # Sync mode: go through the pool synchronisation path.
@@ -471,7 +471,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         ## hardlinked to the repo destination, then reads the bytes from
         ## ``repo_root / path``.
         ##
-        ## This is the disk counterpart to ``fetch()`` — where
+        ## This is the disk counterpart to ``fetch()`` - where
         ## ``fetch()`` handles both scan and sync modes, ``read()`` is
         ## the sync-mode half: ensure the file exists, then return its
         ## contents.
@@ -665,7 +665,7 @@ class MDNode(Node, StreamMixin, Serialisable):
                             and dest.stat().st_ino
                             == pool_path.stat().st_ino
                         ):
-                            # Already correctly linked — update repo
+                            # Already correctly linked - update repo
                             # inventory and return.
                             if rv.inv is not None:
                                 rv.inv.add(
@@ -679,7 +679,7 @@ class MDNode(Node, StreamMixin, Serialisable):
                             )
                             return [dest]
                         # Pool file exists but dest is stale or
-                        # missing — fix the link.
+                        # missing - fix the link.
                         _sync_link(pool_path, dest, rv, hash_val)
                         _record(hit=1)
                         log(
@@ -732,6 +732,33 @@ class MDNode(Node, StreamMixin, Serialisable):
                             lock,
                             refs - 1,
                         )
+
+
+    def abort(self) -> None:
+        ## @brief Signal an immediate abort of this repo's sync.
+        ##
+        ## Sets the per-repo ``abort_event`` so the coordinator stops
+        ## submitting new work on its next iteration, then kills all
+        ## curl subprocesses belonging to this repo so in-flight worker
+        ## downloads return immediately rather than running to completion.
+        ##
+        ## This method is idempotent: calling it more than once (e.g. from
+        ## concurrent workers hitting the same failure) is safe -
+        ## ``Event.set()`` and killing already-dead processes are both
+        ## no-ops.
+        ##
+        ## After calling ``abort()``, raise ``RepoAbortError(reason)`` so
+        ## the calling context (``on_parse()``, ``stream()``, etc.) exits
+        ## immediately rather than waiting for the coordinator to detect
+        ## the event on its next iteration.
+        ##
+        ## @return None
+        rv = self._repo_vars
+        if rv is None:
+            return
+        rv.abort_event.set()
+        from ..lib.subproc import kill_repo_subprocesses
+        kill_repo_subprocesses(rv.repo_name)
 
 
 __all__ = [

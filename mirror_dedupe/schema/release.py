@@ -29,8 +29,8 @@ class Release(Node):
     ##
     ## Required fields:
     ##
-    ## * ``suite``       — logical suite name
-    ## * ``pocket``      — logical pocket name or ``None``
+    ## * ``suite``       - logical suite name
+    ## * ``pocket``      - logical pocket name or ``None``
     ## * ``relative_dir``
     ## * ``path``
     ## * ``url``

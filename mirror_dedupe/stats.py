@@ -1,6 +1,6 @@
 ## @file stats.py
 ##
-## @brief Sync statistics lifecycle — write, read, format, and reset.
+## @brief Sync statistics lifecycle - write, read, format, and reset.
 ##
 ## Centralises all NDJSON stats management so callers never touch
 ## ``mirror-dedupe/<name>/stats.ndjson`` directly.  Provides the
@@ -58,18 +58,19 @@ def write_ndjson(
 
     stats_file = _ensure_dir(mirror_root, name)
 
-    from .lib.datetimeutils import fmt_isotimestamp
+    import time
 
     s = repo.stats()
     record = {
         "session_ts": session_ts,
-        "ts": fmt_isotimestamp(),
+        "ts": int(time.time()),
         "elapsed": round(s["elapsed"], 2),
         "file_count": s["file_count"],
         "total_bytes": s["total_bytes"],
         "deduped_bytes": s["deduped_bytes"],
         "bytes_transferred": s["bytes_transferred"],
         "errors": s["errors"],
+        "gpg_failures": s.get("gpg_failures", 0),
         "pool_hits": s["pool_hits"],
         "pool_misses": s["pool_misses"],
         "removed": s["removed"],
@@ -148,7 +149,7 @@ def _col_widths(rows: List[Dict[str, str]]) -> Dict[str, int]:
     ## @param rows  List of formatted row dicts (output of ``format_row()``).
     ## @return Dict mapping column name to minimum width in characters.
     widths = {"dt": 17, "name": 20, "files": 8, "total": 10, "deduped": 12,
-              "tx": 12, "hit": 8, "miss": 8, "errors": 6, "time": 11,
+              "tx": 12, "hit": 8, "miss": 8, "errors": 6, "gpg": 4, "time": 11,
               "removed": 8}
     for r in rows:
         for k, v in r.items():
@@ -174,6 +175,7 @@ _COLS = [
     ("hit", "Hit", "right"),
     ("miss", "Miss", "right"),
     ("errors", "Errors", "right"),
+    ("gpg", "GPG", "right"),
     ("time", "Time", "right"),
     ("removed", "Removed", "right"),
 ]
@@ -221,6 +223,7 @@ def print_summary_table(
     total_hits = sum(int(r["hit"].replace(",", "")) for r in rows)
     total_misses = sum(int(r["miss"].replace(",", "")) for r in rows)
     total_errors = sum(int(r["errors"]) for r in rows)
+    any_gpg_fail = any(r.get("gpg") == "FAIL" for r in rows)
     total_removed = sum(int(r["removed"].replace(",", "")) for r in rows)
 
     print("")
@@ -268,6 +271,7 @@ def print_summary_table(
             "hit": fmt_int(total_hits),
             "miss": fmt_int(total_misses),
             "errors": str(total_errors),
+            "gpg": "FAIL" if any_gpg_fail else "pass",
             "time": fmt_duration(session_elapsed) if session_elapsed else "",
             "removed": fmt_int(total_removed),
         }
@@ -341,6 +345,7 @@ def format_row(s: Dict, name: str) -> Dict[str, str]:
         "hit": fmt_int(s.get("pool_hits", 0)),
         "miss": fmt_int(s.get("pool_misses", 0)),
         "errors": str(s.get("errors", 0)),
+        "gpg": "FAIL" if s.get("gpg_failures", 0) else "pass",
         "time": fmt_duration(s.get("elapsed", 0)),
         "removed": fmt_int(s.get("removed", 0)),
     }

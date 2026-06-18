@@ -4,10 +4,10 @@
 ##
 ## Provides two public functions:
 ##
-## * ``HTTPFetch``  — fetch a URI into memory (bytes).
-## * ``HTTPDownload`` — download a URI to a local file, returning SHA-256.
+## * ``HTTPFetch``  - fetch a URI into memory (bytes).
+## * ``HTTPDownload`` - download a URI to a local file, returning SHA-256.
 ##
-## ``HTTPDownload`` is the primitive — it writes to a caller-specified path
+## ``HTTPDownload`` is the primitive - it writes to a caller-specified path
 ## with retry, resume, HTTP status detection, and optional hash validation.
 ## ``HTTPFetch`` is a thin convenience wrapper that creates a temp file,
 ## delegates to ``HTTPDownload``, reads back the bytes, and cleans up.
@@ -38,7 +38,7 @@ from .subproc import run_subprocess
 class HTTPException(ExceptionMsg):
     ## @brief HTTP 4xx/5xx response.
     ##
-    ## Construct with just the status *code* — the human-readable
+    ## Construct with just the status *code* - the human-readable
     ## message is derived automatically.
     ##
     ## @param code  HTTP status code (e.g. 404, 503).
@@ -71,7 +71,7 @@ class HTTPException(ExceptionMsg):
 class CurlException(ExceptionMsg):
     ## @brief curl subprocess failure.
     ##
-    ## Construct with just the exit *code* — the human-readable
+    ## Construct with just the exit *code* - the human-readable
     ## message is derived automatically.  Named constants and
     ## ``TRANSIENT_EXITS`` are class members so callers can
     ## reference them without magic numbers.
@@ -106,13 +106,13 @@ class CurlException(ExceptionMsg):
         RESOLVE_ERR:          "Could not resolve host (curl exit 6)",
         CONNECT_ERR:          "Failed to connect to host (curl exit 7)",
         PARTIAL_FILE:         "Partial file transferred (curl exit 18)",
-        WRITE_ERR:            "Write error — permission denied or disk full (curl exit 23)",
+        WRITE_ERR:            "Write error - permission denied or disk full (curl exit 23)",
         TIMEOUT:              "Operation timed out (curl exit 28)",
         SSL_CONNECT_ERR:      "TLS/SSL connect error (curl exit 35)",
         SERVER_NOTHING:       "Server replied with nothing (curl exit 52)",
         SEND_ERR:             "Send failure (curl exit 55)",
         RECV_ERR:             "Receive failure (curl exit 56)",
-        SSL_CA_ERR:           "SSL CA cert problem — check certificates (curl exit 77)",
+        SSL_CA_ERR:           "SSL CA cert problem - check certificates (curl exit 77)",
     }
 
     def __init__(self, code: int):
@@ -129,19 +129,19 @@ class CurlException(ExceptionMsg):
 # -- public API ---------------------------------------------------------------
 
 
-# ── Probe / lightweight helpers ───────────────────────────────────────────────
+# -- Probe / lightweight helpers -----------------------------------------------
 #
 # These functions are designed for one-shot probing (scan discovery, health
 # checks) where the caller only needs to know if a URL is reachable or wants
 # a small file's content.  Unlike HTTPFetch / HTTPDownload they are:
 #
-#   • stateless — no resume, no retries, no temp file for HEAD
-#   • bounded   — every call has a built-in 30-second total timeout
-#   • safe      — never affect the sync pipeline's download machinery
+#   * stateless - no resume, no retries, no temp file for HEAD
+#   * bounded   - every call has a built-in 30-second total timeout
+#   * safe      - never affect the sync pipeline's download machinery
 #
 # A probe is always a two-step dance:
-#   1. HTTPPing  — HEAD request to see if the URL exists (fast, no body)
-#   2. HTTPGet   — GET request to read the body (only when ping succeeds)
+#   1. HTTPPing  - HEAD request to see if the URL exists (fast, no body)
+#   2. HTTPGet   - GET request to read the body (only when ping succeeds)
 #
 # Both functions return None on failure instead of raising, so the caller
 # can safely skip unreachable URLs without exception handling.
@@ -155,10 +155,10 @@ def HTTPPing(uri: str, *, connect_timeout: int = 10, max_time: int = 30) -> bool
     ##
     ## HTTP 200 means the URL is reachable and HEAD is supported.
     ## HTTP 405 (Method Not Allowed) means the URL exists but the server
-    ##     does not support HEAD — the caller should still attempt GET.
+    ##     does not support HEAD - the caller should still attempt GET.
     ##
     ## All other outcomes (404, 5xx, DNS failure, timeout, connection
-    ## refused) return ``False`` — the caller should treat them as
+    ## refused) return ``False`` - the caller should treat them as
     ## "not worth fetching".
     ##
     ## No retry, no resume, no body.  Stderr is silently discarded so
@@ -199,10 +199,10 @@ def HTTPGet(uri: str, *, connect_timeout: int = 10, max_time: int = 30) -> bytes
     ## files, index pages) where retry/resume machinery is overkill.
     ##
     ## Unlike ``HTTPFetch``:
-    ##   * No retries — a single failure returns ``None``.
-    ##   * No resume  — ``-C -`` is not passed.
-    ##   * No hash validation — the caller must verify content.
-    ##   * No temp file — output goes directly to stdout.
+    ##   * No retries - a single failure returns ``None``.
+    ##   * No resume  - ``-C -`` is not passed.
+    ##   * No hash validation - the caller must verify content.
+    ##   * No temp file - output goes directly to stdout.
     ##
     ## Uses ``curl -sL`` with ``--connect-timeout`` and ``--max-time``
     ## to guarantee bounded wall time.  HTTP 4xx/5xx, DNS failure,
@@ -234,7 +234,7 @@ def HTTPGet(uri: str, *, connect_timeout: int = 10, max_time: int = 30) -> bytes
         return None
 
 
-# ── Full download machinery ───────────────────────────────────────────────────
+# -- Full download machinery ---------------------------------------------------
 
 
 def HTTPFetch(uri: str, *, expected_hash: str | None = None) -> bytes:
@@ -307,7 +307,7 @@ def HTTPDownload(
         # Build the curl argument list.  -C - enables resume of
         # partial downloads; -w %{http_code} emits the HTTP status
         # on stdout so we can detect 4xx/5xx without -f (which is
-        # broken on macOS curl 8.7.1 — exits 56 instead of 22).
+        # broken on macOS curl 8.7.1 - exits 56 instead of 22).
         return ["curl", "-s", "-L", "--connect-timeout", _ct, "-C", "-",
                 "-w", "%{http_code}", "-o", output_str, uri]
 
@@ -334,13 +334,13 @@ def HTTPDownload(
         if rc == 0:
             # curl exited successfully.  Parse the HTTP status code
             # from -w %{http_code} (written to stdout).  If the value
-            # is not an integer (very rare — may happen when curl
+            # is not an integer (very rare - may happen when curl
             # writes warnings to stdout) we proceed without checking.
             if out:
                 try:
                     http_code = int(out.decode().strip())
                     if http_code >= 400:
-                        # Fatal HTTP error — remove the partial file
+                        # Fatal HTTP error - remove the partial file
                         # so it doesn't poison future resume attempts.
                         try:
                             os.unlink(output_str)
@@ -364,7 +364,7 @@ def HTTPDownload(
             # SHA-256 and validate against expected_hash if given.
             actual = _compute_hash()
             if expected_hash and actual != expected_hash:
-                # Hash mismatch means corrupt content — remove the
+                # Hash mismatch means corrupt content - remove the
                 # file so the caller can retry from scratch.
                 try:
                     os.unlink(output_str)
@@ -375,7 +375,7 @@ def HTTPDownload(
 
         # -- curl exited non-zero --------------------------------------------
         # The stdout may still contain an HTTP status code (curl
-        # sometimes prints one before dying) — capture it for a
+        # sometimes prints one before dying) - capture it for a
         # better error message.
         http_info = ""
         _http_code: int | None = None

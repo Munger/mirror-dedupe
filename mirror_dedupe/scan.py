@@ -241,7 +241,7 @@ def generate_config(repo: Repo, dest: str,
         config_lines.append("upstreams:")
         for upstream in upstream_entries:
             config_lines.append("  - url: " + upstream["url"])
-        config_lines.append(f"upstream_idx: {upstream_index}  # prefer this mirror on sync — avoids mirror skew")
+        config_lines.append(f"upstream_idx: {upstream_index}  # prefer this mirror on sync - avoids mirror skew")
 
     if gpg_key_url:
         config_lines.append("")
@@ -251,7 +251,7 @@ def generate_config(repo: Repo, dest: str,
 
     config_lines.append("")
     config_lines.append("# Architectures to fetch.  Removing an architecture reduces")
-    config_lines.append("# download size — only the listed ones are synced.")
+    config_lines.append("# download size - only the listed ones are synced.")
     config_lines.append("architectures:")
     for arch in architectures:
         config_lines.append(f"  - {arch}")
@@ -272,7 +272,7 @@ def generate_config(repo: Repo, dest: str,
     config_lines.append("# distribution like \"noble\" is automatically expanded at sync time")
     config_lines.append("# to include noble-updates, noble-security, noble-backports, and")
     config_lines.append("# noble-proposed.  When false, only the listed distributions are")
-    config_lines.append("# synced — no automatic expansion occurs.")
+    config_lines.append("# synced - no automatic expansion occurs.")
     config_lines.append("distributions:")
     if all_dists_mode:
         for dist in discovered:
@@ -406,7 +406,7 @@ def main() -> None:
     global_collapse_dists = bool(cfg.collapse_distributions)
 
     def _normalize_arch_mask(value):
-        ## @brief Normalise an architecture mask value (wildcard → passthrough).
+        ## @brief Normalise an architecture mask value (wildcard -> passthrough).
         ## @param value  Raw mask (``"*"``, string, or list).
         ## @return ``None`` for passthrough, a list of arch names, or ``None``.
         if isinstance(value, str):

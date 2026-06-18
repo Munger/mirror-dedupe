@@ -195,7 +195,7 @@ def main():
     ## @brief Main entry point for mirror-dedupe.
     ## @return None
 
-    # SIGINT kills tracked curl subprocesses immediately — avoids
+    # SIGINT kills tracked curl subprocesses immediately - avoids
     # KeyboardInterrupt corrupting Python's import state during cleanup.
     import signal as _signal
 
@@ -217,14 +217,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
 
-    # ── Global options ────────────────────────────────────────────────
+    # -- Global options ------------------------------------------------
     global_grp = parser.add_argument_group('Global options')
     global_grp.add_argument('--version', '-v', action='version',
                             version=f'mirror-dedupe {__version__}')
     global_grp.add_argument('--config-dir', dest='config_path', default=None,
                             help=f'Path to config directory (default: {DEFAULT_CONFIG_DIR})')
 
-    # ── Sync options ──────────────────────────────────────────────────
+    # -- Sync options --------------------------------------------------
     sync_grp = parser.add_argument_group('Sync options')
     sync_grp.add_argument('--sync', action='store_true',
                           help='Run the full sync pipeline for all enabled mirrors')
@@ -233,7 +233,7 @@ def main():
     sync_grp.add_argument('--dedupe-only', action='store_true',
                           help='Skip metadata sync; only hardlink pool entries into repo trees')
 
-    # ── Scan options ──────────────────────────────────────────────────
+    # -- Scan options --------------------------------------------------
     scan_grp = parser.add_argument_group('Scan options')
     scan_grp.add_argument('--scan', action='store_true',
                           help='Probe an upstream URL and generate a repo YAML config')
@@ -271,7 +271,7 @@ def main():
     collapse_scan = scan_grp.add_mutually_exclusive_group()
     collapse_scan.add_argument('--collapse-dists', dest='collapse_dists',
                                action='store_true',
-                               help='Collapse discovered suites to base names (e.g. noble-updates → noble)')
+                               help='Collapse discovered suites to base names (e.g. noble-updates -> noble)')
     collapse_scan.add_argument('--no-collapse-dists', dest='collapse_dists',
                                action='store_false',
                                help='Emit all discovered suite variants explicitly')
@@ -284,7 +284,7 @@ def main():
     scan_grp.add_argument('upstream', nargs='?',
                           help='Upstream URL (alternative to -U / --upstream)')
 
-    # ── Repository management ─────────────────────────────────────────
+    # -- Repository management -----------------------------------------
     mgmt_grp = parser.add_argument_group('Repository management')
     mgmt_grp.add_argument('--list', action='store_true',
                           help='List available mirrors (active and inactive)')
@@ -311,7 +311,7 @@ def main():
     mgmt_grp.add_argument('--stats-reset', metavar='NAME', nargs='?', const='ALL',
                           help='Truncate stats.ndjson for a repo or ALL (requires PIN)')
 
-    # ── Snapshots and pool ────────────────────────────────────────────
+    # -- Snapshots and pool --------------------------------------------
     snap_grp = parser.add_argument_group('Snapshots and pool')
     snap_grp.add_argument('--snapshot', metavar='NAME', nargs='?', const='ALL',
                           help='Create a hardlink snapshot of a repo dest or ALL repos')
@@ -1152,7 +1152,7 @@ def main():
                   f"same filesystem = {same_fs}")
             if pool_dev != repo_dev:
                 print("    WARNING: A symlink or bind mount is redirecting one of these "
-                      "directories to a foreign volume — hardlink deduplication will not work.")
+                      "directories to a foreign volume - hardlink deduplication will not work.")
         except OSError as e:
             print(f"    ERROR: Cannot stat mirror_root/repos or mirror_root/pool: {e}")
 
@@ -1208,7 +1208,7 @@ def main():
             log(f"Data directory does not exist (nothing to reinitialise): {data_path}", level="INFO")
             sys.exit(0)
 
-        desc = f"Reinitialise '{name}' — snapshot and remove data at {data_path}"
+        desc = f"Reinitialise '{name}' - snapshot and remove data at {data_path}"
         if not _pin_confirm(desc, args.force):
             sys.exit(1)
 
@@ -1229,7 +1229,7 @@ def main():
         else:
             print(f"Activation status unchanged (inactive)")
 
-        print(f"Reinitialised '{name}' — next sync will re-download from upstream.")
+        print(f"Reinitialised '{name}' - next sync will re-download from upstream.")
         sys.exit(0)
 
 

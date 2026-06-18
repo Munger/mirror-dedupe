@@ -27,12 +27,12 @@ class Index(Node):
     ##
     ## Required fields:
     ##
-    ## * ``path`` — relative path under the repo root
-    ## * ``kind`` — logical kind, e.g. ``"packages"``, ``"sources"``
+    ## * ``path`` - relative path under the repo root
+    ## * ``kind`` - logical kind, e.g. ``"packages"``, ``"sources"``
     ##
     ## Optional fields:
     ##
-    ## * ``metadata`` — parser-specific data stored in an ``Index.Metadata`` node
+    ## * ``metadata`` - parser-specific data stored in an ``Index.Metadata`` node
 
     _children = ("packages",)
     ## @brief Declare ``packages`` as child nodes so that ``_tree_iter()``
@@ -94,7 +94,7 @@ class Index(Node):
         ## @brief Fetch index content, stream-parse into child Package nodes.
         ##
         ## Only processes indices whose ``kind`` is ``"packages"`` or
-        ## ``"sources"`` — Contents, Translation, and other metadata files
+        ## ``"sources"`` - Contents, Translation, and other metadata files
         ## are skipped (they are already enumeratively downloaded by the
         ## Release's hash-section entries and do not need stanza parsing).
         ##
@@ -147,10 +147,10 @@ class VariantIndex(Index):
     ## A ``VariantIndex`` represents an alternative compression of a
     ## primary index file (e.g. ``Packages.bz2`` when ``Packages.xz`` is
     ## the primary).  It has ``_children = ()`` so ``_tree_iter()`` does
-    ## not descend into Package children — only the primary variant holds
+    ## not descend into Package children - only the primary variant holds
     ## them.
     ##
-    ## ``stream()`` is a no-op — variant indices are downloaded but not
+    ## ``stream()`` is a no-op - variant indices are downloaded but not
     ## parsed for child packages.
 
     _children: tuple[str, ...] = ()

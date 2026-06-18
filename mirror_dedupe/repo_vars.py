@@ -8,7 +8,7 @@
 ## root paths, and sync mode.  A single ``RepoVars`` instance is created
 ## per repo and shared via ``Node._repo_vars`` through the entire tree.
 ##
-## No node should ever call ``Config.load()`` — all runtime state lives
+## No node should ever call ``Config.load()`` - all runtime state lives
 ## here, propagated automatically during tree construction.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
@@ -29,7 +29,7 @@ class SyncStats:
     ##
     ## A single instance is created per repo at the start of each sync run
     ## and stored on ``RepoVars``.  ``Node.sync()`` calls ``record()`` at
-    ## every outcome point — pool hit, re-link, or genuine download.  The
+    ## every outcome point - pool hit, re-link, or genuine download.  The
     ## coordinator sets ``elapsed`` and ``removed`` after the work queue
     ## drains.
     ##
@@ -48,6 +48,7 @@ class SyncStats:
         self.pool_hits: int = 0
         self.pool_misses: int = 0
         self.errors: int = 0
+        self.gpg_failures: int = 0
         self.elapsed: float = 0.0
         self.removed: int = 0
         self._lock = threading.Lock()
@@ -64,7 +65,7 @@ class SyncStats:
     ) -> None:
         ## @brief Record one sync outcome under lock.
         ##
-        ## Called from ``Node.sync()`` — possibly from a worker thread —
+        ## Called from ``Node.sync()`` - possibly from a worker thread -
         ## so all mutations are protected.  ``hash_val`` is used to count
         ## unique content for deduplication accounting: a hash seen for the
         ## first time contributes its ``size`` to ``deduped_bytes``.
@@ -91,6 +92,12 @@ class SyncStats:
         with self._lock:
             self.errors += 1
 
+    def add_gpg_failure(self) -> None:
+        ## @brief Increment the GPG failure counter under lock.
+        ## @return None
+        with self._lock:
+            self.gpg_failures += 1
+
     def to_dict(self) -> dict[str, Any]:
         ## @brief Return a plain-dict snapshot of the current totals.
         ## @return Stats dict consumed by ``Repo.stats()``, ``stats.write_ndjson()``,
@@ -103,6 +110,7 @@ class SyncStats:
             "pool_hits": self.pool_hits,
             "pool_misses": self.pool_misses,
             "errors": self.errors,
+            "gpg_failures": self.gpg_failures,
             "elapsed": self.elapsed,
             "removed": self.removed,
         }
@@ -112,22 +120,44 @@ class SyncStats:
 class RepoVars:
     ## @brief Per-repo variables passed to every node in the schema tree.
     ##
-    ## ``inv``      — the per-repo ``Inventory`` (hash→inode for files
-    ##                hardlinked into this repo's dest directory).
-    ## ``pool_inv`` — the global pool ``Inventory`` (hash→inode for every
-    ##                file in the content-addressed pool).
-    ## ``mirror_root`` — root of all mirror data on disk.
-    ## ``repo_root``   — root of the repository tree (``<mirror_root>/repos``).
-    ## ``pool_root``   — root of the content-addressed pool (``<mirror_root>/pool``).
-    ## ``sync_mode`` — ``True`` during a sync run (set on the specific
-    ##                 repo before sync begins, cleared after).
-    ## ``stats``    — accumulates per-node sync outcomes during a sync run;
-    ##                ``None`` outside of sync or when pool is ``None``.
+    ## ``inv``        - the per-repo ``Inventory`` (hash->inode for files
+    ##                  hardlinked into this repo's dest directory).
+    ## ``pool_inv``   - the global pool ``Inventory`` (hash->inode for every
+    ##                  file in the content-addressed pool).
+    ## ``mirror_root`` - root of all mirror data on disk.
+    ## ``repo_root``   - root of the repository tree (``<mirror_root>/repos``).
+    ## ``pool_root``   - root of the content-addressed pool (``<mirror_root>/pool``).
+    ## ``repo_name``  - name of this repo; used as the subprocess group key
+    ##                  for per-repo abort (matches the thread-local tag set
+    ##                  in ``Repos._sync_one()``).
+    ## ``abort_event`` - set to signal all coordinator/worker threads for
+    ##                   this repo to stop immediately.  Checked at the top
+    ##                   of each ``_sync_content()`` iteration.
+    ## ``sync_mode``  - ``True`` during a sync run (set on the specific
+    ##                  repo before sync begins, cleared after).
+    ## ``stats``      - accumulates per-node sync outcomes during a sync run;
+    ##                  ``None`` outside of sync or when pool is ``None``.
 
     inv: Optional[Inventory] = None
     pool_inv: Optional[Inventory] = None
     mirror_root: str = ""
     repo_root: str = ""
     pool_root: str = ""
+    repo_name: str = ""
+    gpg_keyring_path: str = ""
+    connect_timeout: int = 10
+    abort_event: threading.Event = None  # type: ignore[assignment]
     sync_mode: bool = False
     stats: Optional[SyncStats] = None
+
+    def __post_init__(self) -> None:
+        ## @brief Initialise fields that cannot use dataclass defaults.
+        ##
+        ## ``threading.Event`` cannot be a dataclass field default because
+        ## it is mutable - using ``field(default_factory=...)`` would work but
+        ## requires importing ``dataclasses.field``.  A ``__post_init__``
+        ## is cleaner and avoids the extra import at the call site.
+        ##
+        ## @return None
+        if self.abort_event is None:
+            self.abort_event = threading.Event()
