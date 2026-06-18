@@ -55,7 +55,7 @@ class Repo(Node):
     ##
     ## Each concrete subclass registers itself via the ``_registry``
     ## mechanism and provides ``is_this_yours()``.  ``_children`` is
-    ## ``["distributions"]`` — the base ``parse()`` recurses into each
+    ## ``["distributions"]`` - the base ``parse()`` recurses into each
     ## distribution's own child tree.
     ##
     ## Not decorated with ``@dataclass``: with no annotated instance fields
@@ -99,7 +99,7 @@ class Repo(Node):
         ## repo metadata (upstream, repo_type, etc.) plus any
         ## child nodes (Distributions, Vars, etc.) attached by parsers.
         ##
-        ## @param upstream_idx  Index of upstream used during scan — persisted
+        ## @param upstream_idx  Index of upstream used during scan - persisted
         ##                       so the same mirror is preferred on sync
         ## @param name          Human-friendly repo name.
         ## @param repo_type     Repo type string (e.g. ``"apt"``).
@@ -323,7 +323,7 @@ class Repo(Node):
         ## @brief Discover upstream and populate the schema tree (scan mode).
         ##
         ## Probes the upstream to discover distributions, parses Release
-        ## files, and populates the full node tree.  Pure in-memory —
+        ## files, and populates the full node tree.  Pure in-memory -
         ## no disk writes, no pool operations.
         ##
         ## @param config  Optional network configuration dict.
@@ -350,10 +350,10 @@ class Repo(Node):
     ## @return None
     ##
         ## All nodes know their full repo-root-relative ``path`` from
-        ## construction time — no deferred path patching is needed.
+        ## construction time - no deferred path patching is needed.
         ##
         ## When *pool* is None the tree is built but no content is
-        ## transferred — useful for testing or dry-run.
+        ## transferred - useful for testing or dry-run.
         ##
         ## When *pool* is set, every leaf node pushes its own stats to
         ## ``node["stats"]`` during ``sync()``.  ``Repo.stats()``
@@ -385,7 +385,7 @@ class Repo(Node):
         ## The coordinator drives tree discovery using a manual stack.
         ## For each node:
         ##   - If its hash is in the pool inventory, ``node.sync()`` runs
-        ##     directly on the coordinator — the file already exists on
+        ##     directly on the coordinator - the file already exists on
         ##     disk, so this is a fast ``os.link()`` with ``log()`` in the
         ##     coordinator context.
         ##   - Otherwise the node is submitted to *pool* for a genuine
@@ -393,20 +393,22 @@ class Repo(Node):
         ##     discovery.
         ##
         ## After either path completes, ``stream()`` is called on the node
-        ## to materialise children (Release → Index → Package), which are
+        ## to materialise children (Release -> Index -> Package), which are
         ## stacked for the same fast/slow decision.
         ##
         ## ``node.sync()`` is the single module responsible for all disk
-        ## access — the coordinator never duplicates its logic.
+        ## access - the coordinator never duplicates its logic.
         ##
         ## @param pool     Shared ``ThreadPoolExecutor`` for genuine downloads.
         ## @param config   Optional configuration dict forwarded to each
         ##                  ``Node.sync()`` call.
         ## @return None
 
+        from ..lib.exceptions import RepoAbortError
+
         futures: Dict[concurrent.futures.Future, Node] = {}
         # Thread-safety: _tree_iter() is unprotected, but the static tree
-        # skeleton (Release → Distribution → Suite → Index) is fully built
+        # skeleton (Release -> Distribution -> Suite -> Index) is fully built
         # by _build_sync_tree() before this method runs.  Worker threads
         # only update node payloads (path, hash, size, etc.) via the
         # protected Node.__setitem__; they never add or remove structural
@@ -414,8 +416,11 @@ class Repo(Node):
         stack = list(self._tree_iter())
         rv = self._repo_vars
 
-        while (stack or futures) and not _ABORT_SYNC:
-            while stack and not _ABORT_SYNC:
+        def _aborted() -> bool:
+            return _ABORT_SYNC or rv.abort_event.is_set()
+
+        while (stack or futures) and not _aborted():
+            while stack and not _aborted():
                 node = stack.pop()
                 if not (node.get("uri") and node.get("path")):
                     continue
@@ -430,6 +435,8 @@ class Repo(Node):
                         node.sync(config=config)
                         for child in node.stream():
                             stack.append(child)
+                    except RepoAbortError:
+                        raise
                     except Exception as e:
                         if rv.stats is not None:
                             rv.stats.add_error()
@@ -439,7 +446,7 @@ class Repo(Node):
                 future = pool.submit(node.sync, config=config)
                 futures[future] = node
 
-            if not futures or _ABORT_SYNC:
+            if not futures or _aborted():
                 break
 
             done, _ = concurrent.futures.wait(
@@ -451,6 +458,8 @@ class Repo(Node):
                     future.result()
                     for child in node.stream():
                         stack.append(child)
+                except RepoAbortError:
+                    raise
                 except Exception as e:
                     if rv.stats is not None:
                         rv.stats.add_error()
@@ -462,13 +471,13 @@ class Repo(Node):
         ## ``Inventory.from_repos`` captures every file path in the repo
         ## destination into ``rv.inv.stale_paths`` before the sync begins.
         ## During the sync, ``Node.sync()`` removes each path from that set
-        ## the moment the node is processed — whether it ends up being an
+        ## the moment the node is processed - whether it ends up being an
         ## inventory hit, a pool re-link, or a fresh download.  By the time
         ## the work queue drains, ``stale_paths`` contains only files that
         ## existed on disk but were never wanted: old package versions, dropped
         ## architectures, removed distributions.
         ##
-        ## No disk walk is needed here — the stale set was built for free
+        ## No disk walk is needed here - the stale set was built for free
         ## during the startup ``find`` pass.  The removed count is returned
         ## so the caller can store it in ``_top_stats["removed"]``, which
         ## feeds the per-repo stats record, NDJSON log, and summary table.
@@ -516,7 +525,7 @@ class Repo(Node):
         ## @brief Return the sync statistics for this repo.
         ##
         ## Reads directly from the ``SyncStats`` accumulator on
-        ## ``_repo_vars`` — updated in real time by ``Node.sync()`` during
+        ## ``_repo_vars`` - updated in real time by ``Node.sync()`` during
         ## the sync run, with ``elapsed`` and ``removed`` set by the
         ## coordinator after the work queue drains.  No post-sync tree walk
         ## needed; the accumulator replaces both the per-node ``node["stats"]``
@@ -589,6 +598,14 @@ class Repo(Node):
         repo["dest"] = mirror_cfg.get("dest", name)
         if upstream_objs:
             repo["uri"] = upstream_objs[0].url
+
+        repo["gpg_key_url"] = mirror_cfg.get("gpg_key_url") or ""
+        repo["gpg_key_path"] = mirror_cfg.get("gpg_key_path") or ""
+        per_repo_check = mirror_cfg.get("check_gpg_signature")
+        repo["check_gpg_signature"] = (
+            bool(per_repo_check) if per_repo_check is not None
+            else cfg.check_gpg_signature
+        )
 
         params: Dict[str, Any] = {}
         if releases:
@@ -668,10 +685,14 @@ class RepoLock:
         self.path = Path(mirror_root) / self.FLOCK_DIR / repo_name / self.LOCK_FILE
         self.fd: int | None = None
 
-    def acquire(self, timeout: float = 600) -> None:
+    def acquire(self, timeout: float = 0) -> None:
         ## @brief Acquire an exclusive lock, waiting up to *timeout* seconds.
         ##
-        ## @param timeout  Maximum seconds to wait for the lock.
+        ## The default of 0 means a single non-blocking attempt: if the lock
+        ## is held, ``TimeoutError`` is raised immediately.  Pass a positive
+        ## value to retry for up to that many seconds before giving up.
+        ##
+        ## @param timeout  Maximum seconds to wait for the lock (default 0).
         ## @raises TimeoutError  If the lock cannot be acquired within *timeout*.
         ## @return None
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -769,7 +790,7 @@ def _build_repo_path_files(repo_root: str, dest_names: List[str]) -> None:
 
     script = Path(__file__).resolve().parents[2] / "scripts" / "build-repo-paths.sh"
     if not script.exists():
-        log(f"WARNING: build-repo-paths.sh not found at {script} — falling back to in-process repo scan", level="WARN")
+        log(f"WARNING: build-repo-paths.sh not found at {script} - falling back to in-process repo scan", level="WARN")
         return
 
     try:
@@ -778,7 +799,7 @@ def _build_repo_path_files(repo_root: str, dest_names: List[str]) -> None:
             check=True,
         )
     except subprocess.CalledProcessError as e:
-        log(f"WARNING: build-repo-paths.sh failed (exit {e.returncode}) — per-repo inventories will be empty", level="WARN")
+        log(f"WARNING: build-repo-paths.sh failed (exit {e.returncode}) - per-repo inventories will be empty", level="WARN")
 
 
 def _check_any_sync_lock(mirror_root: str, repo_names: list[str]) -> str | None:
@@ -825,12 +846,12 @@ def pool_sweep_safe(cfg: "Config", *, fail_if_locked: bool = False) -> bool:
     if busy:
         if fail_if_locked:
             log(
-                f"ERROR: Sync in progress for '{busy}' — cannot sweep pool",
+                f"ERROR: Sync in progress for '{busy}' - cannot sweep pool",
                 level="ERROR",
             )
             return False
         log(
-            f"Pool sweep skipped — another process holds the lock for '{busy}'",
+            f"Pool sweep skipped - another process holds the lock for '{busy}'",
             level="INFO",
         )
         return True
@@ -858,19 +879,15 @@ class Repos(NodeList[Repo]):
         self._stats: Dict[str, Any] = {}
 
     @property
-    def session_ts(self) -> str:
-        ## @brief Session timestamp for the current batch.
-        ##
-        ## Set once by ``sync_all()`` and used in every per-repo NDJSON
-        ## record so all repos in the same run share the same timestamp.
-        ##
-        ## @return ISO-8601 timestamp string.
-        return self._stats.get("session_ts", "")
+    def session_ts(self) -> int:
+        ## @brief Session timestamp for the current batch (Unix epoch seconds).
+        ## @return Unix timestamp integer.
+        return self._stats.get("session_ts", 0)
 
     @session_ts.setter
-    def session_ts(self, value: str) -> None:
+    def session_ts(self, value: int) -> None:
         ## @brief Set the session timestamp.
-        ## @param value  ISO-8601 timestamp string.
+        ## @param value  Unix timestamp integer.
         ## @return None
         self._stats["session_ts"] = value
 
@@ -945,14 +962,12 @@ class Repos(NodeList[Repo]):
             kill_active_subprocesses_signal_safe()
             os._exit(130)
 
-        from ..lib.datetimeutils import fmt_isotimestamp
-
         self.session_start = datetime.now(timezone.utc)
-        self.session_ts = fmt_isotimestamp(self.session_start)
+        self.session_ts = int(self.session_start.timestamp())
         original_sigint = signal.signal(signal.SIGINT, _sigint_handler)
         faulthandler.register(signal.SIGINFO)
 
-        # Enforce repo name uniqueness — names map to directories under
+        # Enforce repo name uniqueness - names map to directories under
         # repo_root, so duplicates would cause two workers to fight over
         # the same destination tree, stale_paths set, and inventory file.
         # Thread-safety: these iterations over `self` (a NodeList) run in
@@ -963,7 +978,7 @@ class Repos(NodeList[Repo]):
             name = repo.get("name", "")
             if name in seen_names:
                 log(
-                    f"ERROR: duplicate repo name '{name}' — each repo must "
+                    f"ERROR: duplicate repo name '{name}' - each repo must "
                     "have a unique name since it maps to a distinct directory "
                     "under repo_root.",
                     level="ERROR",
@@ -996,7 +1011,7 @@ class Repos(NodeList[Repo]):
         # sequential and avoids competing with hardlink and download I/O.
         _build_repo_path_files(cfg.repo_root, managed_dests)
 
-        # Assign RepoVars without per-repo inventory — each repo loads its
+        # Assign RepoVars without per-repo inventory - each repo loads its
         # own inventory lazily from the tmpfs path file when its sync slot
         # opens (in _sync_one), so only max_concurrent_syncs inventories
         # are in memory at once rather than all of them simultaneously.
@@ -1008,6 +1023,7 @@ class Repos(NodeList[Repo]):
                 mirror_root=cfg.mirror_root,
                 repo_root=cfg.repo_root,
                 pool_root=cfg.pool_root,
+                connect_timeout=cfg.connect_timeout,
             )
 
         t0 = time.monotonic()
@@ -1018,7 +1034,7 @@ class Repos(NodeList[Repo]):
                 thread_name_prefix="sync",
             ) as repo_pool:
                 # Thread-safety: `self` is iterated here in the coordinator
-                # thread only — workers receive individual repo references and
+                # thread only - workers receive individual repo references and
                 # never modify the Repos NodeList.  Each repo is dispatched to
                 # exactly one worker, so there is no concurrent access to any
                 # individual Repo node until its worker starts.
@@ -1073,11 +1089,13 @@ class Repos(NodeList[Repo]):
         ## @return Initializer callable for ``ThreadPoolExecutor(initializer=...)``.
         _data: Dict[str, Any] = {"counter": 0, "lock": threading.Lock()}
         def _init() -> None:
-            ## @brief Per-worker initializer that sets the thread name.
+            ## @brief Per-worker initializer: set thread name and repo tag.
             ## @return None
             with _data["lock"]:
                 _data["counter"] += 1
                 threading.current_thread().name = f"{name} {_data['counter']}"
+            from ..lib.subproc import set_repo_tag
+            set_repo_tag(name)
         return _init
 
     def _sync_one(
@@ -1087,8 +1105,8 @@ class Repos(NodeList[Repo]):
     ) -> None:
         ## @brief Sync a single repo: load inventory, sync content, record stats.
         ##
-        ## The per-repo inventory is loaded here — lazily, when this repo's
-        ## sync slot opens — rather than upfront for all repos.  This bounds
+        ## The per-repo inventory is loaded here - lazily, when this repo's
+        ## sync slot opens - rather than upfront for all repos.  This bounds
         ## peak memory to ``max_concurrent_syncs`` inventories at once.
         ##
         ## ``Inventory.from_path_file()`` opens the tmpfs path file written
@@ -1099,8 +1117,12 @@ class Repos(NodeList[Repo]):
         ## @param repo  The ``Repo`` instance to sync.
         ## @param cfg   Global ``Config`` singleton.
         ## @return None
+        from ..lib.exceptions import RepoAbortError
+        from ..lib.subproc import set_repo_tag
+
         name = repo.get("name", "unknown")
         threading.current_thread().name = f"{name} 0"
+        set_repo_tag(name)
         params = repo.get("params") or {}
         workers = params.get("parallel_downloads", cfg.parallel_downloads)
 
@@ -1112,28 +1134,53 @@ class Repos(NodeList[Repo]):
         # Load this repo's pre-sync path list from tmpfs and build its
         # inventory.  The file is unlinked on open so it cannot leak.
         rv = repo._repo_vars
-        rv.inv = Inventory.from_path_file(
-            f"/tmp/mirror-dedupe/{dest_name}.paths",
-            rv.pool_inv,
-            dest_name,
-            cfg.repo_root,
-        )
+        rv.repo_name = name
 
-        with RepoLock(cfg.mirror_root, name):
-            log(f"Syncing repo '{name}' to '{repo.get('dest', '')}'", level="INFO")
-            # Thread-safety: each repo is processed by exactly one worker
-            # thread (_sync_one is never submitted twice for the same repo),
-            # so this read-modify-write on repo["params"] is safe without an
-            # explicit lock.
-            config = repo.get("params")
-            if config is None:
-                config = {}
-                repo["params"] = config
-            with concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers,
-                initializer=self._make_worker_init(name),
-            ) as pool:
-                repo.sync(pool=pool, config=config)
+        # GPG keyring fetch happens before the lock - it's a network-only
+        # operation that doesn't touch repo content and is safe to run
+        # concurrently with another process holding the lock.
+        if repo.get("check_gpg_signature") and repo.get("gpg_key_url"):
+            from ..lib.gpg import GpgKeyError, prepare_keyring
+            gpg_key_url: str = repo.get("gpg_key_url", "")
+            gpg_key_path_cfg: str = repo.get("gpg_key_path", "")
+            if gpg_key_path_cfg:
+                keyring_path = Path(cfg.repo_root) / gpg_key_path_cfg
+            else:
+                keyring_path = (
+                    Path(cfg.mirror_root) / "mirror-dedupe" / name / "keyring.gpg"
+                )
+            try:
+                prepare_keyring(gpg_key_url, keyring_path, cfg.connect_timeout)
+                rv.gpg_keyring_path = str(keyring_path)
+            except GpgKeyError as e:
+                log(f"[{name}] GPG key unavailable - skipping sync: {e.message}",
+                    level="ERROR")
+                return
+
+        try:
+            with RepoLock(cfg.mirror_root, name):
+                # Inventory loaded inside the lock so it reflects current disk
+                # state at the moment this process owns the repo, not before.
+                rv.inv = Inventory.from_path_file(
+                    f"/tmp/mirror-dedupe/{dest_name}.paths",
+                    rv.pool_inv,
+                    dest_name,
+                    cfg.repo_root,
+                )
+                log(f"Syncing repo '{name}' to '{repo.get('dest', '')}'", level="INFO")
+                config = repo.get("params")
+                if config is None:
+                    config = {}
+                    repo["params"] = config
+                with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers,
+                    initializer=self._make_worker_init(name),
+                ) as pool:
+                    repo.sync(pool=pool, config=config)
+        except TimeoutError:
+            log(f"[{name}] Skipping - sync already running", level="WARN")
+        except RepoAbortError as e:
+            log(f"[{name}] Sync aborted: {e.reason}", level="WARN")
 
     def _print_summary(self) -> None:
         ## @brief Print a cross-repo sync summary table to stdout.

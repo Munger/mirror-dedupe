@@ -63,7 +63,7 @@ class Apt(Schema.Repo):
         ## Sets ``self.vars``, discovers distributions via
         ## ``DistributionsParser``, then deduplicates suites.  The base
         ## ``Node.parse()`` recursion walks into each distribution's
-        ## child tree (Release → Indices).  Components and architectures
+        ## child tree (Release -> Indices).  Components and architectures
         ## are computed lazily via properties that aggregate from parsed
         ## distribution metadata.
         ##
@@ -83,7 +83,7 @@ class Apt(Schema.Repo):
         candidates = getattr(self, "dist_candidates", None)
         self.distributions = DistributionsParser(self, candidates=candidates).parse()
 
-        # Architecture/component filters from repo.params — stored for
+        # Architecture/component filters from repo.params - stored for
         # child Distribution/Release nodes to consume during their parse.
         p = self.params or {}
         self._arch_filter = p.get("architectures")
@@ -119,7 +119,7 @@ class Apt(Schema.Repo):
         ##
         ## Reads suite names from ``self.params["suites"]``, creates
         ## ``Distribution`` nodes with their child ``Release`` nodes
-        ## directly (no upstream probing — the Release will stream-parse
+        ## directly (no upstream probing - the Release will stream-parse
         ## into Index children after its download completes).
         ##
         ## @param config  Optional configuration dict (unused, read from
@@ -239,9 +239,9 @@ class Apt(Schema.Repo):
         ## @brief Lightweight check: does this upstream look like an APT repo?
         ##
         ## Tries in order:
-        ##  1. HTML directory listing at ``/dists/`` — cheap existence check
-        ##  2. Child prefix resolution — ``/dists/`` under a subdirectory
-        ##  3. Codename probing — short-circuits on first hit
+        ##  1. HTML directory listing at ``/dists/`` - cheap existence check
+        ##  2. Child prefix resolution - ``/dists/`` under a subdirectory
+        ##  3. Codename probing - short-circuits on first hit
         ##
         ## No per-suite Release probes here; that belongs in the parser.
         ##

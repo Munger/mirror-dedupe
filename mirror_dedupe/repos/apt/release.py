@@ -13,10 +13,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mirror_dedupe import schema as Schema
-from mirror_dedupe.lib.exceptions import ExceptionMsg
+from mirror_dedupe.lib.exceptions import ExceptionMsg, RepoAbortError
+from mirror_dedupe.lib.gpg import verify_release
 from mirror_dedupe.lib.html_helpers import build_url
 from .index import AptIndex
 
@@ -185,7 +187,7 @@ class Release(Schema.Release):
                             continue
                 entries.append(entry)
 
-        # Deduplicate by path — later sections (SHA256) overwrite MD5/SHA1
+        # Deduplicate by path - later sections (SHA256) overwrite MD5/SHA1
         seen_by_path: Dict[str, Dict[str, Any]] = {}
         for entry in entries:
             seen_by_path[entry["path"]] = entry
@@ -252,7 +254,7 @@ class Release(Schema.Release):
             indices.append(primary_index)
             yield primary_index
 
-            # Variants get VariantIndex — downloaded but not parsed for children
+            # Variants get VariantIndex - downloaded but not parsed for children
             for variant in variants:
                 v_path = variant["path"]
                 if v_path in seen_paths:
@@ -278,6 +280,53 @@ class Release(Schema.Release):
                 yield v_index
 
         self.indices = indices
+
+    def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
+        ## @brief Download the Release file then verify its GPG signature.
+        ##
+        ## Calls the base ``MDNode.sync()`` to download and hardlink the
+        ## Release file, then - if a keyring is available on ``_repo_vars``
+        ## - fetches ``Release.gpg`` and verifies the signature.
+        ##
+        ## On verification failure the repo is aborted immediately:
+        ## ``self.abort()`` kills all in-flight curl processes for this
+        ## repo and ``RepoAbortError`` is raised so the coordinator stops
+        ## submitting further work and skips the stale sweep.
+        ##
+        ## @param config  Optional config dict forwarded to base ``sync()``.
+        ## @raises RepoAbortError  If GPG verification fails.
+        ## @return Paths hardlinked into the repo (from base ``sync()``).
+
+        paths = super().sync(config=config)
+
+        rv = self._repo_vars
+        if not (rv and rv.gpg_keyring_path):
+            return paths
+
+        release_path = Path(rv.repo_root) / self.get("path")
+        if not release_path.exists():
+            return paths
+
+        sig_url = self.url + ".gpg"
+        inrelease_url = self.url.rsplit("/", 1)[0] + "/InRelease"
+        ok = verify_release(
+            release_path,
+            sig_url,
+            Path(rv.gpg_keyring_path),
+            connect_timeout=rv.connect_timeout,
+            inrelease_url=inrelease_url,
+            label=f"{self.suite}/Release",
+        )
+        if not ok:
+            if rv.stats is not None:
+                rv.stats.add_gpg_failure()
+            self.abort()
+            raise RepoAbortError(
+                f"GPG verification failed for {self.suite}/Release - "
+                "repo is compromised, sync aborted"
+            )
+
+        return paths
 
     def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
         ## @brief Fetch the Release body and stream-parse into Index children.

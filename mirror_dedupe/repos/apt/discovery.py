@@ -266,7 +266,7 @@ def discover_distribution_paths(
             _release_text_cache[(upstream, index_root, path)] = text
             log(f"  {path}: fetched")
             discovered_paths.append(path)
-            continue  # Leaf found — no need to descend
+            continue  # Leaf found - no need to descend
         log(f"  {path}: not found")
 
         if depth >= max_depth:
@@ -390,7 +390,7 @@ def probe_fallback_suites(
             text = None
 
         if text and looks_like_release(text):
-            # Same Suite/Codename verification as probe_any_suite —
+            # Same Suite/Codename verification as probe_any_suite -
             # confirm the Release file matches the probed suite name,
             # not a redirect or child-prefix false positive.
             claimed = None

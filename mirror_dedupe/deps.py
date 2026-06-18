@@ -44,7 +44,7 @@ def check_dependencies() -> None:
         hash_bin = shutil.which("shasum")
         if hash_bin is None:
             print(
-                "ERROR: sha256sum not found and shasum not found — "
+                "ERROR: sha256sum not found and shasum not found - "
                 "install coreutils (Linux) or use a macOS system with shasum",
                 file=sys.stderr,
             )
@@ -64,7 +64,7 @@ def check_dependencies() -> None:
     else:
         FIND_TOOL = "find"
 
-    # curl — used for every HTTP download.
+    # curl - used for every HTTP download.
     curl_bin = shutil.which("curl")
     if curl_bin is None:
         print(

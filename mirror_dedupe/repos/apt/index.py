@@ -59,7 +59,7 @@ class AptIndex(Schema.Index):
             ## coordinator receives them one at a time rather than receiving
             ## all packages from this index in a single burst.  The
             ## pre-built ``packages`` list and ``self.packages`` assignment
-            ## are gone — stats are accumulated by ``SyncStats`` in
+            ## are gone - stats are accumulated by ``SyncStats`` in
             ## ``Node.sync()`` and stale paths are discarded there too, so
             ## nothing needs to walk a retained package list after streaming.
             ##

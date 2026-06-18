@@ -24,7 +24,7 @@ class Upstream(Node):
     ## Core fields capture the information needed by scan/discovery and
     ## sync policy:
     ##
-    ## * ``url`` — base HTTP/HTTPS URL for discovery and sync
+    ## * ``url`` - base HTTP/HTTPS URL for discovery and sync
     ##
     ## An open-ended metadata mapping is also provided so callers can
     ## attach additional per-upstream details without changing the schema.

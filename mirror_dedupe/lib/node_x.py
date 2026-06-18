@@ -5,27 +5,27 @@
 ## Provides foundational building blocks for constructing object graphs
 ## with optional serialisation, streaming child discovery, and
 ## multi-node locking.  Designed for extractability as a standalone
-## package — zero external dependencies beyond the Python standard library.
+## package - zero external dependencies beyond the Python standard library.
 ##
 ## Class hierarchy (dependency order):
 ##
-##     Node                    — dict-backed, RLock, payload validation,
+##     Node                    - dict-backed, RLock, payload validation,
 ##                               freeze/thaw, subtree walking, merging
-##     NodeList                — thread-safe Node-only collection
-##     StreamMixin             — virtual stream() for lazy child discovery
-##     Serialisable            — snapshot/restore/clone mixin
-##     SerialisableNodeList    — NodeList + snapshot/restore
-##     NodeTransaction         — ordered multi-node lock acquisition
-##     ReadWriteMixin          — opt-in readers-writer lock for safe iteration
+##     NodeList                - thread-safe Node-only collection
+##     StreamMixin             - virtual stream() for lazy child discovery
+##     Serialisable            - snapshot/restore/clone mixin
+##     SerialisableNodeList    - NodeList + snapshot/restore
+##     NodeTransaction         - ordered multi-node lock acquisition
+##     ReadWriteMixin          - opt-in readers-writer lock for safe iteration
 ##
 ## Thread-safety contract
 ## ======================
 ##
 ## Protected without caller synchronisation
 ## -----------------------------------------
-## All Node payload mutations — ``__setitem__``, ``__delitem__``,
+## All Node payload mutations - ``__setitem__``, ``__delitem__``,
 ## ``update``, ``pop``, ``clear``, ``popitem``, ``merge``, ``freeze``,
-## ``thaw`` — acquire the per-instance ``RLock`` before modifying
+## ``thaw`` - acquire the per-instance ``RLock`` before modifying
 ## state.  The same applies to all ``NodeList`` mutations (``append``,
 ## ``extend``, ``insert``, ``pop``, ``remove``, ``clear``, ``reverse``,
 ## ``sort``, ``__setitem__``, ``__delitem__``, ``freeze``, ``thaw``) and
@@ -34,31 +34,31 @@
 ## automatically for any fields written via normal attribute or item
 ## assignment.
 ##
-## Not protected — callers must synchronise explicitly
+## Not protected - callers must synchronise explicitly
 ## ----------------------------------------------------
-## **Reads** — ``node["key"]``, ``node.key``, ``node.get()``,
+## **Reads** - ``node["key"]``, ``node.key``, ``node.get()``,
 ## ``node.items()``, and iterating a ``NodeList`` are not protected.
 ## In CPython the GIL makes isolated reads practically safe, but a
 ## read-modify-write sequence is not atomic::
 ##
-##     # NOT safe under concurrent writes — use node.lock explicitly:
+##     # NOT safe under concurrent writes - use node.lock explicitly:
 ##     v = node["counter"]
 ##     node["counter"] = v + 1
 ##
 ## Subclasses that need safe iteration can opt into ``ReadWriteMixin``,
 ## which makes writers block transparently while a ``reading()`` context
-## is active — no special handling required in writer code::
+## is active - no special handling required in writer code::
 ##
 ##     with node.reading():
 ##         for k, v in node.items():   # writers block until here exits
 ##             ...
 ##
-## **Tree walks** — ``_tree_iter()`` and ``_walk_child_nodes()``
+## **Tree walks** - ``_tree_iter()`` and ``_walk_child_nodes()``
 ## acquire no locks.  Concurrent structural modifications (adding or
 ## removing children) can produce torn results.  See the ``@warning``
 ## on each method.
 ##
-## **Cross-node operations** — reading from one node and writing to
+## **Cross-node operations** - reading from one node and writing to
 ## another is not atomic.  Use ``NodeTransaction`` to acquire all
 ## relevant locks in a stable, deadlock-free order::
 ##
@@ -206,9 +206,9 @@ class Node(dict):
     ## ``__setattr__`` distinguishes two kinds of attribute:
     ##
     ##   * **Private/reserved** (name starts with ``_``, or in
-    ##     ``type(self)._reserved``) — written via
+    ##     ``type(self)._reserved``) - written via
     ##     ``object.__setattr__``, no lock, no freeze check.
-    ##   * **Payload fields** — written into the dict under the lock
+    ##   * **Payload fields** - written into the dict under the lock
     ##     after checking the frozen flag.
     ##
     ## ``_reserved`` is populated automatically by ``__init_subclass__``
@@ -507,7 +507,7 @@ class Node(dict):
         ## Allowed types: Node, NodeList, None, str, int, float, bool,
         ## bytes, and tuple (recursively validated).
         ##
-        ## Raw ``list`` and ``dict`` are rejected — use ``NodeList``
+        ## Raw ``list`` and ``dict`` are rejected - use ``NodeList``
         ## or a ``Node`` subclass respectively.
         ##
         ## Scalars are checked first as they are the most common payload
@@ -607,7 +607,7 @@ class Node(dict):
         ## only Node instances are touched.
         ##
         ## The ``elif`` chain is deliberately ordered:
-        ## ``Node → NodeList → list → dict``.  Two earlier bugs are
+        ## ``Node -> NodeList -> list -> dict``.  Two earlier bugs are
         ## fixed here:
         ##
         ##   1. ``list_func`` is an explicit parameter rather than
@@ -615,7 +615,7 @@ class Node(dict):
         ##      returned ``None`` for lambdas (``__name__ == '<lambda>'``).
         ##
         ##   2. ``isinstance(value, Node)`` is an ``elif`` (not ``if``)
-        ##      so that Node — a dict subclass — does not also match
+        ##      so that Node - a dict subclass - does not also match
         ##      the ``elif isinstance(value, dict)`` branch and
         ##      re-traverse its subtree, which caused exponential
         ##      duplicate work on deep trees.
@@ -803,7 +803,7 @@ class NodeList(list, Generic[T]):
         ## @brief Mark this list (and optionally its children) as frozen.
         ##
         ## Snapshots the list contents under ``self._lock``, releases the
-        ## lock, then recurses into child Nodes — matching the deadlock-free
+        ## lock, then recurses into child Nodes - matching the deadlock-free
         ## pattern used by ``Node.freeze()``.
         ##
         ## @param deep  Whether to recursively freeze child Nodes.
@@ -1023,7 +1023,7 @@ class Serialisable:
     ## @brief Mixin that adds snapshot/restore/clone to a ``Node``.
     ##
     ## Snapshots are plain Python dict/list/scalar trees with no
-    ## ``Node`` instances — they can be serialised to JSON, YAML,
+    ## ``Node`` instances - they can be serialised to JSON, YAML,
     ## msgpack, or any text/binary format and later restored into a
     ## typed object graph.
     ##
@@ -1037,11 +1037,11 @@ class Serialisable:
     ##        constructs via ``_from_payload()``.
 
     _node_fields: ClassVar[Dict[str, Type[Any]]] = {}
-    ## @brief Mapping of field name → Node subclass for restoring
+    ## @brief Mapping of field name -> Node subclass for restoring
     ##        single-child attributes.
 
     _list_fields: ClassVar[Dict[str, Tuple[Type[Any], Type[Any]]]] = {}
-    ## @brief Mapping of field name → (NodeList subclass, item Node
+    ## @brief Mapping of field name -> (NodeList subclass, item Node
     ##        subclass) for restoring list-child attributes.
 
     def to_plain(self) -> Any:
@@ -1199,7 +1199,7 @@ class Serialisable:
         ## preserving the subclass type.  Shared references (same Node
         ## reachable through multiple paths) are preserved via *memo*.
         ##
-        ## @param memo  ``id(original) → clone`` dict for cycle and
+        ## @param memo  ``id(original) -> clone`` dict for cycle and
         ##              shared-reference detection.
         ## @return A deep copy of this node.
 
@@ -1399,7 +1399,7 @@ class NodeTransaction:
         ## @param exc_type  Exception type (unused).
         ## @param exc       Exception value (unused).
         ## @param tb        Traceback (unused).
-        ## @return ``False`` — exceptions are not suppressed.
+        ## @return ``False`` - exceptions are not suppressed.
 
         for n in reversed(self._nodes):
             n.lock.release()
@@ -1421,7 +1421,7 @@ class ReadWriteMixin:
     ## reads.  This mixin adds a ``reading()`` context manager that
     ## callers wrap iteration in.  Any mutation that arrives while one
     ## or more readers are active blocks transparently until every
-    ## reader has exited — no special handling is required in writer
+    ## reader has exited - no special handling is required in writer
     ## code.
     ##
     ## Usage::
@@ -1436,7 +1436,7 @@ class ReadWriteMixin:
     ##         for item in lst:          # writers block until here exits
     ##             process(item)
     ##
-    ##     # writer (e.g. worker appending) — no changes needed:
+    ##     # writer (e.g. worker appending) - no changes needed:
     ##     lst.append(new_node)          # blocks if a reader is active
     ##
     ## The mixin is compatible with both ``Node`` and ``NodeList``.

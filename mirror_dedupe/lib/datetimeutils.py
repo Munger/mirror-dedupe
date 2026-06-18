@@ -6,10 +6,10 @@
 ## current UTC time) and return a formatted string.  The three output
 ## formats are:
 ##
-##   * ``fmt_date()``           — ISO date       → ``"2026-06-08"``
-##   * ``fmt_isotimestamp()``   — ISO-8601       → ``"2026-06-08T21:59:10.899603+00:00"``
-##   * ``fmt_compact_ts()``     — dir-safe       → ``"20260608T215910"``
-##   * ``fmt_datetime()``       — human-readable → ``"2026-06-08 21:59:10"``
+##   * ``fmt_date()``           - ISO date       -> ``"2026-06-08"``
+##   * ``fmt_isotimestamp()``   - ISO-8601       -> ``"2026-06-08T21:59:10.899603+00:00"``
+##   * ``fmt_compact_ts()``     - dir-safe       -> ``"20260608T215910"``
+##   * ``fmt_datetime()``       - human-readable -> ``"2026-06-08 21:59:10"``
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -50,7 +50,7 @@ def fmt_isotimestamp(dt: _datetime = None) -> str:
 def fmt_compact_ts(dt: _datetime = None) -> str:
     ## @brief Return a compact timestamp safe for directory names.
     ##
-    ## Format: ``20260608T215910`` — no colons, no spaces, no timezone.
+    ## Format: ``20260608T215910`` - no colons, no spaces, no timezone.
     ## If *dt* is ``None``, the current UTC time is used.
     ##
     ## @param dt  Optional ``datetime`` instance.
