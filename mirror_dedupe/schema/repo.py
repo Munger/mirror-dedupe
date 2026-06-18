@@ -265,7 +265,7 @@ class Repo(Node):
         *,
         repo_type: str | None = None,
         upstream_urls: list[str] | None = None,
-        dist_candidates: Optional[list[str]] = None,
+        distribution_candidates: Optional[list[str]] = None,
     ) -> "Repo":
         ## @brief Construct a Repo instance from a URL.
         ##
@@ -274,10 +274,10 @@ class Repo(Node):
         ## ``get_type_for_url`` registry helper and returns an instance
         ## bound to the upstream tree.
         ##
-        ## @param upstream        Primary upstream URL.
-        ## @param repo_type       Explicit repo type override (e.g. ``"apt"``).
-        ## @param upstream_urls   Additional candidate upstream URLs.
-        ## @param dist_candidates Optional dist names from config for probing.
+        ## @param upstream               Primary upstream URL.
+        ## @param repo_type              Explicit repo type override (e.g. ``"apt"``).
+        ## @param upstream_urls          Additional candidate upstream URLs.
+        ## @param distribution_candidates Optional dist names from config for probing.
         ## @return A fully wired Repo instance.
 
         data: Dict[str, Any] = {"upstream_idx": 0}  # updated after discovery
@@ -285,7 +285,7 @@ class Repo(Node):
             data["repo_type"] = repo_type
 
         urls: list[str] = [upstream, *(upstream_urls or [])]
-        rt_cls, _used_url = cls.get_type_for_urls(data, urls, extra_suites=dist_candidates)
+        rt_cls, _used_url = cls.get_type_for_urls(data, urls, extra_suites=distribution_candidates)
         if rt_cls is None:
             rt_cls = cls
 
@@ -581,7 +581,7 @@ class Repo(Node):
             ordered.append(url)
             upstream_objs.append(Upstream(url=url))
 
-        releases = mirror_cfg.get("releases") or mirror_cfg.get("distributions") or []
+        distributions_cfg = mirror_cfg.get("distributions") or mirror_cfg.get("releases") or []
 
         rt_cls, _ = cls.get_type_for_urls(
             {"repo_type": mirror_cfg.get("repo_type", "unknown")}, ordered
@@ -608,8 +608,8 @@ class Repo(Node):
         )
 
         params: Dict[str, Any] = {}
-        if releases:
-            params["suites"] = releases
+        if distributions_cfg:
+            params["suites"] = distributions_cfg
         expand = mirror_cfg.get("expand_distributions")
         if expand is not None:
             params["expand_distributions"] = expand
@@ -770,6 +770,9 @@ def _pool_sweep(pool_root: str) -> None:
 
     if removed:
         log(f"Pool sweep: removed {removed} orphaned files (st_nlink == 1)", level="INFO")
+    else:
+        log("Pool sweep: nothing to remove", level="INFO")
+    log("Done", level="INFO")
 
 
 def _build_repo_path_files(repo_root: str, dest_names: List[str]) -> None:

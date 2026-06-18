@@ -79,8 +79,8 @@ class Apt(Schema.Repo):
             signature_extension=Apt.SIGNATURE_EXTENSION,
         )
 
-        # Suite discovery: explicit --release candidates beat auto BFS beat codename fallback
-        candidates = getattr(self, "dist_candidates", None)
+        # Suite discovery: explicit --distribution candidates beat auto BFS beat codename fallback
+        candidates = getattr(self, "distribution_candidates", None)
         self.distributions = DistributionsParser(self, candidates=candidates).parse()
 
         # Architecture/component filters from repo.params - stored for
@@ -273,7 +273,7 @@ class Apt(Schema.Repo):
         except Exception:
             pass
 
-        # 3. Codename fallback (one-hit short-circuit) with dist_candidates
+        # 3. Codename fallback (one-hit short-circuit) with distribution_candidates
         try:
             return probe_any_suite(
                 upstream,

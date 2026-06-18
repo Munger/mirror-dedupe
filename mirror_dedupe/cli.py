@@ -191,11 +191,11 @@ def main():
                    help='Destination path relative to mirror_root/repos (defaults to --name)')
     p.add_argument('--out', dest='out_dir', metavar='DIR',
                    help='Output directory for generated config (required)')
-    p.add_argument('-r', '--dist', '--release', action='append',
-                   dest='dist', metavar='SUITE',
-                   help='Restrict to a specific suite (may be repeated)')
-    p.add_argument('-R', '--releases', dest='releases', metavar='SUITES',
-                   help='Comma-separated list of suites to mirror')
+    p.add_argument('-d', '--distribution', action='append',
+                   dest='distribution', metavar='SUITE',
+                   help='Restrict to a specific distribution/suite (may be repeated)')
+    p.add_argument('-D', '--distributions', dest='distributions', metavar='SUITES',
+                   help='Comma-separated list of distributions/suites to mirror')
     p.add_argument('--arch', action='append', dest='arch', metavar='ARCH',
                    help='Architecture to include (may be repeated)')
     p.add_argument('--architectures', dest='architectures', metavar='ARCHES',
@@ -399,27 +399,27 @@ def main():
             if not component_override:
                 component_override = None
 
-            dist_overrides: Optional[List[str]] = None
-            dist_values: List[str] = []
-            if args.dist:
-                dist_values.extend(args.dist)
-            if args.releases:
-                dist_values.extend(_split_csv([args.releases]))
-            if dist_values:
+            distribution_overrides: Optional[List[str]] = None
+            distribution_values: List[str] = []
+            if args.distribution:
+                distribution_values.extend(args.distribution)
+            if args.distributions:
+                distribution_values.extend(_split_csv([args.distributions]))
+            if distribution_values:
                 seen_d = set()
                 ordered: List[str] = []
-                for d in dist_values:
+                for d in distribution_values:
                     if d and d not in seen_d:
                         seen_d.add(d)
                         ordered.append(d)
-                dist_overrides = ordered or None
+                distribution_overrides = ordered or None
 
             try:
                 repo = scan_repo(
                     scan_name,
                     scan_upstreams,
                     repo_type=args.repo_type,
-                    dist_overrides=dist_overrides,
+                    distribution_overrides=distribution_overrides,
                 )
             except NotImplementedError:
                 log(
@@ -450,7 +450,7 @@ def main():
                 repo,
                 scan_dest,
                 gpg_key_url=args.gpg_key_url,
-                dist_overrides=dist_overrides,
+                distribution_overrides=distribution_overrides,
                 arch_override=arch_override,
                 component_override=component_override,
                 global_arch_mask=(

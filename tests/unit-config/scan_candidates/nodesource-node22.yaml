@@ -5,6 +5,6 @@ name: nodesource-node22
 dest: nodesource/node_22.x
 upstreams:
 - https://deb.nodesource.com/node_22.x
-releases:
+distributions:
 - nodistro
 gpg_key_url: https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key
