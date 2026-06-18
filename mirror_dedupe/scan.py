@@ -27,26 +27,26 @@ import mirror_dedupe.repos  # noqa: F401  # ensure Repo types are registered
 
 def scan(name: str, upstreams: List[str],
          repo_type: Optional[str] = None,
-         dist_overrides: Optional[List[str]] = None) -> Repo:
+         distribution_overrides: Optional[List[str]] = None) -> Repo:
     ## @brief Perform HTTP discovery and return a populated Repo.
     ##
     ## Creates a Repo via ``Repo.from_url``, optionally primes explicit
     ## distribution candidates, and runs the concrete parser to populate
     ## distributions, architectures, components, and releases.
     ##
-    ## @param name            Repository name.
-    ## @param upstreams       Ordered list of upstream URLs (first is primary).
-    ## @param repo_type       Force a specific Repo type (e.g. ``"apt"``).
-    ## @param dist_overrides  Explicit distribution names to probe.
+    ## @param name                   Repository name.
+    ## @param upstreams              Ordered list of upstream URLs (first is primary).
+    ## @param repo_type              Force a specific Repo type (e.g. ``"apt"``).
+    ## @param distribution_overrides Explicit distribution names to probe.
     ## @return A fully parsed Repo instance.
 
     primary_upstream = upstreams[0]
     log(f"Scanning {primary_upstream}...")
 
-    # --release/--dist/--releases are APT-specific concepts, so if the user
+    # --distribution/--distributions are APT-specific concepts, so if the user
     # supplies explicit distribution names without also specifying a repo
     # type, assume APT rather than failing type detection.
-    if repo_type is None and dist_overrides:
+    if repo_type is None and distribution_overrides:
         repo_type = "apt"
 
     repo = Repo.from_url(
@@ -57,8 +57,8 @@ def scan(name: str, upstreams: List[str],
     if name:
         repo.name = name
 
-    if dist_overrides:
-        object.__setattr__(repo, "dist_candidates", dist_overrides)
+    if distribution_overrides:
+        object.__setattr__(repo, "distribution_candidates", distribution_overrides)
 
     repo = repo.analyse()
 
@@ -67,7 +67,7 @@ def scan(name: str, upstreams: List[str],
 
 def generate_config(repo: Repo, dest: str,
                     gpg_key_url: Optional[str] = None,
-                    dist_overrides: Optional[List[str]] = None,
+                    distribution_overrides: Optional[List[str]] = None,
                     arch_override: Optional[List[str]] = None,
                     component_override: Optional[List[str]] = None,
                     global_arch_mask: Optional[List[str]] = None,
@@ -83,14 +83,14 @@ def generate_config(repo: Repo, dest: str,
     ## unchanged; trust decisions and verification are left to the sync
     ## phase.
     ##
-    ## @param repo               Parsed Repo instance.
-    ## @param dest               Destination path (relative to repo_root).
-    ## @param gpg_key_url        Optional GPG key URL.
-    ## @param dist_overrides     Override distribution list.
-    ## @param arch_override      Override architecture list.
-    ## @param component_override Override component list.
-    ## @param global_arch_mask   Global architecture mask from config.
-    ## @param collapse_dists     Whether to collapse pocket variants.
+    ## @param repo                   Parsed Repo instance.
+    ## @param dest                   Destination path (relative to repo_root).
+    ## @param gpg_key_url            Optional GPG key URL.
+    ## @param distribution_overrides Override distribution list.
+    ## @param arch_override          Override architecture list.
+    ## @param component_override     Override component list.
+    ## @param global_arch_mask       Global architecture mask from config.
+    ## @param collapse_dists         Whether to collapse pocket variants.
     ## @return YAML configuration string.
 
     if not gpg_key_url:
@@ -123,8 +123,8 @@ def generate_config(repo: Repo, dest: str,
     all_dists_mode = False
     collapsed_from_all = False
 
-    if dist_overrides:
-        dists = [d for d in dist_overrides if d]
+    if distribution_overrides:
+        dists = [d for d in distribution_overrides if d]
         if any(d.lower() == "all" for d in dists):
             all_dists_mode = True
             distributions = discovered
@@ -132,7 +132,7 @@ def generate_config(repo: Repo, dest: str,
             distributions = dists
     else:
         if not discovered:
-            log("ERROR: No distributions were auto-detected and no --dist/--release/--releases overrides were provided.\n       Please rerun with explicit --releases (or --dist) to choose which suites to mirror.", level="ERROR")
+            log("ERROR: No distributions were auto-detected and no --distribution/--distributions overrides were provided.\n       Please rerun with explicit --distributions (or --distribution) to choose which suites to mirror.", level="ERROR")
             sys.exit(1)
         all_dists_mode = True
         distributions = discovered
@@ -341,9 +341,9 @@ def main() -> None:
                         help='Destination path (relative to mirror_root/repos). Defaults to --name if omitted.')
     parser.add_argument('--out', dest='out_dir', required=True,
                         help='Output directory for scan results')
-    parser.add_argument('-r', '--dist', '--release', action='append', dest='dist',
+    parser.add_argument('-d', '--distribution', action='append', dest='distribution',
                         help='Override the primary distribution/suite (may be specified multiple times)')
-    parser.add_argument('-R', '--releases', dest='releases',
+    parser.add_argument('-D', '--distributions', dest='distributions',
                         help='Comma-separated list of distributions/suites to override')
     parser.add_argument('--arch', action='append', dest='arch',
                         help='Architecture to include (may be specified multiple times)')
@@ -449,20 +449,20 @@ def main() -> None:
     if not component_override:
         component_override = None
 
-    dist_overrides: Optional[List[str]] = None
-    dist_values: List[str] = []
-    if args.dist:
-        dist_values.extend(args.dist)
-    if args.releases:
-        dist_values.extend(_split_csv([args.releases]))
-    if dist_values:
+    distribution_overrides: Optional[List[str]] = None
+    distribution_values: List[str] = []
+    if args.distribution:
+        distribution_values.extend(args.distribution)
+    if args.distributions:
+        distribution_values.extend(_split_csv([args.distributions]))
+    if distribution_values:
         seen_d = set()
         ordered: List[str] = []
-        for d in dist_values:
+        for d in distribution_values:
             if d and d not in seen_d:
                 seen_d.add(d)
                 ordered.append(d)
-        dist_overrides = ordered or None
+        distribution_overrides = ordered or None
 
     if args.upstreams:
         upstreams: List[str] = [u for u in args.upstreams if u]
@@ -477,7 +477,7 @@ def main() -> None:
             args.name,
             upstreams,
             repo_type=args.repo_type,
-            dist_overrides=dist_overrides,
+            distribution_overrides=distribution_overrides,
         )
     except NotImplementedError:
         log(f"ERROR: No supported Repo implementation could parse upstream {upstreams[0]!r}.\n       If this is an APT repository with an unusual layout, you may need to add\n       or extend a Repo implementation (e.g. Apt) rather than using scan.py directly.", level="ERROR")
@@ -490,7 +490,7 @@ def main() -> None:
         repo,
         dest,
         gpg_key_url=args.gpg_key_url,
-        dist_overrides=dist_overrides,
+        distribution_overrides=distribution_overrides,
         arch_override=arch_override,
         component_override=component_override,
         global_arch_mask=global_arch_mask,

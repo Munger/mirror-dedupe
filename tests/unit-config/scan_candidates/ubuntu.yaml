@@ -5,7 +5,7 @@ name: ubuntu
 dest: ubuntu
 upstreams:
 - https://archive.ubuntu.com/ubuntu
-releases:
+distributions:
 - noble
 - resolute
 gpg_key_url: http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg

@@ -5,7 +5,7 @@ name: ubuntu-cloud
 dest: ubuntu-cloud
 upstreams:
 - https://ubuntu-cloud.archive.canonical.com/ubuntu
-releases:
+distributions:
 - noble-proposed/dalamation
 - noble-proposed/epoxy
 - noble-proposed/flamingo
