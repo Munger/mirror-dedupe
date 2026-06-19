@@ -628,14 +628,12 @@ class MDNode(Node, StreamMixin, Serialisable):
             *, hit: int = 0, miss: int = 0, bytes_tx: int = 0
         ) -> None:
             ## @brief Record one sync outcome to the repo-level SyncStats.
-            ## Reads hash_val at call time so Phase-3 updates are reflected.
             if rv.stats is not None:
                 rv.stats.record(
                     hit=hit,
                     miss=miss,
                     bytes_tx=bytes_tx,
                     size=self.get("size", 0) or 0,
-                    hash_val=hash_val,
                 )
 
         def _log_outcome(label: str, size: int = 0) -> None:

@@ -43,6 +43,7 @@ from ..schema.release import Release, Releases
 from ..schema.vars import Vars
 from ..schema.upstream import Upstream, Upstreams
 from ..lib.log import log
+from ..lib import LOG
 from ..lib.subproc import kill_active_subprocesses_signal_safe
 from ..lib.http_download import HostNotRespondingError
 from .. import stats
@@ -409,6 +410,23 @@ class Repo(Node):
 
         from ..lib.exceptions import RepoAbortError, StagingLockTimeout
 
+        def _worker_sync(node: Node) -> None:
+            ## Run node.sync in the worker thread.  Exceptions are logged
+            ## here so the thread context tag is correct, then re-raised
+            ## for the coordinator to update stats and requeue.
+            try:
+                node.sync(config=config)
+            except RepoAbortError:
+                raise
+            except StagingLockTimeout as e:
+                n = e.context
+                path = os.path.basename(n.get("path", "?")) if n is not None else "?"
+                LOG("File Locked.", path=f"Retrying  {path}")
+                raise
+            except Exception as e:
+                log(f"  {e}")
+                raise
+
         futures: Dict[concurrent.futures.Future, Node] = {}
         # Thread-safety: _tree_iter() is unprotected, but the static tree
         # skeleton (Release -> Distribution -> Suite -> Index) is fully built
@@ -460,7 +478,7 @@ class Repo(Node):
                     stack.append(node)
                     break
 
-                future = pool.submit(node.sync, config=config)
+                future = pool.submit(_worker_sync, node)
                 futures[future] = node
 
             if not futures or _aborted():
@@ -478,20 +496,16 @@ class Repo(Node):
                     _paused = False
                 except RepoAbortError:
                     raise
-                except HostNotRespondingError as e:
+                except HostNotRespondingError:
                     if rv.stats is not None:
                         rv.stats.add_no_response()
                     _paused = True
                     stack.append(node)  # requeue; retry after pause or abort after 2 cycles
-                    log(f"  {e}")
                 except StagingLockTimeout:
-                    from ..lib import LOG
-                    LOG("File Locked.", path=f"Retrying  {os.path.basename(node.get('path', '?'))}")
                     stack.append(node)
-                except Exception as e:
+                except Exception:
                     if rv.stats is not None:
                         rv.stats.add_error()
-                    log(f"  {e}")
 
             if _paused and not futures:
                 current_misses = rv.stats.pool_misses if rv.stats else 0
