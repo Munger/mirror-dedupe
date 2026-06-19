@@ -71,6 +71,7 @@ def write_ndjson(
         "bytes_transferred": s["bytes_transferred"],
         "errors": s["errors"],
         "gpg_failures": s.get("gpg_failures", 0),
+        "no_response": s.get("no_response", 0),
         "pool_hits": s["pool_hits"],
         "pool_misses": s["pool_misses"],
         "removed": s["removed"],
@@ -143,88 +144,113 @@ def clear_ndjson(mirror_root: str, name: str) -> Optional[Path]:
     return stats_file
 
 
-def _col_widths(rows: List[Dict[str, str]]) -> Dict[str, int]:
-    ## @brief Compute column widths for the summary table.
+def format_row(s: Dict, name: str) -> Dict:
+    ## @brief Convert a raw stats dict into a row dict for ``print_summary_table``.
     ##
-    ## @param rows  List of formatted row dicts (output of ``format_row()``).
-    ## @return Dict mapping column name to minimum width in characters.
-    widths = {"dt": 17, "name": 20, "files": 8, "total": 10, "deduped": 12,
-              "tx": 12, "hit": 8, "miss": 8, "errors": 6, "gpg": 4, "time": 11,
-              "removed": 8}
-    for r in rows:
-        for k, v in r.items():
-            if k in widths:
-                widths[k] = max(widths[k], len(v))
-    return widths
-
-
-def _pad(s: str, width: int) -> str:
-    ## @brief Left-justify *s* to *width*.
-    return s.ljust(width) if len(s) < width else s
-
-
-# Column definitions: (dict_key, heading, alignment)
-# "dt" is omitted automatically when all rows have an empty dt value.
-_COLS = [
-    ("dt", "Date/Time", "left"),
-    ("name", "Repository", "left"),
-    ("files", "Files", "right"),
-    ("total", "Total", "right"),
-    ("deduped", "Deduplicated", "right"),
-    ("tx", "Transferred", "right"),
-    ("hit", "Hit", "right"),
-    ("miss", "Miss", "right"),
-    ("errors", "Errors", "right"),
-    ("gpg", "GPG", "right"),
-    ("time", "Time", "right"),
-    ("removed", "Removed", "right"),
-]
+    ## Returns raw (unformatted) values keyed by column name.
+    ## Formatting is handled by the column definitions in ``print_summary_table``.
+    ##
+    ## @param s     Stats dict (from ``Repo.stats()`` or an NDJSON record).
+    ## @param name  Repo name.
+    ## @return Dict with raw values for each column.
+    return {
+        "ts":      s.get("ts"),
+        "name":    name,
+        "files":   s.get("file_count", 0),
+        "total":   s.get("total_bytes", 0),
+        "deduped": s.get("deduped_bytes", 0),
+        "tx":      s.get("bytes_transferred", 0),
+        "hits":    s.get("pool_hits", 0),
+        "misses":  s.get("pool_misses", 0),
+        "errors":  s.get("errors", 0),
+        "nr":      s.get("no_response", 0),
+        "gpg":     s.get("gpg_failures", 0),
+        "time":    s.get("elapsed", 0),
+        "removed": s.get("removed", 0),
+    }
 
 
 def print_summary_table(
-    rows: List[Dict[str, str]],
+    rows: List[Dict],
     *,
     session_start: str = "",
     session_end: str = "",
-    session_elapsed: str = "",
+    session_elapsed: float = 0,
     show_name: bool = True,
     show_total: bool = True,
     title: str = "",
 ) -> None:
     ## @brief Print a formatted cross-repo summary table to stdout.
     ##
-    ## Renders the same table as the post-sync summary, with session
-    ## header, column headings, separator lines, data rows, and an
-    ## aggregated ``Total`` row.
-    ##
     ## @param rows             List of ``format_row()`` dicts.
-    ## @param session_start    Optional start timestamp (printed as header).
-    ## @param session_end      Optional end timestamp.
-    ## @param session_elapsed  Optional elapsed duration string.
+    ## @param session_start    Optional start timestamp string.
+    ## @param session_end      Optional end timestamp string.
+    ## @param session_elapsed  Optional elapsed duration in seconds.
+    ## @param show_name        Include the Repository column (default True).
+    ## @param show_total       Include a footer totals row (default True).
+    ## @param title            Optional table title.
     ## @return None
+    import sys
+    from datetime import datetime
+    from .lib import fmt_duration
+    from .lib.log_it import Col, Table, TerminalSink
+    from .lib.log_it import fmt as logfmt
+
     if not rows:
         return
 
-    from .lib import fmt_duration
+    show_dt = any(r.get("ts") for r in rows)
+    ft = show_total
 
-    show_dt = any(r.get("dt") for r in rows)
-    cols = [
-        (k, h, a) for k, h, a in _COLS
-        if (k != "dt" or show_dt) and (k != "name" or show_name)
+    def _dt(v) -> str:
+        try:
+            return datetime.fromtimestamp(v).strftime("%x %X") if v else ""
+        except (OSError, OverflowError, ValueError):
+            return ""
+
+    def _int(v) -> str:
+        return f"{int(v):,}" if v else ""
+
+    cols: list[Col] = []
+    if show_dt:
+        cols.append(Col("ts",      header="Date/Time",    fmt=_dt))
+    if show_name:
+        cols.append(Col("name",    header="Repository",
+                        footer=(lambda v: "Total") if ft else None))
+    _sum_int = (lambda v: _int(sum(v))) if ft else None
+    cols += [
+        Col("files",   header="Files",         align="right",
+            fmt=_int,            footer=_sum_int),
+        Col("total",   header="Total",         align="right",
+            fmt=logfmt.filesize, footer=sum if ft else None),
+        Col("deduped", header="Deduplicated",  align="right",
+            fmt=logfmt.filesize, footer=sum if ft else None),
+        Col("tx",      header="Transferred",   align="right",
+            fmt=logfmt.filesize, footer=sum if ft else None),
+        Col("hits",    header="Hit",           align="right",
+            fmt=_int,            footer=_sum_int),
+        Col("misses",  header="Miss",          align="right",
+            fmt=_int,            footer=_sum_int),
+        Col("errors",  header="Errors",        align="right",
+            footer=(lambda v: str(sum(v))) if ft else None),
+        Col("nr",      header="N/R",           align="right",
+            fmt=_int,            footer=_sum_int),
+        Col("gpg",     header="GPG",
+            fmt=lambda v: "FAIL" if v else "pass",
+            footer=(lambda v: "FAIL" if any(v) else "pass") if ft else None),
+        Col("time",    header="Time",          align="right",
+            fmt=lambda v: fmt_duration(v) if v else "",
+            footer=(lambda _: fmt_duration(session_elapsed) if session_elapsed else "") if ft else None),
+        Col("removed", header="Removed",       align="right",
+            fmt=_int,            footer=_sum_int),
     ]
 
-    cw = _col_widths(rows)
-    sep = "  ".join("-" * cw[k] for k, _, _ in cols)
-
-    total_files = sum(int(r["files"].replace(",", "")) for r in rows)
-    total_bytes = sum(parse_fmt(r["total"]) for r in rows)
-    total_deduped = sum(parse_fmt(r["deduped"]) for r in rows)
-    total_tx = sum(parse_fmt(r["tx"]) for r in rows)
-    total_hits = sum(int(r["hit"].replace(",", "")) for r in rows)
-    total_misses = sum(int(r["miss"].replace(",", "")) for r in rows)
-    total_errors = sum(int(r["errors"]) for r in rows)
-    any_gpg_fail = any(r.get("gpg") == "FAIL" for r in rows)
-    total_removed = sum(int(r["removed"].replace(",", "")) for r in rows)
+    t = Table(*cols, title=title)
+    for r in rows:
+        t.add(**{k: r.get(k) for k in (
+            "ts", "name", "files", "total", "deduped", "tx",
+            "hits", "misses", "errors", "nr", "gpg", "time", "removed",
+        )})
 
     print("")
     if session_start:
@@ -235,117 +261,5 @@ def print_summary_table(
         print(f"  Elapsed: {fmt_duration(session_elapsed)}")
     if session_start or session_end or session_elapsed:
         print("")
-    if title:
-        label = f"  {title}  "
-        remaining = max(0, len(sep) - len(label))
-        left = remaining // 2
-        print("-" * left + label + "-" * (remaining - left))
-    else:
-        print(sep)
 
-    header = ""
-    for key, heading, align in cols:
-        w = cw[key]
-        header += _pad(heading, w) if align == "left" else heading.rjust(w)
-        header += "  "
-    print(header.rstrip("  "))
-    print(sep)
-
-    for r in rows:
-        line = ""
-        for key, _, align in cols:
-            val = r.get(key, "")
-            w = cw[key]
-            line += (_pad(val, w) if align == "left" else val.rjust(w)) + "  "
-        print(line.rstrip("  "))
-
-    print(sep)
-    if show_total:
-        total_vals = {
-            "dt": "",
-            "name": "Total",
-            "files": fmt_int(total_files),
-            "total": fmt_bytes(total_bytes),
-            "deduped": fmt_bytes(total_deduped),
-            "tx": fmt_bytes(total_tx),
-            "hit": fmt_int(total_hits),
-            "miss": fmt_int(total_misses),
-            "errors": str(total_errors),
-            "gpg": "FAIL" if any_gpg_fail else "pass",
-            "time": fmt_duration(session_elapsed) if session_elapsed else "",
-            "removed": fmt_int(total_removed),
-        }
-        total_line = ""
-        for key, _, align in cols:
-            val = total_vals.get(key, "")
-            w = cw[key]
-            total_line += (_pad(val, w) if align == "left" else val.rjust(w)) + "  "
-        print(total_line.rstrip("  "))
-    print("")
-
-
-def fmt_bytes(b: int) -> str:
-    ## @brief Format a byte count as a human-readable string.
-    ## @param b  Byte count.
-    ## @return e.g. ``"450MB"``, ``"1.2GB"``.
-    if b >= 1073741824:
-        return f"{b / 1073741824:.1f}GB"
-    if b >= 1048576:
-        return f"{b / 1048576:.0f}MB"
-    if b >= 1024:
-        return f"{b / 1024:.0f}KB"
-    return f"{b}B"
-
-
-def fmt_int(n: int) -> str:
-    ## @brief Format an integer with thousands separators.
-    ## @param n  Integer to format.
-    ## @return e.g. ``"1,234"``.
-    return f"{n:,}" if n >= 1000 else str(n)
-
-
-def parse_fmt(s: str) -> int:
-    ## @brief Parse a human-readable byte string back to an integer.
-    ## @param s  e.g. ``"450MB"``, ``"1.2GB"``.
-    ## @return Byte count.
-    s = s.strip()
-    if s.endswith("GB"):
-        return int(float(s[:-2]) * 1073741824)
-    if s.endswith("MB"):
-        return int(float(s[:-2]) * 1048576)
-    if s.endswith("KB"):
-        return int(float(s[:-2]) * 1024)
-    if s.endswith("B") and not any(c in s for c in "GMK"):
-        return int(s[:-1])
-    return 0
-
-
-def format_row(s: Dict, name: str) -> Dict[str, str]:
-    ## @brief Convert a raw stats dict into a display row for a summary table.
-    ##
-    ## @param s     Stats dict (from ``Repo.stats()`` or an NDJSON record).
-    ## @param name  Repo name.
-    ## @return Dict with string values for each column.
-    from datetime import datetime
-    from .lib import fmt_duration
-
-    ts = s.get("ts")
-    try:
-        dt_str = datetime.fromtimestamp(ts).strftime("%x %X") if ts else ""
-    except (OSError, OverflowError, ValueError):
-        dt_str = ""
-
-    return {
-        "dt": dt_str,
-        "name": name,
-        "files": fmt_int(s.get("file_count", 0)),
-        "total": fmt_bytes(s.get("total_bytes", 0)),
-        "deduped": fmt_bytes(s.get("deduped_bytes", 0)),
-        "tx": fmt_bytes(s.get("bytes_transferred", 0)),
-        "hit": fmt_int(s.get("pool_hits", 0)),
-        "miss": fmt_int(s.get("pool_misses", 0)),
-        "errors": str(s.get("errors", 0)),
-        "gpg": "FAIL" if s.get("gpg_failures", 0) else "pass",
-        "time": fmt_duration(s.get("elapsed", 0)),
-        "removed": fmt_int(s.get("removed", 0)),
-    }
+    t.emit(sinks=[TerminalSink(sys.stdout)])

@@ -126,6 +126,24 @@ class CurlException(ExceptionMsg):
         return cls._REASONS.get(code, f"curl exit {code}")
 
 
+class HostNotRespondingError(ExceptionMsg):
+    ## @brief Raised when a transfer stalls or the connection times out.
+    ##
+    ## Triggered by curl exit code 28 (CURLE_OPERATION_TIMEDOUT), which
+    ## covers both ``--connect-timeout`` expiry and ``--speed-time``
+    ## stall detection (transfer rate below ``--speed-limit`` for too long).
+    ##
+    ## The sync coordinator counts consecutive occurrences and aborts the
+    ## repo when the threshold is reached, avoiding all workers being tied
+    ## up waiting on a dead upstream.
+
+    def __init__(self) -> None:
+        super().__init__(0, "Host not responding")
+
+    def _format_message(self, code: int) -> str:
+        return "Host not responding"
+
+
 # -- public API ---------------------------------------------------------------
 
 
@@ -300,6 +318,7 @@ def HTTPDownload(
     config = Config.load()
     retries = config.max_retries
     _ct = str(config.connect_timeout)
+    _st = str(config.stall_timeout)
 
     # -- inner helpers -------------------------------------------------------
 
@@ -308,8 +327,13 @@ def HTTPDownload(
         # partial downloads; -w %{http_code} emits the HTTP status
         # on stdout so we can detect 4xx/5xx without -f (which is
         # broken on macOS curl 8.7.1 - exits 56 instead of 22).
-        return ["curl", "-s", "-L", "--connect-timeout", _ct, "-C", "-",
-                "-w", "%{http_code}", "-o", output_str, uri]
+        # --speed-limit 1 --speed-time _st aborts a stalled transfer
+        # (less than 1 byte/sec for _st seconds) so workers are not
+        # tied up indefinitely when the upstream stops responding.
+        return ["curl", "-s", "-L",
+                "--connect-timeout", _ct,
+                "--speed-limit", "1", "--speed-time", _st,
+                "-C", "-", "-w", "%{http_code}", "-o", output_str, uri]
 
     def _compute_hash() -> str:
         # Tool resolved by deps.check_dependencies() at startup.
@@ -395,8 +419,12 @@ def HTTPDownload(
 
         # Fatal curl failure.  Prefer the HTTP status message
         # (when available) over the raw stderr from curl.
+        # Exit 28 (timeout or stall) gets its own exception type so
+        # the sync coordinator can count consecutive upstream failures.
         if http_info:
             raise HTTPException(_http_code)
+        if rc == CurlException.TIMEOUT:
+            raise HostNotRespondingError()
         raise CurlException(rc)
 
     # All attempts exhausted without a successful return.
