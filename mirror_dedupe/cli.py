@@ -76,44 +76,27 @@ def _snapshot_name_completer(prefix, parsed_args, **_):
         return []
 
 
-def _snapshot_ts_completer(prefix, parsed_args, **_):
-    ## @brief Complete snapshot timestamps for the repo named in parsed_args.name.
-    ##
-    ## argcomplete's partial parse of nested subcommands often does not populate
-    ## positional arguments before the current word.  When parsed_args.name is
-    ## absent, fall back to extracting the repo name from COMP_LINE directly.
+def _snapshot_id_completer(prefix, parsed_args, **_):
+    ## @brief Complete NAME/TIMESTAMP snapshot identifiers across all repos.
     try:
-        name = getattr(parsed_args, 'name', None)
-        if not name:
-            try:
-                import shlex
-                words = shlex.split(os.environ.get('COMP_LINE', ''))
-            except ValueError:
-                words = os.environ.get('COMP_LINE', '').split()
-            found_verb = False
-            positionals: list[str] = []
-            for w in words[1:]:
-                if w in ('delete', 'restore'):
-                    found_verb = True
-                    continue
-                if found_verb and not w.startswith('-'):
-                    positionals.append(w)
-            # positionals[0] is name; if it equals prefix we are still completing
-            # the name argument, not the timestamp — return nothing.
-            if positionals and positionals[0] != prefix:
-                name = positionals[0]
-        if not name:
-            return []
         config_dir = (
             getattr(parsed_args, 'config_dir', None)
             or os.environ.get('MIRROR_DEDUPE_CONFIG_DIR')
         )
         cfg = Config.load(config_dir)
-        snap_dir = Path(cfg.repo_root) / 'Snapshots' / name
-        if not snap_dir.is_dir():
+        snap_base = Path(cfg.repo_root) / 'Snapshots'
+        if not snap_base.is_dir():
             return []
-        return [d.name for d in sorted(snap_dir.iterdir(), reverse=True)
-                if d.is_dir() and d.name.startswith(prefix)]
+        results = []
+        for repo_dir in sorted(snap_base.iterdir()):
+            if not repo_dir.is_dir():
+                continue
+            for ts_dir in sorted(repo_dir.iterdir(), reverse=True):
+                if ts_dir.is_dir() and ts_dir.name[:8].isdigit():
+                    candidate = f"{repo_dir.name}/{ts_dir.name}"
+                    if candidate.startswith(prefix):
+                        results.append(candidate)
+        return results
     except Exception:
         return []
 
@@ -353,22 +336,18 @@ def main():
                     ).completer = _snapshot_name_completer
 
     ps = snap_sub.add_parser('restore', help='Restore a snapshot to the repo dest')
-    ps.add_argument('name', metavar='NAME',
-                    help='Repo name').completer = _snapshot_name_completer
-    ps.add_argument('snapshot', metavar='SNAPSHOT', nargs='?', default='',
-                    help='Snapshot timestamp (default: latest)'
-                    ).completer = _snapshot_ts_completer
+    ps.add_argument('snapshot_id', metavar='NAME[/TIMESTAMP]',
+                    help='Repo name with optional snapshot timestamp (default: latest)'
+                    ).completer = _snapshot_id_completer
     ps.add_argument('--force', action='store_true',
                     help='Bypass PIN confirmation')
     ps.add_argument('--no-backup', action='store_true', dest='no_backup',
                     help='Skip current-state backup before restore')
 
     ps = snap_sub.add_parser('delete', help='Delete a snapshot directory')
-    ps.add_argument('name', metavar='NAME',
-                    help='Repo name').completer = _snapshot_name_completer
-    ps.add_argument('snapshot', metavar='SNAPSHOT', nargs='?', default='',
-                    help='Snapshot timestamp (omit to delete entire snapshot group)'
-                    ).completer = _snapshot_ts_completer
+    ps.add_argument('snapshot_id', metavar='NAME[/TIMESTAMP]',
+                    help='Repo name with optional snapshot timestamp (omit to delete all for repo)'
+                    ).completer = _snapshot_id_completer
     ps.add_argument('--force', action='store_true',
                     help='Bypass PIN confirmation')
 
@@ -996,8 +975,7 @@ def main():
 
         # ---- snapshot restore ----
         if args.snap_action == 'restore':
-            snap_name = args.name
-            snap_ts = args.snapshot  # '' if not provided
+            snap_name, _, snap_ts = args.snapshot_id.partition('/')
 
             all_repos = sorted(
                 d.name for d in Path(cfg_main.repo_root).glob("Snapshots/*")
@@ -1084,8 +1062,7 @@ def main():
 
         # ---- snapshot delete ----
         if args.snap_action == 'delete':
-            snap_name = args.name
-            snap_ts = args.snapshot  # '' if not provided
+            snap_name, _, snap_ts = args.snapshot_id.partition('/')
 
             all_snap_repos = sorted(
                 d.name for d in snap_base.iterdir()

@@ -52,7 +52,6 @@ class SyncStats:
         self.elapsed: float = 0.0
         self.removed: int = 0
         self._lock = threading.Lock()
-        self._seen_hashes: set[str] = set()
         self._consecutive_no_response: int = 0
 
     def record(
@@ -62,20 +61,18 @@ class SyncStats:
         miss: int = 0,
         bytes_tx: int = 0,
         size: int = 0,
-        hash_val: str = "",
     ) -> None:
         ## @brief Record one sync outcome under lock.
         ##
         ## Called from ``Node.sync()`` - possibly from a worker thread -
-        ## so all mutations are protected.  ``hash_val`` is used to count
-        ## unique content for deduplication accounting: a hash seen for the
-        ## first time contributes its ``size`` to ``deduped_bytes``.
+        ## so all mutations are protected.  ``deduped_bytes`` accumulates
+        ## the size of every file served from the pool (hit=1) rather than
+        ## downloaded, giving the true bytes saved by deduplication.
         ##
         ## @param hit       1 if served from pool inventory, else 0.
         ## @param miss      1 if downloaded from upstream, else 0.
         ## @param bytes_tx  Bytes transferred (0 for pool hits).
         ## @param size      File size in bytes.
-        ## @param hash_val  SHA-256 hex digest for deduplication accounting.
         ## @return None
         with self._lock:
             self.pool_hits += hit
@@ -83,8 +80,7 @@ class SyncStats:
             self.bytes_transferred += bytes_tx
             self.file_count += 1
             self.total_bytes += size
-            if hash_val and hash_val not in self._seen_hashes:
-                self._seen_hashes.add(hash_val)
+            if hit:
                 self.deduped_bytes += size
 
     def add_error(self) -> None:
