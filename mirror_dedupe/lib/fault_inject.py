@@ -29,7 +29,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 _SENTINEL = "/tmp/die"
 

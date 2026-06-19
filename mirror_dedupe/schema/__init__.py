@@ -6,7 +6,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 from .mdnode import MDNode as Node
 from .repo import Repo, Repos

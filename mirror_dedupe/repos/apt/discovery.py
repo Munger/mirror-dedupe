@@ -10,7 +10,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 from collections import OrderedDict
 from threading import Lock
