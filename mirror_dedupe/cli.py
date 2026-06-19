@@ -60,6 +60,42 @@ def _repo_completer(*, enabled_only: bool = False, available_only: bool = False)
     return _completer
 
 
+def _snapshot_name_completer(prefix, parsed_args, **_):
+    ## @brief Complete repo names that have at least one snapshot.
+    try:
+        config_dir = (
+            getattr(parsed_args, 'config_dir', None)
+            or os.environ.get('MIRROR_DEDUPE_CONFIG_DIR')
+        )
+        cfg = Config.load(config_dir)
+        snap_base = Path(cfg.repo_root) / 'Snapshots'
+        if not snap_base.is_dir():
+            return []
+        return [d.name for d in sorted(snap_base.iterdir()) if d.is_dir() and d.name.startswith(prefix)]
+    except Exception:
+        return []
+
+
+def _snapshot_ts_completer(prefix, parsed_args, **_):
+    ## @brief Complete snapshot timestamps for the repo named in parsed_args.name.
+    try:
+        name = getattr(parsed_args, 'name', None)
+        if not name:
+            return []
+        config_dir = (
+            getattr(parsed_args, 'config_dir', None)
+            or os.environ.get('MIRROR_DEDUPE_CONFIG_DIR')
+        )
+        cfg = Config.load(config_dir)
+        snap_dir = Path(cfg.repo_root) / 'Snapshots' / name
+        if not snap_dir.is_dir():
+            return []
+        return [d.name for d in sorted(snap_dir.iterdir(), reverse=True)
+                if d.is_dir() and d.name.startswith(prefix)]
+    except Exception:
+        return []
+
+
 def _resolve_dest(name: str, cfg: Config) -> Optional[str]:
     ## @brief Resolve a repo *name* to its absolute ``dest`` path.
     dest = cfg.resolve_dest(name)
@@ -292,13 +328,14 @@ def main():
     ps = snap_sub.add_parser('list', help='List available snapshots for a repo or ALL')
     ps.add_argument('name', metavar='NAME', nargs='?', default='ALL',
                     help='Repo name (default: ALL repos)'
-                    ).completer = _repo_completer(enabled_only=True)
+                    ).completer = _snapshot_name_completer
 
     ps = snap_sub.add_parser('restore', help='Restore a snapshot to the repo dest')
     ps.add_argument('name', metavar='NAME',
-                    help='Repo/snapshot name').completer = _repo_completer(enabled_only=True)
+                    help='Repo name').completer = _snapshot_name_completer
     ps.add_argument('snapshot', metavar='SNAPSHOT', nargs='?', default='',
-                    help='Snapshot timestamp (default: latest)')
+                    help='Snapshot timestamp (default: latest)'
+                    ).completer = _snapshot_ts_completer
     ps.add_argument('--force', action='store_true',
                     help='Bypass PIN confirmation')
     ps.add_argument('--no-backup', action='store_true', dest='no_backup',
@@ -306,9 +343,10 @@ def main():
 
     ps = snap_sub.add_parser('delete', help='Delete a snapshot directory')
     ps.add_argument('name', metavar='NAME',
-                    help='Repo/snapshot name').completer = _repo_completer(enabled_only=True)
+                    help='Repo name').completer = _snapshot_name_completer
     ps.add_argument('snapshot', metavar='SNAPSHOT', nargs='?', default='',
-                    help='Snapshot timestamp (omit to delete entire snapshot group)')
+                    help='Snapshot timestamp (omit to delete entire snapshot group)'
+                    ).completer = _snapshot_ts_completer
     ps.add_argument('--force', action='store_true',
                     help='Bypass PIN confirmation')
 
