@@ -27,7 +27,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 
 def filesize(value: int) -> str:

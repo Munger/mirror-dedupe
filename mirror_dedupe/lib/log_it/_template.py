@@ -6,7 +6,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 from ._ansi import fg_code, bg_code, build_code, wrap
 from ._col import Col, Coloured

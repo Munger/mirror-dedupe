@@ -10,7 +10,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 from mirror_dedupe.schema import Repo
 from mirror_dedupe.repos.apt.apt import Apt  # noqa: F401  # register Apt

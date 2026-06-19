@@ -15,7 +15,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 from datetime import datetime as _datetime, timezone as _timezone
 

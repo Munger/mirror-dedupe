@@ -10,7 +10,6 @@
 ##     ./run.sh                                   # run all
 ##     python3 tests/unit-tests/node-x/__main__.py  # direct
 
-from __future__ import annotations
 
 import sys
 from pathlib import Path

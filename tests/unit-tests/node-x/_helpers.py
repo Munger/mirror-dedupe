@@ -5,7 +5,6 @@
 ## caller-supplied ``passed`` / ``failed`` lists rather than using
 ## ``unittest`` or ``pytest``.  No external dependencies.
 
-from __future__ import annotations
 
 import sys
 from typing import Any, Callable, Optional, Tuple, Type

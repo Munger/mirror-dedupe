@@ -11,7 +11,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 from pathlib import Path
 from subprocess import run, CalledProcessError

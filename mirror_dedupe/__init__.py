@@ -6,6 +6,5 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 __version__ = '1.0.0'

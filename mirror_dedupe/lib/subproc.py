@@ -16,7 +16,6 @@
 ## @see https://github.com/munger
 ## @par Licence: MIT
 
-from __future__ import annotations
 
 import subprocess
 import threading
