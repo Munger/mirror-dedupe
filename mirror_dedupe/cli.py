@@ -889,6 +889,7 @@ def main():
                 ts = _timestamp()
                 target = snap_dir / ts
                 if os.path.isdir(dest_path):
+                    snap_base.mkdir(parents=True, exist_ok=True)
                     src_dev = os.stat(dest_path).st_dev
                     snap_dev = os.stat(str(snap_base)).st_dev
                     if src_dev != snap_dev:
