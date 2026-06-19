@@ -13,9 +13,20 @@
 
 from __future__ import annotations
 
+from .log_it import Col, RowTemplate
+
 ## @brief Column width for sync status labels (Downloaded, Unchanged, etc.).
 ## Paths start at a fixed offset regardless of label length.
 LOG_LABEL_W = 12
+LOG_SIZE_W  = 7
+
+## @brief Shared row template for all sync outcome lines.
+## Callers: _log_outcome() in mdnode.py, _sweep_stale() and _sync_content() in repo.py, verify_release() in gpg.py.
+LOG = RowTemplate(
+    Col("status", width=LOG_LABEL_W),
+    Col("size",   width=LOG_SIZE_W, align="right"),
+    Col("path"),
+)
 
 
 def fmt_duration(seconds: float) -> str:

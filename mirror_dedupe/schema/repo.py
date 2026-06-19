@@ -45,9 +45,11 @@ from ..schema.vars import Vars
 from ..schema.upstream import Upstream, Upstreams
 from ..lib.log import log
 from ..lib.subproc import kill_active_subprocesses_signal_safe
+from ..lib.http_download import HostNotRespondingError
 from .. import stats
 from ..inventory import Inventory
 from ..repo_vars import RepoVars, SyncStats
+
 
 
 class Repo(Node):
@@ -336,6 +338,7 @@ class Repo(Node):
         *,
         config: Optional[Dict[str, Any]] = None,
         pool: Optional[concurrent.futures.ThreadPoolExecutor] = None,
+        workers: int = 1,
     ) -> None:
     ## @brief Build the schema tree from config and download content.
     ##
@@ -369,7 +372,7 @@ class Repo(Node):
             if pool is not None:
                 self._repo_vars.stats = SyncStats()
                 t0 = time.monotonic()
-                self._sync_content(pool, config=config)
+                self._sync_content(pool, config=config, max_workers=workers)
                 self._repo_vars.stats.elapsed = time.monotonic() - t0
                 self._repo_vars.stats.removed = self._sweep_stale()
         finally:
@@ -379,6 +382,7 @@ class Repo(Node):
         self,
         pool: concurrent.futures.ThreadPoolExecutor,
         config: Optional[Dict[str, Any]] = None,
+        max_workers: int = 1,
     ) -> None:
         ## @brief Dynamic work queue: fast-path links, worker-driven downloads.
         ##
@@ -404,7 +408,7 @@ class Repo(Node):
         ##                  ``Node.sync()`` call.
         ## @return None
 
-        from ..lib.exceptions import RepoAbortError
+        from ..lib.exceptions import RepoAbortError, StagingLockTimeout
 
         futures: Dict[concurrent.futures.Future, Node] = {}
         # Thread-safety: _tree_iter() is unprotected, but the static tree
@@ -419,8 +423,12 @@ class Repo(Node):
         def _aborted() -> bool:
             return _ABORT_SYNC or rv.abort_event.is_set()
 
+        _paused = False      # True when a stall stops new submissions
+        _stall_cycles = 0    # consecutive full-drain-as-stall rounds
+        _misses_at_cycle = rv.stats.pool_misses if rv.stats else 0
+
         while (stack or futures) and not _aborted():
-            while stack and not _aborted():
+            while stack and not _aborted() and not _paused:
                 node = stack.pop()
                 if not (node.get("uri") and node.get("path")):
                     continue
@@ -435,13 +443,23 @@ class Repo(Node):
                         node.sync(config=config)
                         for child in node.stream():
                             stack.append(child)
+                        # Pool hits don't use the network - don't reset _stall_cycles
                     except RepoAbortError:
                         raise
+                    except HostNotRespondingError as e:
+                        if rv.stats is not None:
+                            rv.stats.add_no_response()
+                        _paused = True
+                        log(f"  {e}")
                     except Exception as e:
                         if rv.stats is not None:
                             rv.stats.add_error()
                         log(f"  {e}")
                     continue
+
+                if len(futures) >= max_workers:
+                    stack.append(node)
+                    break
 
                 future = pool.submit(node.sync, config=config)
                 futures[future] = node
@@ -458,12 +476,35 @@ class Repo(Node):
                     future.result()
                     for child in node.stream():
                         stack.append(child)
+                    _paused = False
                 except RepoAbortError:
                     raise
+                except HostNotRespondingError as e:
+                    if rv.stats is not None:
+                        rv.stats.add_no_response()
+                    _paused = True
+                    stack.append(node)  # requeue; retry after pause or abort after 2 cycles
+                    log(f"  {e}")
+                except StagingLockTimeout:
+                    from ..lib import LOG
+                    LOG("File Locked.", path=f"Retrying  {os.path.basename(node.get('path', '?'))}")
+                    stack.append(node)
                 except Exception as e:
                     if rv.stats is not None:
                         rv.stats.add_error()
                     log(f"  {e}")
+
+            if _paused and not futures:
+                current_misses = rv.stats.pool_misses if rv.stats else 0
+                if current_misses > _misses_at_cycle:
+                    _stall_cycles = 0
+                    _misses_at_cycle = current_misses
+                else:
+                    _stall_cycles += 1
+                if _stall_cycles >= 2:
+                    rv.abort_event.set()
+                    raise RepoAbortError("upstream not responding")
+                _paused = False  # allow one retry round
 
     def _sweep_stale(self) -> int:
         ## @brief Delete pre-sync paths that were never declared as wanted.
@@ -486,8 +527,7 @@ class Repo(Node):
         ##
         ## @return Number of stale files removed.
 
-        from ..lib import fmt_size, LOG_LABEL_W
-        from ..lib.log import log
+        from ..lib import fmt_size, LOG
 
         rv = self._repo_vars
         if rv.inv is None or not rv.inv.stale_paths:
@@ -503,7 +543,7 @@ class Repo(Node):
                 sz = f.stat().st_size
                 f.unlink()
                 removed += 1
-                log(f"  {'Removing':<{LOG_LABEL_W}} {fmt_size(sz):>7}  {rel}", level="INFO")
+                LOG("Removing", fmt_size(sz), rel)
             except OSError:
                 continue
 
@@ -735,42 +775,69 @@ class RepoLock:
 
 
 def _pool_sweep(pool_root: str) -> None:
-    ## @brief Remove pool files with no hardlinks (``st_nlink == 1``).
+    ## @brief Remove orphaned pool files and all staging files.
     ##
-    ## Purges orphaned content from the pool that isn't referenced by any
-    ## repo destination.  Designed to be called once after all repos have
-    ## completed their sync, so that in-progress downloads don't trigger
-    ## false sweeps.  Empty subdirectories within ``by-hash/SHA256/`` are
-    ## also removed.
+    ## Two-phase sweep of the entire pool directory:
+    ##
+    ## 1. ``by-hash/SHA256/`` — removes any file with ``st_nlink == 1``
+    ##    (content not referenced by any repo hardlink) and prunes empty
+    ##    subdirectories.
+    ## 2. ``staging/`` — removes all files regardless of link count.
+    ##    Staging files are either partial transfers (will be resumed via
+    ##    curl -C - on the next sync) or complete transfers that were never
+    ##    promoted (will be re-downloaded or recovered on the next sync).
+    ##    Sweeping them is always safe because no sync is running when the
+    ##    sweep executes (``pool_sweep_safe`` holds the sync locks check).
     ##
     ## @param pool_root  Root path of the content-addressed pool.
     ## @return None
-    by_hash = Path(pool_root) / "by-hash" / "SHA256"
-    if not by_hash.exists():
+    pool = Path(pool_root)
+    by_hash = pool / "by-hash" / "SHA256"
+    staging = pool / "staging"
+
+    if not by_hash.exists() and not staging.exists():
         return
 
     log("Sweeping the pool and removing floaters...", level="INFO")
-    removed = 0
-    try:
-        result = subprocess.run(
-            f"find {shlex.quote(str(by_hash))} -type f -links 1 -delete -print | wc -l",
-            shell=True, capture_output=True, text=True,
-        )
-        out = result.stdout.strip()
-        if out:
-            removed = int(out)
-    except OSError as e:
-        log(f"Pool sweep error: {e}", level="ERROR")
-        return
 
-    subprocess.run(
-        ["find", str(by_hash), "-depth", "-type", "d", "-delete"],
-        stderr=subprocess.DEVNULL,
-    )
+    removed = 0
+    if by_hash.exists():
+        try:
+            result = subprocess.run(
+                f"find {shlex.quote(str(by_hash))} -type f -links 1 -delete -print | wc -l",
+                shell=True, capture_output=True, text=True,
+            )
+            out = result.stdout.strip()
+            if out:
+                removed = int(out)
+        except OSError as e:
+            log(f"Pool sweep error: {e}", level="ERROR")
+            return
+
+        subprocess.run(
+            ["find", str(by_hash), "-depth", "-type", "d", "-delete"],
+            stderr=subprocess.DEVNULL,
+        )
+
+    staging_removed = 0
+    if staging.exists():
+        for f in staging.iterdir():
+            if f.is_file():
+                try:
+                    f.unlink()
+                    staging_removed += 1
+                except OSError:
+                    pass
+        try:
+            staging.rmdir()
+        except OSError:
+            pass
 
     if removed:
-        log(f"Pool sweep: removed {removed} orphaned files (st_nlink == 1)", level="INFO")
-    else:
+        log(f"Pool sweep: removed {removed} orphaned pool files (st_nlink == 1)", level="INFO")
+    if staging_removed:
+        log(f"Pool sweep: removed {staging_removed} staging files", level="INFO")
+    if not removed and not staging_removed:
         log("Pool sweep: nothing to remove", level="INFO")
     log("Done", level="INFO")
 
@@ -1180,7 +1247,7 @@ class Repos(NodeList[Repo]):
                     max_workers=workers,
                     initializer=self._make_worker_init(name),
                 ) as pool:
-                    repo.sync(pool=pool, config=config)
+                    repo.sync(pool=pool, config=config, workers=workers)
         except TimeoutError:
             log(f"[{name}] Skipping - sync already running", level="WARN")
         except RepoAbortError as e:
@@ -1195,7 +1262,7 @@ class Repos(NodeList[Repo]):
         from ..lib.datetimeutils import fmt_datetime
         from ..stats import format_row, print_summary_table
 
-        rows: List[Dict[str, str]] = []
+        rows: List[Dict] = []
         for repo in self:
             s = repo.stats()
             rows.append(format_row(s, repo.get("name", "?")))

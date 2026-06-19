@@ -166,9 +166,8 @@ skip_missing=0
 ## --- Build find-starting-points --------------------------------------------
 find_roots=()
 for name in "${include_names[@]}"; do
-  root="$repos/$name"
-  if [[ -d "$root" ]]; then
-    find_roots+=("$root")
+  if [[ -d "$repos/$name" ]]; then
+    find_roots+=("$name")
   else
     log "WARN" "Skipping --include '$name': not found under $repos"
   fi
@@ -201,6 +200,15 @@ work_fifo=$(mktemp)
 rm -f "$work_fifo"
 mkfifo "$work_fifo"
 
+## Temp file used to pass hash_done back from the worker subshell to the parent.
+## Subshell variable changes are invisible to the parent process; writing to a
+## file and reading after wait() is the standard POSIX workaround.
+hash_done_file=$(mktemp)
+
+## cd to repos root so all paths emitted by find are relative.
+## The worker inherits this CWD; pool paths (dest) remain absolute.
+cd "$repos"
+
 ## --- Background worker subshell -------------------------------------------
 ## The worker runs as a background subshell (&).  It owns the read end of
 ## the FIFO and processes records in batches to amortise sha256sum startup.
@@ -223,20 +231,27 @@ mkfifo "$work_fifo"
     if ! IFS= read -r -d '' record <&$w_fd; then
       break
     fi
-    ## Records are inode|path\0; strip the inode prefix to get the path.
-    repo_file=${record#*|}
-    batch_repo_files+=("$repo_file")
+    batch_repo_files+=("$record")
 
     ## Non-blocking drain: fill the batch with any records immediately
     ## available, without waiting.  -t 0.01 (10 ms timeout) prevents
     ## blocking on a slow feed while still building larger batches when
     ## records arrive in bursts, reducing sha256sum invocations.
+    ##
+    ## If read times out mid-record (partial path in $record), complete
+    ## it with a blocking read before breaking — prevents a truncated path
+    ## being prepended to the next batch's first record.
     while (( ${#batch_repo_files[@]} < batch_size )); do
+      record=""
       if ! IFS= read -r -t 0.01 -d '' record <&$w_fd; then
+        if [[ -n "$record" ]]; then
+          local_rest=""
+          IFS= read -r -d '' local_rest <&$w_fd && record+="$local_rest" || true
+          batch_repo_files+=("$record")
+        fi
         break
       fi
-      repo_file=${record#*|}
-      batch_repo_files+=("$repo_file")
+      batch_repo_files+=("$record")
     done
 
     ## Write the batch as a null-delimited list for xargs -0.
@@ -270,6 +285,7 @@ mkfifo "$work_fifo"
     rm -f "$tmp_out" "$tmp_list" "$tmp_err"
     trap - RETURN
   done
+  echo "$hash_done" >"$hash_done_file"
 ) &
 worker_pid=$!
 
@@ -330,11 +346,9 @@ while IFS= read -r -d '' inode && IFS= read -r -d '' repo_file; do
     break
   fi
 
-  ## Send inode|path\0 to the worker.  The inode prefix is used by the
-  ## worker to strip path for logging but is otherwise ignored — the
-  ## batched sha256sum output is matched by position (idx), not by name.
-  ## A failed write means the FIFO is broken (worker gone); break cleanly.
-  if ! printf '%s|%s\0' "$inode" "$repo_file" >&$wf_fd 2>/dev/null; then
+  ## Send path\0 to the worker.  A failed write means the FIFO is broken
+  ## (worker gone); break cleanly.
+  if ! printf '%s\0' "$repo_file" >&$wf_fd 2>/dev/null; then
     break
   fi
 done < <($FIND_TOOL "${find_roots[@]}" -xdev -type f -printf '%i\0%p\0' 2>/dev/null || true)
@@ -349,7 +363,8 @@ exec {wf_ka}>&-
 
 ## Block until the worker finishes processing remaining batched records.
 wait "$worker_pid"
-rm -f "$work_fifo"
+hash_done=$(<"$hash_done_file")
+rm -f "$work_fifo" "$hash_done_file"
 
 ## --- PHASE 3: Prune orphans ------------------------------------------------
 ## Pool files with st_nlink == 1 have no remaining hardlinks in any repo or

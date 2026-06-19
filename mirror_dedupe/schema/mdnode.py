@@ -17,8 +17,9 @@
 ##   * ``stream()`` - lazy child discovery (virtual, overrides
 ##     ``StreamMixin`` with a ``data`` parameter)
 ##
-## Module-level helpers ``_pool_path()`` and ``_sync_link()`` manage the
-## content-addressed pool layout and hardlink installation.
+## Module-level helpers ``_pool_path()``, ``_sync_link()``,
+## ``_compute_hash()``, and ``_file_to_dest()`` manage the
+## content-addressed pool layout, hash verification, and file install.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -34,7 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..lib.exceptions import ExceptionMsg
-from ..lib import fmt_size, LOG_LABEL_W
+from ..lib import fmt_size, LOG_LABEL_W, LOG
 from ..lib.http_download import HTTPFetch, HTTPDownload, HTTPGet
 from ..lib.subproc import kill_active_subprocesses
 from ..lib.log import log
@@ -81,6 +82,74 @@ def _pool_path(pool_root: str, hash_val: str) -> Path:
         / hash_val[2:4]
         / hash_val
     )
+
+
+def _compute_hash(path: Path) -> str:
+    ## @brief Compute the SHA-256 hex digest of a file.
+    ##
+    ## Reads in 1 MiB chunks to bound peak memory on large files.
+    ##
+    ## @param path  File to hash.
+    ## @return 64-character hex digest string.
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _file_to_dest(
+    src: Path,
+    dest: Path,
+    *,
+    hash_val: Optional[str] = None,
+    move: bool = True,
+) -> None:
+    ## @brief Unified file-install primitive for the content-addressed pool.
+    ##
+    ## All operations that create a pool entry or back-link a file into the
+    ## pool go through this function to guarantee:
+    ##
+    ##   1. When *hash_val* is provided, the source is hashed **before** any
+    ##      filesystem change.  A mismatch raises ``ExceptionMsg`` immediately
+    ##      so no corrupt data ever reaches the pool.
+    ##   2. The destination parent directory is created if absent.
+    ##   3. The file operation is atomic: ``os.replace`` (move) or
+    ##      ``os.link`` (hardlink), never a copy.
+    ##
+    ## Usage patterns::
+    ##
+    ##   # staging → pool  (after download, hash already verified by HTTPDownload)
+    ##   _file_to_dest(staging_path, pool_path, move=True)
+    ##
+    ##   # pool → repo  (hardlink install, no re-hash needed)
+    ##   _file_to_dest(pool_path, repo_dest, move=False)
+    ##
+    ##   # repo → pool  (back-link recovery, must re-verify)
+    ##   _file_to_dest(repo_dest, pool_path, hash_val=hv, move=False)
+    ##
+    ## @param src       Source file path.
+    ## @param dest      Destination path (must not already exist for ``os.link``).
+    ## @param hash_val  Expected SHA-256 hex digest.  When supplied the source
+    ##                  is hashed before any write; mismatch raises ExceptionMsg.
+    ## @param move      ``True`` (default) → ``os.replace(src, dest)``;
+    ##                  ``False`` → ``os.link(src, dest)``.
+    ## @raise ExceptionMsg  When *hash_val* is given and does not match.
+
+    if hash_val is not None:
+        actual = _compute_hash(src)
+        if actual != hash_val:
+            raise ExceptionMsg(
+                0,
+                f"Hash mismatch for {src.name}: "
+                f"expected {hash_val}, got {actual}",
+            )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if move:
+        os.replace(str(src), str(dest))
+    else:
+        os.link(str(src), str(dest))
 
 
 def _sync_link(pool_path: Path, dest: Path, rv: RepoVars, hash_val: str) -> int:
@@ -502,18 +571,29 @@ class MDNode(Node, StreamMixin, Serialisable):
         ##   and the destination exists, skip all I/O.  If the pool has
         ##   it but the repo does not, hardlink from the pool directly.
         ##
-        ##   **Phase 2 (staging lock + stat fallback):** acquire a
-        ##   per-hash lock so concurrent threads downloading the same
-        ##   content race only once.  Recheck inventories after the lock
-        ##   (double-checked locking).  Fall back to stat() on disk if
-        ##   the inventories missed but the files exist.
+        ##   **Phase 2 (staging lock + fallbacks):** acquire a per-hash
+        ##   lock so concurrent threads race only once.  Inside the lock,
+        ##   recheck inventories (double-checked locking), fall back to
+        ##   stat() if the pool file exists on disk but was not indexed,
+        ##   and finally attempt back-link recovery if the repo file
+        ##   exists on disk and its hash is correct (pool was damaged but
+        ##   repo is intact — no network required).
         ##
-        ##   **Phase 3 (genuine download):** download to a staging file
-        ##   (hash-named in the pool's ``staging/`` directory), verify
-        ##   the SHA-256 hash, atomically ``os.replace`` into the pool,
-        ##   then hardlink into the repo.
+        ##   **Phase 3 (staging promotion or download):** if a complete
+        ##   staging file exists from a prior interrupted sync, promote
+        ##   it directly.  Otherwise download to staging, verify the
+        ##   SHA-256 hash, atomically ``os.replace`` into the pool, and
+        ##   hardlink into the repo.  Partial staging files survive
+        ##   failure so curl resumes them on the next attempt.
         ##
-        ## Logs each outcome with a descriptive label.
+        ## Outcome labels logged on every return path:
+        ##   ``Unchanged``  — inventory hit, no I/O
+        ##   ``Linked``     — pool hit, repo hardlink created
+        ##   ``Linked*``    — pool hit, repo inventory was stale
+        ##   ``Unchanged*`` — pool/repo files confirmed via stat
+        ##   ``Recovered``  — repo file back-linked into damaged pool
+        ##   ``Resumed``    — staging file found (complete or partial via curl -C -)
+        ##   ``Downloaded`` — fresh download, no prior staging file
         ##
         ## @param config  Optional configuration dict (carries suite,
         ##                architecture, component filters).
@@ -541,24 +621,15 @@ class MDNode(Node, StreamMixin, Serialisable):
         dest = Path(rv.repo_root) / path_val
         hash_val = self.checksum
 
-        # _record is a closure rather than a method because it closes
-        # over the local ``rv``, ``hash_val``, and ``self`` references.
-        # This lets Phase 3 update hash_val (when the initial hash was
-        # unknown) and still pass the correct value to the stats
-        # accumulator without threading it through the return path.
+        # --- Inner helpers -----------------------------------------------
+        # Defined here so they close over rv, dest, path_val, self, and
+        # hash_val without passing them as arguments on every call.
+
         def _record(
             *, hit: int = 0, miss: int = 0, bytes_tx: int = 0
         ) -> None:
-            ## @brief Record one sync outcome to the repo-level
-            ##        SyncStats.
-            ##
-            ## Closes over ``rv``, ``self``, and ``hash_val`` (read at
-            ## call time, so phase-3 updates to hash_val are reflected).
-            ##
-            ## @param hit      1 if served from pool, else 0.
-            ## @param miss     1 if downloaded, else 0.
-            ## @param bytes_tx Bytes transferred.
-            ## @return None
+            ## @brief Record one sync outcome to the repo-level SyncStats.
+            ## Reads hash_val at call time so Phase-3 updates are reflected.
             if rv.stats is not None:
                 rv.stats.record(
                     hit=hit,
@@ -568,170 +639,214 @@ class MDNode(Node, StreamMixin, Serialisable):
                     hash_val=hash_val,
                 )
 
+        def _log_outcome(label: str, size: int = 0) -> None:
+            ## @brief Emit a fixed-width outcome line to the sync log.
+            LOG(label, fmt_size(size) if size else "", path_val)
+
+        def _promote(staging_file: str, hv: str, label: str) -> List[Path]:
+            ## @brief Atomically move a complete staging file into the pool
+            ##        and hardlink it into the repo destination.
+            ##
+            ## Hash verification is the caller's responsibility — this function
+            ## does not re-hash, because staging promotions are either verified
+            ## by HTTPDownload or by an explicit _compute_hash check before the
+            ## call.  Passing hash_val is therefore intentionally omitted.
+            ##
+            ## @param staging_file  Path to the completed staging file.
+            ## @param hv            SHA-256 hex digest of the file.
+            ## @param label         Log label (``"Downloaded"`` or ``"Resumed"``).
+            ## @return ``[dest]``
+            pp = _pool_path(rv.pool_root, hv)
+            _file_to_dest(Path(staging_file), pp, move=True)
+            ino = _sync_link(pp, dest, rv, hv)
+            sz = int(dest.stat().st_size)
+            self["size"] = sz
+            if rv.pool_inv is not None:
+                rv.pool_inv.add(hv, ino)
+            _record(miss=1, bytes_tx=sz)
+            _log_outcome(label, sz)
+            return [dest]
+
         # ---------------------------------------------------------
-        # Phase 1 -- Inventory fast path (no disk beyond link)
+        # Phase 1 -- Inventory fast path (no disk I/O beyond link)
         # ---------------------------------------------------------
-        # If the hash is known and the repo inventory says it exists
-        # on disk, skip all further work.  This is the common case
-        # on subsequent syncs after the initial download.
+        # Common case on subsequent syncs: both inventories are warm
+        # and the file is already on disk in the correct state.
         if hash_val:
             _inv_has = rv.inv is not None and rv.inv.has(hash_val)
-            if _inv_has and dest.exists():
-                _record(hit=1)
-                log(
-                    f"  {'Unchanged':<{LOG_LABEL_W}} "
-                    f"{fmt_size(self.get('size') or 0):>7}  {path_val}"
-                )
-                return [dest]
+            _pool_has = rv.pool_inv is not None and rv.pool_inv.has(hash_val)
 
-            # Pool has the hash but repo does not: link from pool.
-            if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
+            if _inv_has and dest.exists():
+                if _pool_has:
+                    # Both inventories confirm — nothing to do.
+                    _record(hit=1)
+                    _log_outcome("Unchanged", self.get("size") or 0)
+                    return [dest]
+
+                # Repo inventory hit but pool inventory missed.  The pool
+                # entry may have been deleted externally.  Check disk first;
+                # if the pool file is actually there, repair the inventory.
+                pool_path = _pool_path(rv.pool_root, hash_val)
+                if pool_path.exists():
+                    if rv.pool_inv is not None:
+                        rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
+                    _record(hit=1)
+                    _log_outcome("Unchanged", self.get("size") or 0)
+                    return [dest]
+
+                # Pool file is gone but repo hardlink survives.  Verify the
+                # repo file's hash and back-link it into the pool to heal the
+                # damage without any network I/O.
+                _corrupt = False
+                try:
+                    _file_to_dest(dest, pool_path, hash_val=hash_val, move=False)
+                except FileExistsError:
+                    # Another thread back-linked the same hash concurrently —
+                    # pool entry is intact, nothing left to do.
+                    pass
+                except ExceptionMsg:
+                    # Hash mismatch: repo file is corrupt.  Remove it so the
+                    # Phase 2 double-check does not return a stale "Unchanged".
+                    dest.unlink(missing_ok=True)
+                    _corrupt = True
+                if not _corrupt and pool_path.exists():
+                    if rv.pool_inv is not None:
+                        rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
+                    _record(hit=1)
+                    _log_outcome("Recovered", self.get("size") or 0)
+                    return [dest]
+                # dest was corrupt — fall through to Phase 2 for re-download.
+
+            # Pool has it but the repo hardlink is absent (or inv was stale).
+            if _pool_has:
                 pool_path = _pool_path(rv.pool_root, hash_val)
                 _sync_link(pool_path, dest, rv, hash_val)
                 _record(hit=1)
-                label = "Linked*" if _inv_has else "Linked"
-                log(
-                    f"  {label:<{LOG_LABEL_W}} "
-                    f"{fmt_size(self.get('size') or 0):>7}  {path_val}"
+                _log_outcome(
+                    "Linked*" if _inv_has else "Linked",
+                    self.get("size") or 0,
                 )
                 return [dest]
 
         # ---------------------------------------------------------
-        # Phase 2 -- Staging lock + stat fallback (cross-process)
+        # Phase 2 -- Staging lock + fallbacks
         # ---------------------------------------------------------
-        # Acquire a per-hash lock so that concurrent threads (from the
-        # same repo's ThreadPoolExecutor) downloading the same content
-        # race only once.  The first thread downloads; subsequent
-        # threads recheck inventories after acquiring the lock and skip.
+        # Acquire a per-hash lock so concurrent threads downloading
+        # the same content race only once.  Increment the refcount
+        # before acquiring so the entry cannot be pruned by a
+        # concurrent decref between the get() and the acquisition.
         staging_dir = Path(rv.pool_root) / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
-        staging_key = (
-            hash_val
-            or hashlib.sha256(uri.encode()).hexdigest()
-        )
-        # Increment the refcount before acquiring the per-hash lock so
-        # the entry cannot be pruned by a concurrent decref between
-        # the get() and the acquisition.
+        staging_key = hash_val or hashlib.sha256(uri.encode()).hexdigest()
+
         with _staging_locks_lock:
-            lock, refs = _staging_locks.get(
-                staging_key, (threading.Lock(), 0)
-            )
+            lock, refs = _staging_locks.get(staging_key, (threading.Lock(), 0))
             _staging_locks[staging_key] = (lock, refs + 1)
-        with lock:
-            try:
-                if hash_val:
-                    # Double-checked locking: another thread may have
-                    # downloaded and linked this hash while we waited.
-                    _inv_has = (
-                        rv.inv is not None and rv.inv.has(hash_val)
-                    )
-                    if _inv_has and dest.exists():
-                        _record(hit=1)
-                        log(
-                            f"  {'Unchanged':<{LOG_LABEL_W}} "
-                            f"{fmt_size(self.get('size') or 0):>7}  "
-                            f"{path_val}"
-                        )
-                        return [dest]
+        if not lock.acquire(timeout=5):
+            with _staging_locks_lock:
+                lock, refs = _staging_locks[staging_key]
+                if refs == 1:
+                    del _staging_locks[staging_key]
+                else:
+                    _staging_locks[staging_key] = (lock, refs - 1)
+            from ..lib.exceptions import StagingLockTimeout
+            raise StagingLockTimeout()
+        try:
+            if hash_val:
+                # Double-checked locking: another thread may have
+                # completed this download while we waited for the lock.
+                _inv_has = rv.inv is not None and rv.inv.has(hash_val)
+                if _inv_has and dest.exists():
+                    _record(hit=1)
+                    _log_outcome("Unchanged", self.get("size") or 0)
+                    return [dest]
 
-                    if (
-                        rv.pool_inv is not None
-                        and rv.pool_inv.has(hash_val)
-                    ):
-                        pool_path = _pool_path(rv.pool_root, hash_val)
-                        _sync_link(pool_path, dest, rv, hash_val)
-                        _record(hit=1)
-                        label = "Linked*" if _inv_has else "Linked"
-                        log(
-                            f"  {label:<{LOG_LABEL_W}} "
-                            f"{fmt_size(self.get('size') or 0):>7}  "
-                            f"{path_val}"
-                        )
-                        return [dest]
-
-                    # Stat fallback: the file exists on disk but
-                    # neither inventory knew about it (e.g. after a
-                    # manual restore or a concurrent process wrote it).
+                if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
                     pool_path = _pool_path(rv.pool_root, hash_val)
-                    if pool_path.exists():
-                        # Re-populate the pool inventory from on-disk
-                        # inode so future lookups are fast.
-                        if rv.pool_inv is not None:
-                            rv.pool_inv.add(
-                                hash_val, pool_path.stat().st_ino
-                            )
-                        if (
-                            dest.exists()
-                            and dest.stat().st_ino
-                            == pool_path.stat().st_ino
-                        ):
-                            # Already correctly linked - update repo
-                            # inventory and return.
-                            if rv.inv is not None:
-                                rv.inv.add(
-                                    hash_val, dest.stat().st_ino
-                                )
-                            _record(hit=1)
-                            log(
-                                f"  {'Unchanged*':<{LOG_LABEL_W}} "
-                                f"{fmt_size(self.get('size') or 0):>7}"
-                                f"  {path_val}"
-                            )
-                            return [dest]
-                        # Pool file exists but dest is stale or
-                        # missing - fix the link.
-                        _sync_link(pool_path, dest, rv, hash_val)
+                    _sync_link(pool_path, dest, rv, hash_val)
+                    _record(hit=1)
+                    _log_outcome(
+                        "Linked*" if _inv_has else "Linked",
+                        self.get("size") or 0,
+                    )
+                    return [dest]
+
+                # Stat fallback: pool file exists on disk but was not
+                # indexed (e.g. after a manual restore or a concurrent
+                # write from another process).
+                pool_path = _pool_path(rv.pool_root, hash_val)
+                if pool_path.exists():
+                    if rv.pool_inv is not None:
+                        rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
+                    if (dest.exists()
+                            and dest.stat().st_ino == pool_path.stat().st_ino):
+                        if rv.inv is not None:
+                            rv.inv.add(hash_val, dest.stat().st_ino)
                         _record(hit=1)
-                        log(
-                            f"  {'Linked':<{LOG_LABEL_W}} "
-                            f"{fmt_size(self.get('size') or 0):>7}  "
-                            f"{path_val}"
+                        _log_outcome("Unchanged*", self.get("size") or 0)
+                        return [dest]
+                    _sync_link(pool_path, dest, rv, hash_val)
+                    _record(hit=1)
+                    _log_outcome("Linked", self.get("size") or 0)
+                    return [dest]
+
+                # Back-link recovery: neither inventory had the hash but the
+                # repo file exists on disk (e.g. inventories were rebuilt
+                # from scratch after a crash).  Verify and back-link.
+                if dest.exists():
+                    _corrupt = False
+                    try:
+                        _file_to_dest(
+                            dest, pool_path, hash_val=hash_val, move=False
                         )
+                    except FileExistsError:
+                        pass  # concurrent back-link by another thread
+                    except ExceptionMsg:
+                        # Hash mismatch: dest is corrupt, download fresh.
+                        dest.unlink(missing_ok=True)
+                        _corrupt = True
+                    if not _corrupt and pool_path.exists():
+                        ino = pool_path.stat().st_ino
+                        if rv.pool_inv is not None:
+                            rv.pool_inv.add(hash_val, ino)
+                        if rv.inv is not None:
+                            rv.inv.add(hash_val, ino)
+                        _record(hit=1)
+                        _log_outcome("Recovered", self.get("size") or 0)
                         return [dest]
 
-                # -------------------------------------------------
-                # Phase 3 -- Genuine download
-                # -------------------------------------------------
-                # No inventory hit and no on-disk file.  Download to a
-                # hash-named staging file, verify the hash, then
-                # atomically replace into the pool and hardlink to the
-                # repo.  The staging file is kept on failure so
-                # subsequent retries can resume via curl -C -.
-                tmp = str(staging_dir / staging_key)
-                actual_hash = HTTPDownload(uri, tmp, expected_hash=hash_val)
-                # Record the actual hash for dedup; for nodes that
-                # did not have a known hash (e.g. Release file on
-                # first sync) this is the authoritative value.
-                self["hash"] = actual_hash
-                hash_val = hash_val or actual_hash
-                pool_path = _pool_path(rv.pool_root, hash_val)
-                pool_path.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(tmp, pool_path)
-                ino = _sync_link(pool_path, dest, rv, hash_val)
-                sz = int(dest.stat().st_size)
-                self["size"] = sz
-                if rv.pool_inv is not None:
-                    rv.pool_inv.add(hash_val, ino)
-                _record(miss=1, bytes_tx=sz)
-                log(
-                    f"  {'Downloaded':<{LOG_LABEL_W}} "
-                    f"{fmt_size(sz):>7}  {path_val}"
-                )
-                return [dest]
-            finally:
-                # Decref and prune the per-hash lock entry.  Runs on
-                # every return (success) or raise (failure) in the
-                # locked section.  When refs reaches 0 the entry is
-                # removed so _staging_locks does not grow unboundedly.
-                with _staging_locks_lock:
-                    lock, refs = _staging_locks[staging_key]
-                    if refs == 1:
-                        del _staging_locks[staging_key]
-                    else:
-                        _staging_locks[staging_key] = (
-                            lock,
-                            refs - 1,
-                        )
+            # -------------------------------------------------
+            # Phase 3 -- Staging promotion or fresh download
+            # -------------------------------------------------
+            # If a complete staging file survives from a prior
+            # interrupted sync, promote it directly.  Partial files
+            # are left in place for curl to resume via -C -.
+            tmp = str(staging_dir / staging_key)
+            tmp_path = staging_dir / staging_key
+            _partial = tmp_path.exists() and tmp_path.stat().st_size > 0
+            if hash_val and _partial:
+                if _compute_hash(tmp_path) == hash_val:
+                    return _promote(tmp, hash_val, "Resumed")
+
+            actual_hash = HTTPDownload(uri, tmp, expected_hash=hash_val)
+            # For nodes without a prior known hash (e.g. a Release file
+            # on first sync) the downloaded hash is now authoritative.
+            self["hash"] = actual_hash
+            hash_val = hash_val or actual_hash
+            return _promote(tmp, hash_val, "Resumed" if _partial else "Downloaded")
+
+        finally:
+            lock.release()
+            # Decref and prune the per-hash lock entry.  Runs on every
+            # return (success) or raise (failure).  When refs reaches 0
+            # the entry is removed so _staging_locks does not grow
+            # unboundedly across a long-running sync.
+            with _staging_locks_lock:
+                lock, refs = _staging_locks[staging_key]
+                if refs == 1:
+                    del _staging_locks[staging_key]
+                else:
+                    _staging_locks[staging_key] = (lock, refs - 1)
 
 
     def abort(self) -> None:
@@ -765,4 +880,6 @@ __all__ = [
     "MDNode",
     "_pool_path",
     "_sync_link",
+    "_compute_hash",
+    "_file_to_dest",
 ]

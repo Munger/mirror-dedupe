@@ -24,6 +24,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from . import LOG
 from .http_download import HTTPGet
 from .log import log
 from .subproc import run_subprocess
@@ -63,7 +64,7 @@ def prepare_keyring(
 
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    log(f"  Fetching GPG key: {url}", level="INFO")
+    LOG("GPG key", "", url)
     key_bytes = HTTPGet(url, connect_timeout=connect_timeout)
     if not key_bytes:
         raise GpgKeyError(f"Failed to fetch GPG key from {url}")
@@ -93,7 +94,7 @@ def prepare_keyring(
     else:
         dest.write_bytes(key_bytes)
 
-    log(f"  GPG keyring stored: {dest}", level="INFO")
+    LOG("GPG keyring", "", str(dest))
 
 
 def verify_release(
@@ -140,15 +141,11 @@ def verify_release(
                 tmp_path,
                 str(release_path),
             ])
-            _lbl = f"  {label}" if label else ""
             if rc != 0:
-                log(
-                    f"  FAILED GPG signature check{_lbl} - aborting"
-                    f" ({err.decode(errors='replace').strip()})",
-                    level="WARN",
-                )
+                detail = err.decode(errors="replace").strip()
+                LOG("GPG FAILED", "", f"{label}  {detail}" if label else detail, colour="RED")
                 return False
-            log(f"  GPG signature verified{_lbl}", level="INFO")
+            LOG("GPG verified", "", label)
             return True
         finally:
             if tmp_path:
@@ -158,15 +155,13 @@ def verify_release(
                     pass
 
     if not inrelease_url:
-        _lbl = f"  {label}" if label else ""
-        log(f"  FAILED GPG signature check{_lbl} - aborting (no signature available)", level="WARN")
+        LOG("GPG FAILED", "", f"{label}  no signature available" if label else "no signature available", colour="RED")
         return False
 
     log("  GPG: no detached sig, trying InRelease", level="DEBUG")
     ir_bytes = HTTPGet(inrelease_url, connect_timeout=connect_timeout)
     if not ir_bytes:
-        _lbl = f"  {label}" if label else ""
-        log(f"  FAILED GPG signature check{_lbl} - aborting (no signature available)", level="WARN")
+        LOG("GPG FAILED", "", f"{label}  no InRelease available" if label else "no InRelease available", colour="RED")
         return False
 
     tmp_path = None
@@ -180,15 +175,10 @@ def verify_release(
             tmp_path,
         ])
         if rc != 0:
-            _lbl = f"  {label}" if label else ""
-            log(
-                f"  FAILED GPG signature check{_lbl} - aborting"
-                f" ({err.decode(errors='replace').strip()})",
-                level="WARN",
-            )
+            detail = err.decode(errors="replace").strip()
+            LOG("GPG FAILED", "", f"{label}  {detail}" if label else detail, colour="RED")
             return False
-        _lbl = f"  {label}" if label else ""
-        log(f"  GPG signature verified{_lbl}", level="INFO")
+        LOG("GPG verified", "", label)
         return True
     finally:
         if tmp_path:

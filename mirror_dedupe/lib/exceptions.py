@@ -39,6 +39,16 @@ class ExceptionMsg(RuntimeError):
         raise NotImplementedError
 
 
+class StagingLockTimeout(Exception):
+    ## @brief Raised when a worker cannot acquire the per-hash staging lock
+    ##        within the timeout period.
+    ##
+    ## The coordinator catches this and requeues the node at the back of
+    ## the stack so it is retried once the competing download completes,
+    ## breaking lockstep between repos downloading the same content.
+    pass
+
+
 class RepoAbortError(Exception):
     ## @brief Raised to abort a single repo's sync immediately.
     ##

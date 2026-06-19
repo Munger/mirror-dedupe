@@ -18,7 +18,38 @@ import yaml
 from pathlib import Path
 from typing import Dict, List
 
+import re
+import threading
+
 from mirror_dedupe.lib.log import log, setup_log_colours
+from mirror_dedupe.lib.log_it import configure as _configure_logit
+
+
+class _ThreadColourSource:
+    ## @brief Resolve log-it row colour from the current thread name.
+    ##
+    ## Thread names follow the ``"<repo> <N>"`` convention used by mirror-dedupe
+    ## workers (e.g. ``"postgresql 3"``).  The trailing counter is stripped and
+    ## the repo name is looked up in *colour_map*.
+    ##
+    ## @param colour_map  Dict mapping repo names to a colour name string or
+    ##                    ``(fg, bg)`` tuple.
+
+    _RE = re.compile(r"^(.*)\s+\d+$")
+
+    def __init__(self, colour_map: dict) -> None:
+        self._map = colour_map
+
+    def get_colour(self) -> tuple[str | None, str | None]:
+        name = threading.current_thread().name
+        m = self._RE.match(name)
+        key = m.group(1) if m else name
+        val = self._map.get(key)
+        if val is None:
+            return None, None
+        if isinstance(val, tuple):
+            return val
+        return str(val), None
 
 
 DEFAULT_CONFIG_DIR = "/etc/mirror-dedupe"
@@ -127,6 +158,7 @@ class Config:
         self.parallel_downloads = self._data.get('parallel_downloads', 10)
         self.max_concurrent_syncs = self._data.get('max_concurrent_syncs', 2)
         self.connect_timeout = self._data.get('connect_timeout', 10)
+        self.stall_timeout = self._data.get('stall_timeout', 60)
         self.max_retries = self._data.get('max_retries', 2)
         self.sweep_pool_after_sync = bool(self._data.get('sweep_pool_after_sync', False))
         raw_additional = self._data.get('additional_repos', []) or []
@@ -205,6 +237,7 @@ class Config:
         self._data['parallel_downloads'] = self.parallel_downloads
         self._data['max_concurrent_syncs'] = self.max_concurrent_syncs
         self._data['connect_timeout'] = self.connect_timeout
+        self._data['stall_timeout'] = self.stall_timeout
         self._data['max_retries'] = self.max_retries
         self._data['sweep_pool_after_sync'] = self.sweep_pool_after_sync
         self._data['mirrors'] = self.mirrors
@@ -216,6 +249,29 @@ class Config:
             self._data['log_colour'],
             self._data['log_colour_bg'],
             mirrors,
+        )
+
+        # Build repo-name → colour-name map for log-it's ThreadColourSource.
+        global_fg = self._data['log_colour']
+        _default = global_fg if global_fg.upper() not in ("NONE", "DEFAULT") else None
+        _colour_map: dict = {}
+        for _m in mirrors:
+            _mname = _m.get("name")
+            if not _mname:
+                continue
+            _p = _m.get("params") or {}
+            _fg = (_p.get("log_colour") or global_fg or "").strip().upper()
+            if _fg and _fg not in ("NONE", "DEFAULT"):
+                _colour_map[_mname] = _fg
+            elif _default:
+                _colour_map[_mname] = _default
+        def _ctx():
+            n = threading.current_thread().name
+            return n if n != "MainThread" else None
+
+        _configure_logit(
+            colour_source=_ThreadColourSource(_colour_map),
+            context_source=_ctx,
         )
 
     @property

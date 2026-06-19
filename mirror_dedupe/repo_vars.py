@@ -49,10 +49,12 @@ class SyncStats:
         self.pool_misses: int = 0
         self.errors: int = 0
         self.gpg_failures: int = 0
+        self.no_response: int = 0
         self.elapsed: float = 0.0
         self.removed: int = 0
         self._lock = threading.Lock()
         self._seen_hashes: set[str] = set()
+        self._consecutive_no_response: int = 0
 
     def record(
         self,
@@ -98,6 +100,19 @@ class SyncStats:
         with self._lock:
             self.gpg_failures += 1
 
+    def add_no_response(self) -> int:
+        ## @brief Record a host-not-responding event.
+        ## @return The updated consecutive count (used to decide abort threshold).
+        with self._lock:
+            self.no_response += 1
+            self._consecutive_no_response += 1
+            return self._consecutive_no_response
+
+    def reset_consecutive_no_response(self) -> None:
+        ## @brief Reset the consecutive counter after any successful sync.
+        with self._lock:
+            self._consecutive_no_response = 0
+
     def to_dict(self) -> dict[str, Any]:
         ## @brief Return a plain-dict snapshot of the current totals.
         ## @return Stats dict consumed by ``Repo.stats()``, ``stats.write_ndjson()``,
@@ -111,6 +126,7 @@ class SyncStats:
             "pool_misses": self.pool_misses,
             "errors": self.errors,
             "gpg_failures": self.gpg_failures,
+            "no_response": self.no_response,
             "elapsed": self.elapsed,
             "removed": self.removed,
         }
