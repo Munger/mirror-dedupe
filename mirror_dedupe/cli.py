@@ -78,8 +78,30 @@ def _snapshot_name_completer(prefix, parsed_args, **_):
 
 def _snapshot_ts_completer(prefix, parsed_args, **_):
     ## @brief Complete snapshot timestamps for the repo named in parsed_args.name.
+    ##
+    ## argcomplete's partial parse of nested subcommands often does not populate
+    ## positional arguments before the current word.  When parsed_args.name is
+    ## absent, fall back to extracting the repo name from COMP_LINE directly.
     try:
         name = getattr(parsed_args, 'name', None)
+        if not name:
+            try:
+                import shlex
+                words = shlex.split(os.environ.get('COMP_LINE', ''))
+            except ValueError:
+                words = os.environ.get('COMP_LINE', '').split()
+            found_verb = False
+            positionals: list[str] = []
+            for w in words[1:]:
+                if w in ('delete', 'restore'):
+                    found_verb = True
+                    continue
+                if found_verb and not w.startswith('-'):
+                    positionals.append(w)
+            # positionals[0] is name; if it equals prefix we are still completing
+            # the name argument, not the timestamp — return nothing.
+            if positionals and positionals[0] != prefix:
+                name = positionals[0]
         if not name:
             return []
         config_dir = (
