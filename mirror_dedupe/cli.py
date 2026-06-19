@@ -35,6 +35,31 @@ from .config import Config, DEFAULT_CONFIG_DIR
 from .lib.log import log
 
 
+def _repo_completer(*, enabled_only: bool = False, available_only: bool = False):
+    ## @brief Return an argcomplete completer for repo NAME arguments.
+    ##
+    ## @param enabled_only    Complete only from repos-enabled.
+    ## @param available_only  Complete only from repos-available.
+    def _completer(prefix, parsed_args, **_):
+        try:
+            config_dir = (
+                getattr(parsed_args, 'config_dir', None)
+                or os.environ.get('MIRROR_DEDUPE_CONFIG_DIR')
+            )
+            cfg = Config.load(config_dir)
+            base = Path(cfg.config_dir)
+            if available_only:
+                names = sorted(f.stem for f in (base / 'repos-available').glob('*.conf'))
+            elif enabled_only:
+                names = sorted(f.stem for f in (base / 'repos-enabled').glob('*.conf'))
+            else:
+                names = cfg.list_repo_names()
+            return [n for n in names if n.startswith(prefix)]
+        except Exception:
+            return []
+    return _completer
+
+
 def _resolve_dest(name: str, cfg: Config) -> Optional[str]:
     ## @brief Resolve a repo *name* to its absolute ``dest`` path.
     dest = cfg.resolve_dest(name)
@@ -171,7 +196,8 @@ def main():
     # -- sync ----------------------------------------------------------
     p = sub.add_parser('sync', help='Run the full sync pipeline for all enabled mirrors')
     p.add_argument('name', nargs='?', metavar='NAME',
-                   help='Sync only this mirror (default: all enabled)')
+                   help='Sync only this mirror (default: all enabled)'
+                   ).completer = _repo_completer(enabled_only=True)
     p.add_argument('--sweep-pool', action='store_true', dest='sweep_pool',
                    help='Sweep orphaned pool entries after sync')
     p.add_argument('--dedupe-only', action='store_true', dest='dedupe_only',
@@ -230,20 +256,20 @@ def main():
 
     # -- activate ------------------------------------------------------
     p = sub.add_parser('activate', help='Enable a mirror via symlink in repos-enabled')
-    p.add_argument('name', metavar='NAME')
+    p.add_argument('name', metavar='NAME').completer = _repo_completer(available_only=True)
 
     # -- deactivate ----------------------------------------------------
     p = sub.add_parser('deactivate', help='Disable a mirror by removing its repos-enabled symlink')
-    p.add_argument('name', metavar='NAME')
+    p.add_argument('name', metavar='NAME').completer = _repo_completer(enabled_only=True)
 
     # -- test ----------------------------------------------------------
     p = sub.add_parser('test', help='Check upstream reachability and summarise what will be synced')
-    p.add_argument('name', metavar='NAME')
+    p.add_argument('name', metavar='NAME').completer = _repo_completer()
 
     # -- reinitialise --------------------------------------------------
     p = sub.add_parser('reinitialise',
                        help='Snapshot a repo and remove its data dir (leaves activation)')
-    p.add_argument('name', metavar='NAME')
+    p.add_argument('name', metavar='NAME').completer = _repo_completer(enabled_only=True)
     p.add_argument('--force', action='store_true',
                    help='Bypass PIN confirmation')
 
@@ -260,15 +286,17 @@ def main():
 
     ps = snap_sub.add_parser('create', help='Create a hardlink snapshot of a repo dest')
     ps.add_argument('name', metavar='NAME', nargs='?', default='ALL',
-                    help='Repo name (default: ALL repos)')
+                    help='Repo name (default: ALL repos)'
+                    ).completer = _repo_completer(enabled_only=True)
 
     ps = snap_sub.add_parser('list', help='List available snapshots for a repo or ALL')
     ps.add_argument('name', metavar='NAME', nargs='?', default='ALL',
-                    help='Repo name (default: ALL repos)')
+                    help='Repo name (default: ALL repos)'
+                    ).completer = _repo_completer(enabled_only=True)
 
     ps = snap_sub.add_parser('restore', help='Restore a snapshot to the repo dest')
     ps.add_argument('name', metavar='NAME',
-                    help='Repo/snapshot name')
+                    help='Repo/snapshot name').completer = _repo_completer(enabled_only=True)
     ps.add_argument('snapshot', metavar='SNAPSHOT', nargs='?', default='',
                     help='Snapshot timestamp (default: latest)')
     ps.add_argument('--force', action='store_true',
@@ -278,7 +306,7 @@ def main():
 
     ps = snap_sub.add_parser('delete', help='Delete a snapshot directory')
     ps.add_argument('name', metavar='NAME',
-                    help='Repo/snapshot name')
+                    help='Repo/snapshot name').completer = _repo_completer(enabled_only=True)
     ps.add_argument('snapshot', metavar='SNAPSHOT', nargs='?', default='',
                     help='Snapshot timestamp (omit to delete entire snapshot group)')
     ps.add_argument('--force', action='store_true',
