@@ -13,12 +13,13 @@
 
 from collections import OrderedDict
 from threading import Lock
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from mirror_dedupe.lib.codenames import apt_codenames
 from mirror_dedupe.lib.html_helpers import build_url, extract_href
 from mirror_dedupe.lib.log import log
 from mirror_dedupe.schema.mdnode import MDNode as Node
+from .release import strip_pgp_wrapper
 
 
 class _LRUCache:
@@ -175,7 +176,7 @@ def discover_distribution_paths(
     ##                        from upstream if omitted.
     ## @param _allow_child_prefix  Internal flag to allow one level of
     ##                             child prefix resolution.
-    ## @return List of ``(path, effective_upstream)`` tuples.
+    ## @return List of ``(path, effective_upstream, anchor_filename)`` tuples.
 
     def _fetch_text(url: str) -> str | None:
         ## @brief Fetch a URL's body as decoded UTF-8 text.
@@ -186,7 +187,7 @@ def discover_distribution_paths(
             return raw.decode("utf-8", errors="replace")
         return None
 
-    cache_key = (upstream, index_root, anchor, max_depth)
+    cache_key = (upstream, index_root, max_depth)
     cached = _bfs_cache.get(cache_key)
     if cached is not None:
         return list(cached)
@@ -252,19 +253,33 @@ def discover_distribution_paths(
 
     log(f"[apt] total top-level suites discovered: {len(queue)}")
 
-    discovered_paths: List[str] = []
+    discovered_paths: List[Tuple[str, str]] = []
 
     # BFS walk suites under /dists/ up to max_depth
     while queue:
         path, depth = queue.pop(0)
 
-        # Each candidate gets a Release probe before descending further
-        release_url = build_url(upstream, index_root, path, anchor)
-        text = _fetch_text(release_url)
-        if text and looks_like_release(text):
-            _release_text_cache[(upstream, index_root, path)] = text
-            log(f"  {path}: fetched")
-            discovered_paths.append(path)
+        # Probe InRelease first (self-verifying); fall back to Release.
+        # Cache the full upstream content — PGP wrapper intact.  Stripping
+        # is a parse step, not a storage step.
+        path_anchor = None
+        path_full = None
+
+        ir_text = _fetch_text(build_url(upstream, index_root, path, "InRelease"))
+        if ir_text and looks_like_release(strip_pgp_wrapper(ir_text)):
+            path_anchor = "InRelease"
+            path_full = ir_text
+
+        if path_anchor is None:
+            rel_text = _fetch_text(build_url(upstream, index_root, path, "Release"))
+            if rel_text and looks_like_release(rel_text):
+                path_anchor = "Release"
+                path_full = rel_text
+
+        if path_anchor:
+            _release_text_cache[(upstream, index_root, path)] = path_full
+            log(f"  {path}: fetched ({path_anchor})")
+            discovered_paths.append((path, path_anchor))
             continue  # Leaf found - no need to descend
         log(f"  {path}: not found")
 
@@ -286,7 +301,7 @@ def discover_distribution_paths(
             seen_paths.add(child_path)
             queue.append((child_path, depth + 1))
 
-    result = [(path, upstream) for path in discovered_paths]
+    result = [(path, upstream, anchor_fn) for path, anchor_fn in discovered_paths]
     _bfs_cache[cache_key] = list(result)
     return result
 
@@ -331,30 +346,35 @@ def probe_any_suite(
     suites_to_try: list[str] = list(extra_suites or [])
     suites_to_try.extend(_known_suites_to_probe())
     for suite in suites_to_try:
-        rel_url = build_url(upstream, index_root, suite, anchor)
-        try:
-            text_bytes = Node.probe_url(rel_url)
-            if text_bytes is None:
+        body = None
+        for filename in ("InRelease", anchor):
+            url = build_url(upstream, index_root, suite, filename)
+            try:
+                raw = Node.probe_url(url)
+                if raw is None:
+                    continue
+                text = raw.decode("utf-8", errors="replace")
+                candidate = strip_pgp_wrapper(text) if filename == "InRelease" else text
+                if looks_like_release(candidate):
+                    body = candidate
+                    break
+            except Exception:
                 continue
-            text = text_bytes.decode("utf-8", errors="replace")
-        except Exception:
-            text = None
 
-        if text and looks_like_release(text):
-            # Verify the Release file's Suite/Codename matches what we
-            # probed.  This guards against false positives from redirects
-            # or child prefixes where a different suite's Release is served
-            # under the wrong path.
-            claimed = None
-            for line in text.splitlines():
-                if line.startswith("Suite:") or line.startswith("Codename:"):
-                    val = line.split(":", 1)[1].strip()
-                    if val == suite:
-                        return True
-                    if claimed is None:
-                        claimed = val
-            if claimed == suite:
-                return True
+        if not body:
+            continue
+
+        # Verify Suite/Codename matches — guards against redirect false positives.
+        claimed = None
+        for line in body.splitlines():
+            if line.startswith("Suite:") or line.startswith("Codename:"):
+                val = line.split(":", 1)[1].strip()
+                if val == suite:
+                    return True
+                if claimed is None:
+                    claimed = val
+        if claimed == suite:
+            return True
 
     return False
 
@@ -376,36 +396,57 @@ def probe_fallback_suites(
     ## @param anchor      Anchor filename (default ``"Release"``).
     ## @return List of suite names confirmed to have valid Release files.
 
-    candidates: List[str] = []
+    candidates: List[Tuple[str, str]] = []
     for suite in _known_suites_to_probe():
-        rel_url = build_url(upstream, index_root, suite, anchor)
+        suite_anchor = None
+        suite_full = None
+        suite_body = None
+
         try:
-            text_bytes = Node.probe_url(rel_url)
-            if text_bytes is None:
-                log(f"  {suite}: not found")
-                continue
-            text = text_bytes.decode("utf-8", errors="replace")
+            ir_bytes = Node.probe_url(build_url(upstream, index_root, suite, "InRelease"))
+            if ir_bytes:
+                ir_text = ir_bytes.decode("utf-8", errors="replace")
+                stripped = strip_pgp_wrapper(ir_text)
+                if looks_like_release(stripped):
+                    suite_anchor = "InRelease"
+                    suite_full = ir_text
+                    suite_body = stripped
         except Exception:
-            text = None
+            pass
 
-        if text and looks_like_release(text):
-            # Same Suite/Codename verification as probe_any_suite -
-            # confirm the Release file matches the probed suite name,
-            # not a redirect or child-prefix false positive.
-            claimed = None
-            for line in text.splitlines():
-                if line.startswith("Suite:") or line.startswith("Codename:"):
-                    val = line.split(":", 1)[1].strip()
-                    if val == suite:
-                        claimed = suite
-                        break
-                    if claimed is None:
-                        claimed = val
-            if claimed == suite:
-                log(f"  {suite}: found")
-                candidates.append(suite)
-                continue
+        if suite_anchor is None:
+            try:
+                rel_bytes = Node.probe_url(build_url(upstream, index_root, suite, anchor))
+                if rel_bytes:
+                    rel_text = rel_bytes.decode("utf-8", errors="replace")
+                    if looks_like_release(rel_text):
+                        suite_anchor = "Release"
+                        suite_full = rel_text
+                        suite_body = rel_text
+            except Exception:
+                pass
 
-        log(f"  {suite}: not found")
+        if not suite_anchor:
+            log(f"  {suite}: not found")
+            continue
+
+        # Confirm the file's Suite/Codename matches what we probed —
+        # guards against false positives from redirects or child prefixes.
+        claimed = None
+        for line in suite_body.splitlines():
+            if line.startswith("Suite:") or line.startswith("Codename:"):
+                val = line.split(":", 1)[1].strip()
+                if val == suite:
+                    claimed = suite
+                    break
+                if claimed is None:
+                    claimed = val
+
+        if claimed == suite:
+            _release_text_cache[(upstream, index_root, suite)] = suite_full
+            log(f"  {suite}: found ({suite_anchor})")
+            candidates.append((suite, suite_anchor))
+        else:
+            log(f"  {suite}: not found")
 
     return candidates

@@ -712,6 +712,9 @@ def main():
         components = mirror_cfg.get('components', [])
         gpg_key_url = mirror_cfg.get('gpg_key_url')
         gpg_key_path = mirror_cfg.get('gpg_key_path')
+        params = mirror_cfg.get('params', {})
+        anchor_filename = params.get('anchor_filename', 'Release')
+        suite_anchor_exceptions = params.get('suite_anchor_exceptions', {})
 
         if not upstream:
             log(f"ERROR: Mirror '{name}' has no 'upstream' defined in {src}", level="ERROR")
@@ -764,8 +767,6 @@ def main():
 
         if architectures:
             print(f"  Architectures: {', '.join(architectures)}")
-        if distributions:
-            print(f"  Distributions: {', '.join(distributions)}")
         if components:
             print(f"  Components:    {', '.join(components)}")
         if gpg_key_url or gpg_key_path:
@@ -775,10 +776,32 @@ def main():
             if gpg_key_path:
                 print(f"    Path: {gpg_key_path}")
 
+        dist_failures = 0
+        if distributions:
+            print("")
+            print(f"  Distribution check ({anchor_filename})...")
+            upstream_base = upstream.rstrip('/')
+            for dist in distributions:
+                dist_anchor = suite_anchor_exceptions.get(dist, anchor_filename)
+                anchor_url = f"{upstream_base}/dists/{dist}/{dist_anchor}"
+                dr = subprocess.run(
+                    ['curl', '-Isf', '--max-time', '10', anchor_url],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                if dr.returncode == 0:
+                    print(f"    OK:    {dist}")
+                else:
+                    print(f"    MISS:  {dist}  ({anchor_url})")
+                    dist_failures += 1
+
         print("")
-        print("Summary: This mirror appears reachable. It is configured to fetch the above")
-        print("         distributions/components/architectures if enabled.")
-        sys.exit(0)
+        if dist_failures:
+            print(f"Summary: {dist_failures} distribution(s) unreachable via {anchor_filename}.")
+        else:
+            print("Summary: This mirror appears reachable. It is configured to fetch the above")
+            print("         distributions/components/architectures if enabled.")
+        sys.exit(1 if dist_failures else 0)
 
     # ------------------------------------------------------------------
     # reinitialise

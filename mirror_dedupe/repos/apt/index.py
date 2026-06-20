@@ -84,6 +84,8 @@ class AptIndex(Schema.Index):
                         except ValueError:
                             stanza_lines = []
                             continue
+                        if filename.startswith("./"):
+                            filename = filename[2:]
                         pkg_uri = f"{base.rstrip('/')}/{quote(filename, safe='/')}" if base else ""
                         pkg_path = f"{dest}/{filename}" if dest else filename
                         pkg = Package(
@@ -114,6 +116,8 @@ class AptIndex(Schema.Index):
                         size_int = int(size_str)
                     except ValueError:
                         return
+                    if filename.startswith("./"):
+                        filename = filename[2:]
                     pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
                     pkg_path = f"{dest}/{filename}" if dest else filename
                     pkg = Package(

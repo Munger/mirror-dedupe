@@ -235,7 +235,7 @@ def HTTPGet(uri: str, *, connect_timeout: int = 10, max_time: int = 30) -> bytes
         return None
 
     args = [
-        "curl", "-sL",
+        "curl", "-sfL",
         "--connect-timeout", str(connect_timeout),
         "--max-time", str(max_time),
         uri,

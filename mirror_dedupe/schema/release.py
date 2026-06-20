@@ -86,22 +86,21 @@ class Release(Node):
     class Digest(Node):
         ## @brief Digest describing this Release's body.
         ##
-        ## Callers provide the raw Release text so we can compute cheap
-        ## comparison information (SHA-256 hash and byte length), but
-        ## only those summary fields are persisted in the mapping to keep
-        ## scan outputs lean.
+        ## Stores the raw Release text together with its SHA-256 hash and
+        ## byte length.  For InRelease files the PGP cleartext envelope is
+        ## preserved intact so the serialised snapshot is a faithful record
+        ## of upstream content.
 
         def __init__(self, *, text: str) -> None:
             ## @brief Initialise a Digest from raw Release text.
             ##
-            ## Computes the SHA-256 hash and byte length of the text.
-            ##
-            ## @param text  Raw Release file text.
+            ## @param text  Raw Release file text (PGP wrapper intact for InRelease).
             ## @return None
             digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
             data: Dict[str, Any] = {
                 "sha256": digest,
                 "length": len(text),
+                "text": text,
             }
             super().__init__(data)
 

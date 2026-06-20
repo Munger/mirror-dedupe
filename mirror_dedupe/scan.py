@@ -303,6 +303,13 @@ def generate_config(repo: Repo, dest: str,
     nobrowse = params.get("nobrowse", False)
     if nobrowse:
         config_lines.append("  nobrowse: true")
+    anchor_filename = params.get("anchor_filename", "Release")
+    config_lines.append(f"  anchor_filename: {anchor_filename}")
+    suite_anchor_exceptions = params.get("suite_anchor_exceptions", {})
+    if suite_anchor_exceptions:
+        config_lines.append("  suite_anchor_exceptions:")
+        for suite, anchor in suite_anchor_exceptions.items():
+            config_lines.append(f"    {suite}: {anchor}")
     config_lines.append(f"  log_colour: {params.get('log_colour', 'DEFAULT')}")
     config_lines.append(f"  log_colour_bg: {params.get('log_colour_bg', 'NONE')}")
     config_lines.append(f"  # parallel_downloads: N")
