@@ -22,6 +22,7 @@
 import os
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 from . import LOG
 from .http_download import HTTPGet
@@ -96,6 +97,38 @@ def prepare_keyring(
     LOG("GPG keyring", "", str(dest))
 
 
+def verify_inrelease(
+    path: Path,
+    keyring_path: Path,
+    connect_timeout: int = 10,
+    *,
+    label: str = "",
+) -> bool:
+    ## @brief Verify a clearsigned InRelease file already on disk.
+    ##
+    ## InRelease embeds its own PGP signature (clearsigned format).
+    ## ``gpgv`` verifies the file directly — no separate sig fetch needed.
+    ## The file must already be present (e.g. in staging).
+    ##
+    ## @param path            Path to the InRelease file on disk.
+    ## @param keyring_path    Path to the binary keyring.
+    ## @param connect_timeout Unused; kept for interface symmetry with
+    ##                        ``verify_release``.
+    ## @param label           Path label for log output.
+    ## @return ``True`` on successful verification, ``False`` on failure.
+
+    keyring_str = str(keyring_path.resolve())
+    rc, _, err = run_subprocess([
+        "gpgv", "--keyring", keyring_str, str(path),
+    ])
+    if rc != 0:
+        detail = err.decode(errors="replace").strip()
+        LOG("GPG FAILED", "", f"{label}  {detail}" if label else detail, colour="RED")
+        return False
+    LOG("GPG verified", "", label)
+    return True
+
+
 def verify_release(
     release_path: Path,
     sig_url: str,
@@ -104,30 +137,37 @@ def verify_release(
     *,
     inrelease_url: str = "",
     label: str = "",
+    sig_path: Optional[Path] = None,
 ) -> bool:
-    ## @brief Verify a Release file against its GPG signature.
+    ## @brief Verify a Release file against its detached GPG signature.
     ##
-    ## Primary path: fetches the detached ``Release.gpg`` from *sig_url*
-    ## and runs ``gpgv <sig> <release>``.
+    ## Signature source priority:
+    ##  1. *sig_path* — local pool copy of ``Release.gpg`` if already synced.
+    ##  2. *sig_url*  — fetch ``Release.gpg`` from upstream.
+    ##  3. *inrelease_url* — fallback if repo publishes only ``InRelease``
+    ##     (fetches and runs ``gpgv <inrelease>`` — gpgv handles clearsigned
+    ##     files natively).
     ##
-    ## Fallback: if *sig_url* returns nothing (repo publishes only an
-    ## inline-signed ``InRelease``) and *inrelease_url* is provided, fetches
-    ## that file and runs ``gpgv <inrelease>`` - gpgv handles clearsigned
-    ## files natively without extra flags.
+    ## Returns ``True`` on success, ``False`` on failure.  Never raises for a
+    ## failed signature.
     ##
-    ## Returns ``True`` if either path verifies successfully, ``False``
-    ## otherwise.  Never raises for a failed signature.
-    ##
-    ## @param release_path    Path to the Release file on disk.
-    ## @param sig_url         URL of the ``Release.gpg`` detached signature.
+    ## @param release_path    Path to the Release file on disk (staging).
+    ## @param sig_url         Upstream URL of the ``Release.gpg`` detached sig.
     ## @param keyring_path    Path to the binary keyring.
     ## @param connect_timeout Seconds to wait for TCP connect.
-    ## @param inrelease_url   URL of ``InRelease`` to try if *sig_url* is absent.
+    ## @param inrelease_url   URL of ``InRelease`` to try if no detached sig.
+    ## @param label           Path label for log output.
+    ## @param sig_path        Local pool path of ``Release.gpg`` if available.
     ## @return ``True`` on successful verification, ``False`` on failure.
 
     keyring_str = str(keyring_path.resolve())
 
-    sig_bytes = HTTPGet(sig_url, connect_timeout=connect_timeout)
+    # Prefer the local pool copy — avoids a redundant upstream fetch when
+    # Release.gpg was already downloaded as the first optional node.
+    if sig_path and sig_path.exists():
+        sig_bytes = sig_path.read_bytes()
+    else:
+        sig_bytes = HTTPGet(sig_url, connect_timeout=connect_timeout)
     if sig_bytes:
         tmp_path = None
         try:

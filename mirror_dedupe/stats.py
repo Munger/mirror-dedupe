@@ -67,6 +67,7 @@ def write_ndjson(
         "elapsed": round(s["elapsed"], 2),
         "file_count": s["file_count"],
         "total_bytes": s["total_bytes"],
+        "deduped_files": s.get("deduped_files", 0),
         "deduped_bytes": s["deduped_bytes"],
         "bytes_transferred": s["bytes_transferred"],
         "errors": s["errors"],
@@ -154,19 +155,20 @@ def format_row(s: Dict, name: str) -> Dict:
     ## @param name  Repo name.
     ## @return Dict with raw values for each column.
     return {
-        "ts":      s.get("ts"),
-        "name":    name,
-        "files":   s.get("file_count", 0),
-        "total":   s.get("total_bytes", 0),
-        "deduped": s.get("deduped_bytes", 0),
-        "tx":      s.get("bytes_transferred", 0),
-        "hits":    s.get("pool_hits", 0),
-        "misses":  s.get("pool_misses", 0),
-        "errors":  s.get("errors", 0),
-        "nr":      s.get("no_response", 0),
-        "gpg":     s.get("gpg_failures", 0),
-        "time":    s.get("elapsed", 0),
-        "removed": s.get("removed", 0),
+        "ts":            s.get("ts"),
+        "name":          name,
+        "files":         s.get("file_count", 0),
+        "total":         s.get("total_bytes", 0),
+        "deduped_files": s.get("deduped_files", 0),
+        "deduped":       s.get("deduped_bytes", 0),
+        "tx":            s.get("bytes_transferred", 0),
+        "hits":          s.get("pool_hits", 0),
+        "misses":        s.get("pool_misses", 0),
+        "errors":        s.get("errors", 0),
+        "nr":            s.get("no_response", 0),
+        "gpg":           s.get("gpg_failures", 0),
+        "time":          s.get("elapsed", 0),
+        "removed":       s.get("removed", 0),
     }
 
 
@@ -219,13 +221,15 @@ def print_summary_table(
                         footer=(lambda v: "Total") if ft else None))
     _sum_int = (lambda v: _int(sum(v))) if ft else None
     cols += [
-        Col("files",   header="Files",         align="right",
+        Col("files",         header="Files",        align="right",
             fmt=_int,            footer=_sum_int),
-        Col("total",   header="Total",         align="right",
+        Col("total",         header="Total",        align="right",
             fmt=logfmt.filesize, footer=sum if ft else None),
-        Col("deduped", header="Deduplicated",  align="right",
+        Col("deduped_files", header="Shared",       align="right",
+            fmt=_int,            footer=_sum_int),
+        Col("deduped",       header="Shared bytes", align="right",
             fmt=logfmt.filesize, footer=sum if ft else None),
-        Col("tx",      header="Transferred",   align="right",
+        Col("tx",            header="Transferred",  align="right",
             fmt=logfmt.filesize, footer=sum if ft else None),
         Col("hits",    header="Hit",           align="right",
             fmt=_int,            footer=_sum_int),
@@ -248,7 +252,7 @@ def print_summary_table(
     t = Table(*cols, title=title)
     for r in rows:
         t.add(**{k: r.get(k) for k in (
-            "ts", "name", "files", "total", "deduped", "tx",
+            "ts", "name", "files", "total", "deduped_files", "deduped", "tx",
             "hits", "misses", "errors", "nr", "gpg", "time", "removed",
         )})
 

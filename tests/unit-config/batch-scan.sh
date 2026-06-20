@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 ## @file batch-scan.sh
 ##
-## @brief Run mirror-dedupe --scan against all YAML candidates in scan_candidates/.
+## @brief Run mirror-dedupe scan against all YAML candidates in scan_candidates/.
 ##
 ## Iterates every YAML file under tests/unit-config/scan_candidates/, converts
 ## each to CLI arguments via a small Python snippet, and calls
-## ``mirror-dedupe --scan`` to perform live HTTP discovery against the upstream
+## ``mirror-dedupe scan`` to perform live HTTP discovery against the upstream
 ## URL defined in the YAML.  Results are written to ``<outdir>/<name>.conf``
 ## and ``<outdir>/<name>.json``.
 ##
@@ -109,7 +109,7 @@ CONF
   fi
 fi
 
-SCAN_CMD="${SCAN_CMD:-mirror-dedupe --scan}"
+MIRROR_CMD="${MIRROR_CMD:-mirror-dedupe}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 CANDIDATES_DIR="${SCRIPT_DIR}/scan_candidates"
@@ -128,8 +128,8 @@ for u in data.get('upstreams', []):
     args.extend(['-U', u])
 no_filter = '${no_filter}' == 'true'
 if not no_filter:
-    for r in data.get('releases', []):
-        args.extend(['--release', r])
+    for r in data.get('distributions', []):
+        args.extend(['--distribution', r])
     comps = data.get('components')
     if comps:
         args.extend(['--components', ' '.join(comps)])
@@ -164,7 +164,7 @@ for yaml_file in "${CANDIDATES_DIR}"/*.yaml; do
     scan_flags+=(--emit-json)
   fi
 
-  if ! ${SCAN_CMD} --config-dir "${CONFIG_DIR}" --out "${OUTDIR}" ${scan_flags[@]+"${scan_flags[@]}"} ${extra_args}; then
+  if ! ${MIRROR_CMD} --config-dir "${CONFIG_DIR}" scan --out "${OUTDIR}" ${scan_flags[@]+"${scan_flags[@]}"} ${extra_args}; then
     echo "ERROR: scan for ${name} failed (see above); continuing with next candidate" >&2
   fi
   echo "" >&2

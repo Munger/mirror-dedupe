@@ -64,30 +64,52 @@ class DistributionsParser:
         # --- 1. Explicit candidates (highest priority) -------------------
 
         if self._candidates:
+            from collections import Counter
+            from mirror_dedupe.schema.mdnode import MDNode as Node
+            from .release import strip_pgp_wrapper
             distributions = Schema.Distributions()
+            found: List[Tuple[str, str]] = []  # (path, anchor_fn)
             for path in self._candidates:
-                release_url = build_url(upstream, root, path, anchor)
-                log(f"  {path}: fetching Release")
-                from mirror_dedupe.schema.mdnode import MDNode as Node
+                suite_anchor = None
+                suite_bytes = None
 
-                text_bytes = Node.probe_url(release_url)
-                if text_bytes is None:
-                    continue
-                text = text_bytes.decode("utf-8", errors="replace")
-                if not text or not looks_like_release(text):
+                ir_bytes = Node.probe_url(build_url(upstream, root, path, "InRelease"))
+                if ir_bytes:
+                    stripped = strip_pgp_wrapper(ir_bytes.decode("utf-8", errors="replace"))
+                    if looks_like_release(stripped):
+                        suite_anchor = "InRelease"
+                        suite_bytes = ir_bytes
+
+                if suite_anchor is None:
+                    rel_bytes = Node.probe_url(build_url(upstream, root, path, "Release"))
+                    if rel_bytes and looks_like_release(rel_bytes.decode("utf-8", errors="replace")):
+                        suite_anchor = "Release"
+                        suite_bytes = rel_bytes
+
+                if not suite_anchor:
                     continue
 
-                dist = Distribution(
-                    url=release_url,
-                    upstream=upstream,
-                    name=path,
-                )
-                dist._cache = text_bytes
+                found.append((path, suite_anchor))
+                log(f"  {path}: fetching {suite_anchor}")
+                release_url = build_url(upstream, root, path, suite_anchor)
+                dist = Distribution(url=release_url, upstream=upstream, name=path)
+                dist._cache = suite_bytes
                 dist._repo = self.repo
                 distributions.append(dist)
 
+            anchor_counts: Counter = Counter(anchor_fn for _, anchor_fn in found)
+            mixed = len(anchor_counts) > 1
+            default_anchor = "InRelease" if mixed else (anchor_counts.most_common(1)[0][0] if anchor_counts else "Release")
             p = self.repo.setdefault("params", {})
             p["discovery_method"] = "explicit"
+            p["anchor_filename"] = default_anchor
+            if mixed:
+                p["suite_anchor_exceptions"] = {
+                    path: anchor_fn for path, anchor_fn in found
+                    if anchor_fn != default_anchor
+                }
+            else:
+                p.pop("suite_anchor_exceptions", None)
             p.setdefault("log_colour", "DEFAULT")
             p.setdefault("log_colour_bg", "NONE")
             return distributions
@@ -122,13 +144,13 @@ class DistributionsParser:
                 anchor=anchor,
             )
             if fallback:
-                log(f"[apt] codename fallback found: {', '.join(fallback)}")
-                upstream_results = [(name, upstream) for name in fallback]
+                log(f"[apt] codename fallback found: {', '.join(n for n, _ in fallback)}")
+                upstream_results = [(name, upstream, anchor_fn) for name, anchor_fn in fallback]
                 used_fallback = True
 
         if not upstream_results:
             log("[apt] no distributions discovered under /dists on any upstream; giving up", level="WARN")
-            return []
+            return Schema.Distributions()
 
         # --- Set discovery params for next scan -------------------------
 
@@ -142,19 +164,36 @@ class DistributionsParser:
         params.setdefault("log_colour", "DEFAULT")
         params.setdefault("log_colour_bg", "NONE")
 
+        # --- Derive repo-level anchor (majority) and per-suite exceptions --
+
+        from collections import Counter
+        anchor_counts: Counter = Counter(anchor_fn for _, _, anchor_fn in upstream_results)
+        mixed = len(anchor_counts) > 1
+        default_anchor = "InRelease" if mixed else (anchor_counts.most_common(1)[0][0] if anchor_counts else "Release")
+        params["anchor_filename"] = default_anchor
+
+        if mixed:
+            params["suite_anchor_exceptions"] = {
+                path: anchor_fn
+                for path, _, anchor_fn in upstream_results
+                if anchor_fn != default_anchor
+            }
+        else:
+            params.pop("suite_anchor_exceptions", None)
+
         # --- Build Distribution nodes -----------------------------------
 
         distributions = Schema.Distributions()
-        for path, eff_upstream in upstream_results:
-            release_url = build_url(eff_upstream, root, path, anchor)
+        from .discovery import _release_text_cache
+        for path, eff_upstream, anchor_fn in upstream_results:
+            release_url = build_url(eff_upstream, root, path, anchor_fn)
             dist = Distribution(
                 url=release_url,
                 upstream=eff_upstream,
                 name=path,
             )
-            # If the body was pre-fetched during BFS discovery, pre-cache it
-            # so Distribution.on_parse() does not re-fetch.
-            from .discovery import _release_text_cache
+            # Pre-cache the full upstream content (PGP wrapper intact) so
+            # Distribution.on_parse() does not re-fetch from upstream.
             cached_text = _release_text_cache.get((eff_upstream, root, path))
             if cached_text is not None:
                 dist._cache = cached_text.encode("utf-8")

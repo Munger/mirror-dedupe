@@ -424,7 +424,7 @@ class Repo(Node):
                 LOG("File Locked.", path=f"Retrying  {path}")
                 raise
             except Exception as e:
-                log(f"  {e}")
+                LOG("FAILED", "", f"{e}  {node.get('path', '')}")
                 raise
 
         futures: Dict[concurrent.futures.Future, Node] = {}
@@ -467,11 +467,11 @@ class Repo(Node):
                         if rv.stats is not None:
                             rv.stats.add_no_response()
                         _paused = True
-                        log(f"  {e}")
+                        LOG("FAILED", "", f"{e}  {node.get('path', '')}")
                     except Exception as e:
                         if rv.stats is not None:
                             rv.stats.add_error()
-                        log(f"  {e}")
+                        LOG("FAILED", "", f"{e}  {node.get('path', '')}")
                     continue
 
                 if len(futures) >= max_workers:
@@ -516,18 +516,21 @@ class Repo(Node):
                     _stall_cycles += 1
                 if _stall_cycles >= 2:
                     rv.abort_event.set()
+                    rv.stale_paths.clear()
                     raise RepoAbortError("upstream not responding")
                 _paused = False  # allow one retry round
+
+        if _aborted():
+            rv.stale_paths.clear()
 
     def _sweep_stale(self) -> int:
         ## @brief Delete pre-sync paths that were never declared as wanted.
         ##
-        ## ``Inventory.from_repos`` captures every file path in the repo
-        ## destination into ``rv.inv.stale_paths`` before the sync begins.
-        ## During the sync, ``Node.sync()`` removes each path from that set
-        ## the moment the node is processed - whether it ends up being an
-        ## inventory hit, a pool re-link, or a fresh download.  By the time
-        ## the work queue drains, ``stale_paths`` contains only files that
+        ## ``rv.stale_paths`` is populated at sync start from the pre-sync
+        ## path file built by ``build-repo-paths.sh``.  Each MDNode removes
+        ## its own path immediately on first contact - before any I/O - so
+        ## the set drains as nodes are processed.  By the time the work
+        ## queue drains, ``stale_paths`` contains only files that
         ## existed on disk but were never wanted: old package versions, dropped
         ## architectures, removed distributions.
         ##
@@ -543,14 +546,14 @@ class Repo(Node):
         from ..lib import fmt_size, LOG
 
         rv = self._repo_vars
-        if rv.inv is None or not rv.inv.stale_paths:
+        if not rv.stale_paths:
             return 0
 
         repo_root = rv.repo_root
         dest = self.get("dest", "")
         removed = 0
 
-        for rel in rv.inv.stale_paths:
+        for rel in rv.stale_paths:
             f = Path(repo_root) / rel
             try:
                 sz = f.stat().st_size
@@ -660,7 +663,10 @@ class Repo(Node):
             else cfg.check_gpg_signature
         )
 
-        params: Dict[str, Any] = {}
+        # Start with the params: block from the conf (anchor_filename,
+        # suite_anchor_exceptions, discovery_method, etc.) then overlay
+        # the structured top-level keys so they always win.
+        params: Dict[str, Any] = dict(mirror_cfg.get("params") or {})
         if distributions_cfg:
             params["suites"] = distributions_cfg
         expand = mirror_cfg.get("expand_distributions")
@@ -1099,15 +1105,18 @@ class Repos(NodeList[Repo]):
         # own inventory lazily from the tmpfs path file when its sync slot
         # opens (in _sync_one), so only max_concurrent_syncs inventories
         # are in memory at once rather than all of them simultaneously.
+        # Each repo gets a unique integer ID used as a bitmask index in the
+        # pool inventory's FileRecord.repo_mask for cross-repo dedup tracking.
         # Thread-safety: still in the coordinator thread; no concurrent
         # access to `self` or any individual repo node yet.
-        for repo in self:
+        for repo_id, repo in enumerate(self):
             repo._repo_vars = RepoVars(
                 pool_inv=pool_inv,
                 mirror_root=cfg.mirror_root,
                 repo_root=cfg.repo_root,
                 pool_root=cfg.pool_root,
                 connect_timeout=cfg.connect_timeout,
+                repo_id=repo_id,
             )
 
         t0 = time.monotonic()
@@ -1144,6 +1153,18 @@ class Repos(NodeList[Repo]):
 
             if _ABORT_SYNC:
                 os._exit(130)
+
+            # Query cross-repo deduplication from the pool inventory once all
+            # repos have finished.  Every FileRecord now has its ref_count and
+            # repo_mask fully populated, so query_deduped() gives the correct
+            # per-repo totals without any separate tracking table.
+            for repo in self:
+                rv = repo._repo_vars
+                if rv is not None and rv.stats is not None and rv.repo_id >= 0:
+                    count, total = pool_inv.count_repo_files(rv.repo_id)
+                    rv.stats.set_file_count(count, total)
+                    files, shared_total = pool_inv.query_deduped(rv.repo_id)
+                    rv.stats.set_deduped(files, shared_total)
 
             rss_mb = self._get_peak_rss_mb()
             for repo in self:
@@ -1193,10 +1214,10 @@ class Repos(NodeList[Repo]):
         ## sync slot opens - rather than upfront for all repos.  This bounds
         ## peak memory to ``max_concurrent_syncs`` inventories at once.
         ##
-        ## ``Inventory.from_path_file()`` opens the tmpfs path file written
-        ## by ``build-repo-paths.sh``, unlinks it immediately, and builds
-        ## ``stale_paths`` plus the hash index against the already-complete
-        ## pool inventory.
+        ## ``Inventory.load_repo_paths()`` opens the tmpfs path file written
+        ## by ``build-repo-paths.sh``, unlinks it immediately, sets repo
+        ## bits on pool FileRecords, and returns the stale-path set for
+        ## sweep detection.
         ##
         ## @param repo  The ``Repo`` instance to sync.
         ## @param cfg   Global ``Config`` singleton.
@@ -1243,14 +1264,15 @@ class Repos(NodeList[Repo]):
 
         try:
             with RepoLock(cfg.mirror_root, name):
-                # Inventory loaded inside the lock so it reflects current disk
-                # state at the moment this process owns the repo, not before.
-                rv.inv = Inventory.from_path_file(
-                    f"/tmp/mirror-dedupe/{dest_name}.paths",
-                    rv.pool_inv,
-                    dest_name,
-                    cfg.repo_root,
-                )
+                # Load the pre-sync path list inside the lock so it reflects
+                # disk state at the moment this process owns the repo.
+                # load_repo_paths() sets repo bits on pool FileRecords and
+                # returns the stale-path set for sweep detection.
+                if rv.pool_inv is not None:
+                    rv.stale_paths = rv.pool_inv.load_repo_paths(
+                        f"/tmp/mirror-dedupe/{dest_name}.paths",
+                        rv.repo_id,
+                    )
                 log(f"Syncing repo '{name}' to '{repo.get('dest', '')}'", level="INFO")
                 config = repo.get("params")
                 if config is None:

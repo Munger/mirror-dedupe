@@ -34,31 +34,26 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..lib.exceptions import ExceptionMsg
+from ..lib.gpg import verify_release, verify_inrelease
 from ..lib import fmt_size, LOG_LABEL_W, LOG
 from ..lib.http_download import HTTPFetch, HTTPDownload, HTTPGet
 from ..lib.subproc import kill_active_subprocesses
 from ..lib.log import log
 from ..lib.node_x import Node, NodeList, Serialisable, StreamMixin
+from ..inventory import FileRecord
 from ..repo_vars import RepoVars
 
 
 # ---------------------------------------------------------------------------
 # Pool helpers (module-level so they can be used by scripts and tests)
 # ---------------------------------------------------------------------------
-# The staging lock map, pool path builder, and hardlink installer are
+# The pool path builder, hardlink installer, and hash helper are
 # module-level rather than class methods so that external code (tests,
 # scripts/sync-hashes.sh, the pool-sweep coordinator) can use them
 # without instantiating a node.
-
-_staging_locks: dict[str, tuple[threading.Lock, int]] = {}
-## @brief Per-hash staging locks with refcounts.
-##
-## Maps each staging key (hash or URI-derived) to a ``(Lock, refcount)``
-## tuple so that concurrent threads downloading the same hash share one
-## lock, and the entry is pruned when the last thread releases it.
-
-_staging_locks_lock = threading.Lock()
-## @brief Protects mutations to ``_staging_locks``.
+#
+# Download coordination (formerly _staging_locks) is now handled by the
+# FileRecord.lock on each pool inventory entry — no separate lock map needed.
 
 
 def _pool_path(pool_root: str, hash_val: str) -> Path:
@@ -151,26 +146,29 @@ def _file_to_dest(
         os.link(str(src), str(dest))
 
 
-def _sync_link(pool_path: Path, dest: Path, rv: RepoVars, hash_val: str) -> int:
+def _sync_link(
+    pool_path: Path,
+    dest: Path,
+    rv: RepoVars,
+    record: Optional[FileRecord] = None,
+) -> None:
     ## @brief Hardlink a pool file into a repo destination directory.
     ##
     ## Creates the parent directory tree if needed, removes any existing
-    ## file at *dest*, links *pool_path* -> *dest*, and records the
-    ## mapping in the repo inventory so future lookups are fast.
+    ## file at *dest*, and links *pool_path* -> *dest*.  The pool inode is
+    ## already known from the FileRecord so no post-link stat is needed.
     ##
     ## @param pool_path  Existing file in the content-addressed pool.
     ## @param dest       Destination path under the repo root.
-    ## @param rv         ``RepoVars`` containing the repo inventory.
-    ## @param hash_val   SHA-256 hex digest of the content.
-    ## @return The inode number of the linked file.
+    ## @param rv         ``RepoVars`` for this repo.
+    ## @param record     Pool ``FileRecord`` to mark; None only when no
+    ##                   inventory is available.
 
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.unlink(missing_ok=True)
     os.link(pool_path, dest)
-    ino = dest.stat().st_ino
-    if rv.inv is not None:
-        rv.inv.add(hash_val, ino)
-    return ino
+    if record is not None and rv.repo_id >= 0:
+        record.mark_linked(rv.repo_id)
 
 
 # ============================================================================
@@ -558,7 +556,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         return None
 
     def sync(
-        self, *, config: Optional[Dict[str, Any]] = None
+        self, *, config: Optional[Dict[str, Any]] = None, check: Optional[str] = None
     ) -> List[Path]:
         ## @brief Synchronise this node's file from upstream into the
         ##        pool and repo.
@@ -614,8 +612,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         # the pre-sync stale set so that _sweep_stale() does not delete
         # a file we are about to create or confirm.  set.discard() is
         # GIL-atomic in CPython; no separate lock needed.
-        if rv.inv is not None:
-            rv.inv.stale_paths.discard(path_val)
+        rv.stale_paths.discard(path_val)
 
         dest = Path(rv.repo_root) / path_val
         hash_val = self.checksum
@@ -629,37 +626,46 @@ class MDNode(Node, StreamMixin, Serialisable):
         ) -> None:
             ## @brief Record one sync outcome to the repo-level SyncStats.
             if rv.stats is not None:
-                rv.stats.record(
-                    hit=hit,
-                    miss=miss,
-                    bytes_tx=bytes_tx,
-                    size=self.get("size", 0) or 0,
-                )
+                rv.stats.record(hit=hit, miss=miss, bytes_tx=bytes_tx)
 
         def _log_outcome(label: str, size: int = 0) -> None:
             ## @brief Emit a fixed-width outcome line to the sync log.
             LOG(label, fmt_size(size) if size else "", path_val)
 
-        def _promote(staging_file: str, hv: str, label: str) -> List[Path]:
+        def _promote(
+            staging_file: str, hv: str, label: str, record: FileRecord
+        ) -> List[Path]:
             ## @brief Atomically move a complete staging file into the pool
             ##        and hardlink it into the repo destination.
             ##
             ## Hash verification is the caller's responsibility — this function
             ## does not re-hash, because staging promotions are either verified
             ## by HTTPDownload or by an explicit _compute_hash check before the
-            ## call.  Passing hash_val is therefore intentionally omitted.
+            ## call.  Called while ``record.lock`` is held by the caller.
+            ##
+            ## For temp-keyed records (hash-less files such as Release), the
+            ## real hash is registered as a second lookup key after promotion
+            ## so future hash-based lookups resolve to the same FileRecord.
             ##
             ## @param staging_file  Path to the completed staging file.
             ## @param hv            SHA-256 hex digest of the file.
             ## @param label         Log label (``"Downloaded"`` or ``"Resumed"``).
+            ## @param record        Pool ``FileRecord`` to update in place.
             ## @return ``[dest]``
             pp = _pool_path(rv.pool_root, hv)
             _file_to_dest(Path(staging_file), pp, move=True)
-            ino = _sync_link(pp, dest, rv, hv)
-            sz = int(dest.stat().st_size)
+            ## Update the record before linking so any thread waiting on
+            ## record.lock sees in_pool=True as soon as the lock is released.
+            _pst = pp.stat()
+            ino = _pst.st_ino
+            sz = int(_pst.st_size)
+            record.inode = ino
+            record.size = sz
+            record.hash = hv
+            if rv.pool_inv is not None and record.temp:
+                rv.pool_inv.register(hv, record)
+            _sync_link(pp, dest, rv, record)
             self["size"] = sz
-            if rv.pool_inv is not None:
-                rv.pool_inv.add(hv, ino)
             _record(miss=1, bytes_tx=sz)
             _log_outcome(label, sz)
             return [dest]
@@ -667,26 +673,35 @@ class MDNode(Node, StreamMixin, Serialisable):
         # ---------------------------------------------------------
         # Phase 1 -- Inventory fast path (no disk I/O beyond link)
         # ---------------------------------------------------------
-        # Common case on subsequent syncs: both inventories are warm
-        # and the file is already on disk in the correct state.
+        # Common case on subsequent syncs: the pool FileRecord is warm and
+        # the file is already on disk in the correct state.
         if hash_val:
-            _inv_has = rv.inv is not None and rv.inv.has(hash_val)
-            _pool_has = rv.pool_inv is not None and rv.pool_inv.has(hash_val)
+            _record_p1 = rv.pool_inv.get_record(hash_val) if rv.pool_inv else None
+            _inv_has = (
+                _record_p1 is not None
+                and rv.repo_id >= 0
+                and bool(_record_p1.repo_mask & (1 << rv.repo_id))
+            )
+            _pool_has = _record_p1 is not None and _record_p1.in_pool
 
-            if _inv_has and dest.exists():
-                if _pool_has:
-                    # Both inventories confirm — nothing to do.
-                    _record(hit=1)
-                    _log_outcome("Unchanged", self.get("size") or 0)
-                    return [dest]
+            if _inv_has and _pool_has:
+                # Startup scan confirmed the file exists in both repo and pool.
+                # stale_paths.discard() already claimed it; skip the dest stat.
+                _record_p1.mark_linked(rv.repo_id)
+                _record(hit=1)
+                _log_outcome("Unchanged", self.get("size") or 0)
+                return [dest]
 
-                # Repo inventory hit but pool inventory missed.  The pool
-                # entry may have been deleted externally.  Check disk first;
-                # if the pool file is actually there, repair the inventory.
+            if _inv_has:
+
+                # Repo bit set but pool inode absent.  The pool entry may
+                # have been deleted externally.  Check disk and repair.
                 pool_path = _pool_path(rv.pool_root, hash_val)
                 if pool_path.exists():
+                    _pst = pool_path.stat()
                     if rv.pool_inv is not None:
-                        rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
+                        rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
+                    _record_p1.mark_linked(rv.repo_id)
                     _record(hit=1)
                     _log_outcome("Unchanged", self.get("size") or 0)
                     return [dest]
@@ -695,11 +710,11 @@ class MDNode(Node, StreamMixin, Serialisable):
                 # repo file's hash and back-link it into the pool to heal the
                 # damage without any network I/O.
                 _corrupt = False
+                pool_path = _pool_path(rv.pool_root, hash_val)
                 try:
                     _file_to_dest(dest, pool_path, hash_val=hash_val, move=False)
                 except FileExistsError:
-                    # Another thread back-linked the same hash concurrently —
-                    # pool entry is intact, nothing left to do.
+                    # Another thread back-linked concurrently — pool is intact.
                     pass
                 except ExceptionMsg:
                     # Hash mismatch: repo file is corrupt.  Remove it so the
@@ -707,17 +722,19 @@ class MDNode(Node, StreamMixin, Serialisable):
                     dest.unlink(missing_ok=True)
                     _corrupt = True
                 if not _corrupt and pool_path.exists():
+                    _pst = pool_path.stat()
                     if rv.pool_inv is not None:
-                        rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
+                        rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
+                    _record_p1.mark_linked(rv.repo_id)
                     _record(hit=1)
                     _log_outcome("Recovered", self.get("size") or 0)
                     return [dest]
                 # dest was corrupt — fall through to Phase 2 for re-download.
 
-            # Pool has it but the repo hardlink is absent (or inv was stale).
+            # Pool has it but the repo hardlink is absent (or bit was stale).
             if _pool_has:
                 pool_path = _pool_path(rv.pool_root, hash_val)
-                _sync_link(pool_path, dest, rv, hash_val)
+                _sync_link(pool_path, dest, rv, _record_p1)
                 _record(hit=1)
                 _log_outcome(
                     "Linked*" if _inv_has else "Linked",
@@ -726,41 +743,44 @@ class MDNode(Node, StreamMixin, Serialisable):
                 return [dest]
 
         # ---------------------------------------------------------
-        # Phase 2 -- Staging lock + fallbacks
+        # Phase 2 -- FileRecord lock + fallbacks
         # ---------------------------------------------------------
-        # Acquire a per-hash lock so concurrent threads downloading
-        # the same content race only once.  Increment the refcount
-        # before acquiring so the entry cannot be pruned by a
-        # concurrent decref between the get() and the acquisition.
+        # Acquire the per-content lock from the pool FileRecord so that
+        # concurrent threads downloading the same content race only once.
+        # inventory.get() returns a pre-locked record; the lock is held
+        # for the duration of the download and released in the finally block.
         staging_dir = Path(rv.pool_root) / "staging"
         staging_dir.mkdir(parents=True, exist_ok=True)
         staging_key = hash_val or hashlib.sha256(uri.encode()).hexdigest()
 
-        with _staging_locks_lock:
-            lock, refs = _staging_locks.get(staging_key, (threading.Lock(), 0))
-            _staging_locks[staging_key] = (lock, refs + 1)
-        if not lock.acquire(timeout=5):
-            with _staging_locks_lock:
-                lock, refs = _staging_locks[staging_key]
-                if refs == 1:
-                    del _staging_locks[staging_key]
-                else:
-                    _staging_locks[staging_key] = (lock, refs - 1)
-            from ..lib.exceptions import StagingLockTimeout
-            raise StagingLockTimeout()
+        if rv.pool_inv is not None:
+            record = rv.pool_inv.get(staging_key, is_temp=not bool(hash_val))
+        else:
+            record = FileRecord(temp=not bool(hash_val))
+            record.lock.acquire()
         try:
-            if hash_val:
-                # Double-checked locking: another thread may have
-                # completed this download while we waited for the lock.
-                _inv_has = rv.inv is not None and rv.inv.has(hash_val)
-                if _inv_has and dest.exists():
-                    _record(hit=1)
-                    _log_outcome("Unchanged", self.get("size") or 0)
-                    return [dest]
+            if not hash_val and record.inode:
+                # Temp-keyed file (e.g. Release): B acquired the lock after
+                # A already promoted the file.  A valid inode means the pool
+                # file exists; link to it directly without re-downloading.
+                pool_path = _pool_path(rv.pool_root, record.hash)
+                _sync_link(pool_path, dest, rv, record)
+                _record(hit=1)
+                _log_outcome("Linked", record.size)
+                return [dest]
 
-                if rv.pool_inv is not None and rv.pool_inv.has(hash_val):
+            if hash_val:
+                # Double-checked locking: another thread may have completed
+                # this download while we waited for the lock.
+                if record.in_pool:
                     pool_path = _pool_path(rv.pool_root, hash_val)
-                    _sync_link(pool_path, dest, rv, hash_val)
+                    _inv_has = bool(record.repo_mask & (1 << rv.repo_id)) if rv.repo_id >= 0 else False
+                    if _inv_has and dest.exists():
+                        record.mark_linked(rv.repo_id)
+                        _record(hit=1)
+                        _log_outcome("Unchanged", self.get("size") or 0)
+                        return [dest]
+                    _sync_link(pool_path, dest, rv, record)
                     _record(hit=1)
                     _log_outcome(
                         "Linked*" if _inv_has else "Linked",
@@ -768,28 +788,30 @@ class MDNode(Node, StreamMixin, Serialisable):
                     )
                     return [dest]
 
-                # Stat fallback: pool file exists on disk but was not
-                # indexed (e.g. after a manual restore or a concurrent
-                # write from another process).
+                # Stat fallback: pool file exists on disk but was not yet
+                # indexed (e.g. after a manual restore or a concurrent write
+                # that bypassed the inventory).
                 pool_path = _pool_path(rv.pool_root, hash_val)
                 if pool_path.exists():
+                    _pst = pool_path.stat()
+                    record.inode = _pst.st_ino
+                    record.size = _pst.st_size
+                    record.hash = hash_val
                     if rv.pool_inv is not None:
-                        rv.pool_inv.add(hash_val, pool_path.stat().st_ino)
-                    if (dest.exists()
-                            and dest.stat().st_ino == pool_path.stat().st_ino):
-                        if rv.inv is not None:
-                            rv.inv.add(hash_val, dest.stat().st_ino)
+                        rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
+                    if dest.exists() and dest.stat().st_ino == _pst.st_ino:
+                        record.mark_linked(rv.repo_id)
                         _record(hit=1)
                         _log_outcome("Unchanged*", self.get("size") or 0)
                         return [dest]
-                    _sync_link(pool_path, dest, rv, hash_val)
+                    _sync_link(pool_path, dest, rv, record)
                     _record(hit=1)
                     _log_outcome("Linked", self.get("size") or 0)
                     return [dest]
 
-                # Back-link recovery: neither inventory had the hash but the
-                # repo file exists on disk (e.g. inventories were rebuilt
-                # from scratch after a crash).  Verify and back-link.
+                # Back-link recovery: neither the inventory nor the FileRecord
+                # has the hash, but the repo file exists on disk (e.g.
+                # inventories rebuilt after a crash).  Verify and back-link.
                 if dest.exists():
                     _corrupt = False
                     try:
@@ -799,15 +821,16 @@ class MDNode(Node, StreamMixin, Serialisable):
                     except FileExistsError:
                         pass  # concurrent back-link by another thread
                     except ExceptionMsg:
-                        # Hash mismatch: dest is corrupt, download fresh.
                         dest.unlink(missing_ok=True)
                         _corrupt = True
                     if not _corrupt and pool_path.exists():
-                        ino = pool_path.stat().st_ino
+                        _pst = pool_path.stat()
+                        record.inode = _pst.st_ino
+                        record.size = _pst.st_size
+                        record.hash = hash_val
                         if rv.pool_inv is not None:
-                            rv.pool_inv.add(hash_val, ino)
-                        if rv.inv is not None:
-                            rv.inv.add(hash_val, ino)
+                            rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
+                        record.mark_linked(rv.repo_id)
                         _record(hit=1)
                         _log_outcome("Recovered", self.get("size") or 0)
                         return [dest]
@@ -815,35 +838,72 @@ class MDNode(Node, StreamMixin, Serialisable):
             # -------------------------------------------------
             # Phase 3 -- Staging promotion or fresh download
             # -------------------------------------------------
-            # If a complete staging file survives from a prior
-            # interrupted sync, promote it directly.  Partial files
-            # are left in place for curl to resume via -C -.
+            # If a complete staging file survives from a prior interrupted
+            # sync, promote it directly.  Partial files are left in place
+            # for curl to resume via -C -.
             tmp = str(staging_dir / staging_key)
             tmp_path = staging_dir / staging_key
             _partial = tmp_path.exists() and tmp_path.stat().st_size > 0
-            if hash_val and _partial:
-                if _compute_hash(tmp_path) == hash_val:
-                    return _promote(tmp, hash_val, "Resumed")
+            def _check_gpg() -> None:
+                if not (check and rv and rv.gpg_keyring_path):
+                    return
+                keyring = Path(rv.gpg_keyring_path)
+                label = self.get("path", "")
 
-            actual_hash = HTTPDownload(uri, tmp, expected_hash=hash_val)
-            # For nodes without a prior known hash (e.g. a Release file
-            # on first sync) the downloaded hash is now authoritative.
-            self["hash"] = actual_hash
-            hash_val = hash_val or actual_hash
-            return _promote(tmp, hash_val, "Resumed" if _partial else "Downloaded")
+                if check == 'gpg_inrelease':
+                    # InRelease is a clearsigned document — gpgv verifies it
+                    # directly from the staging file; no separate sig fetch needed.
+                    ok = verify_inrelease(Path(tmp), keyring,
+                                         connect_timeout=rv.connect_timeout,
+                                         label=label)
+                else:
+                    # Release: use Release.gpg from pool if already synced,
+                    # otherwise fetch it from upstream.
+                    path_val = self.get("path", "")
+                    local_sig = (
+                        Path(rv.pool_root) / (path_val + ".gpg")
+                        if rv.pool_root and path_val else None
+                    )
+                    sig_path = local_sig if (local_sig and local_sig.exists()) else None
+                    ok = verify_release(
+                        Path(tmp),
+                        uri + ".gpg",
+                        keyring,
+                        connect_timeout=rv.connect_timeout,
+                        inrelease_url=uri.rsplit("/", 1)[0] + "/InRelease",
+                        label=label,
+                        sig_path=sig_path,
+                    )
+
+                if not ok:
+                    if rv.stats is not None:
+                        rv.stats.add_gpg_failure()
+                    raise ExceptionMsg(
+                        0,
+                        f"GPG verification failed for {self.get('path', uri)} — "
+                        "repo may be compromised",
+                    )
+
+            try:
+                if hash_val and _partial:
+                    if _compute_hash(tmp_path) == hash_val:
+                        _check_gpg()
+                        return _promote(tmp, hash_val, "Resumed", record)
+
+                actual_hash = HTTPDownload(uri, tmp, expected_hash=hash_val)
+                # For nodes without a prior known hash (e.g. a Release file on
+                # first sync) the downloaded hash is now authoritative.
+                self["hash"] = actual_hash
+                hash_val = hash_val or actual_hash
+                _check_gpg()
+                return _promote(tmp, hash_val, "Resumed" if _partial else "Downloaded", record)
+            except ExceptionMsg:
+                if self.get("optional"):
+                    return []
+                raise
 
         finally:
-            lock.release()
-            # Decref and prune the per-hash lock entry.  Runs on every
-            # return (success) or raise (failure).  When refs reaches 0
-            # the entry is removed so _staging_locks does not grow
-            # unboundedly across a long-running sync.
-            with _staging_locks_lock:
-                lock, refs = _staging_locks[staging_key]
-                if refs == 1:
-                    del _staging_locks[staging_key]
-                else:
-                    _staging_locks[staging_key] = (lock, refs - 1)
+            record.lock.release()
 
 
     def abort(self) -> None:

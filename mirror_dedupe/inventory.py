@@ -1,24 +1,22 @@
 #/usr/bin/env python3
 ## @file inventory.py
 ##
-## @brief Thread-safe in-memory hash-to-inode inventory for mirror-dedupe.
+## @brief Master pool inventory with per-session repo tracking.
 ##
-## ``Inventory`` wraps a pair of ``dict``s (hash->inode, inode->hash) with an
-## internal ``threading.Lock`` so that every read and write is atomic.  The
-## class has no concept of paths, pool layout, or repo structure - it is
-## purely a bidirectional lookup table.
+## ``FileRecord`` is the canonical descriptor for a single piece of
+## content: pool inode, size, real hash, and which repos have the file
+## hardlinked this session.  It also owns the per-content download lock
+## that serialises concurrent staging promotions.
 ##
-## Two logical inventories exist at runtime:
+## ``Inventory`` wraps a ``Dict[str, FileRecord]`` (keyed by SHA-256
+## content hash, or by SHA-256(uri) for hash-less files before their
+## real hash is known) and a reverse inode→key map.  A single shared
+## instance built from the pool at startup is the authoritative
+## source of truth for content state during a sync run.
 ##
-## 1. **Pool inventory** - every file in the content-addressed pool,
-##    built once at startup via ``Inventory.from_pool(pool_root)``.
-## 2. **Per-repo inventory** - a subset of the pool whose inodes are
-##    hardlinked into a specific repo's directory tree, built by
-##    ``Inventory.from_repos()`` via reverse lookup against the pool
-##    inventory.
-##
-## The lock is **never exposed** to callers.  All thread safety is
-## internal.
+## Per-repo inventories are thin wrappers that carry only ``stale_paths``
+## (the pre-sync disk snapshot used for stale-file detection).  All
+## hash-based lookups go through the pool inventory's FileRecords.
 ##
 ## @copyright Copyright (c) 2026 Tim Hosking
 ## @see https://github.com/munger
@@ -28,138 +26,315 @@
 import os
 import threading
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from .lib.exceptions import ExceptionMsg
-from .lib.find import find_binary, find_stream
+from .lib.find import find_stream
+
+
+class FileRecord:
+    ## @brief Descriptor for one piece of content in the pool inventory.
+    ##
+    ## Shared across all repos within a sync session.  The primary lookup
+    ## key is the SHA-256 content hash; for files whose hash is not known
+    ## in advance (e.g. Release files) a URI-derived temporary key is used
+    ## (``temp=True``) and the real hash is set after the first download.
+    ##
+    ## Two locks serve distinct purposes:
+    ##
+    ## ``lock``        - serialises concurrent download and pool promotion.
+    ##                   Held for the duration of a download so that the
+    ##                   next thread to acquire it can check ``in_pool``
+    ##                   and skip its own download entirely.
+    ##
+    ## ``_stat_lock``  - guards brief concurrent updates to ``repo_mask``
+    ##                   and ``ref_count`` (e.g. simultaneous Phase-1 hits
+    ##                   on the same hash from different repo workers).
+
+    def __init__(self, inode: int = 0, size: int = 0, temp: bool = False) -> None:
+        ## @brief Initialise a FileRecord.
+        ## @param inode  Pool inode; 0 until the file is promoted to the pool.
+        ## @param size   File size in bytes; 0 until known.
+        ## @param temp   True if keyed by SHA-256(uri), not by content hash.
+        ## @return None
+        self.inode: int = inode          ## pool inode; 0 until promoted
+        self.size: int = size            ## file size in bytes; 0 until known
+        self.hash: Optional[str] = None  ## real content hash; None for temp records until promoted
+        self.temp: bool = temp           ## True when keyed by SHA-256(uri), not content hash
+        self.repo_mask: int = 0          ## bitmask: bit N set when repo N has this file
+        self.ref_count: int = 0          ## managed hardlinks confirmed or created this session
+        self.lock = threading.Lock()     ## download + promotion serialisation
+        self._stat_lock = threading.Lock()  ## repo_mask / ref_count mutation guard
+
+    @property
+    def in_pool(self) -> bool:
+        ## @brief True once the file has been promoted to the content-addressed pool.
+        ## @return bool
+        return self.inode > 0
+
+    def set_repo_bit(self, repo_id: int) -> None:
+        ## @brief Mark repo *repo_id* as having this file at session start.
+        ##
+        ## Called during the pre-sync inventory scan; does **not** increment
+        ## ``ref_count`` since that counter tracks only links confirmed or
+        ## established during the current sync run.
+        ##
+        ## @param repo_id  Session-scoped integer repo ID.
+        ## @return None
+        bit = 1 << repo_id
+        with self._stat_lock:
+            self.repo_mask |= bit
+
+    def mark_linked(self, repo_id: int) -> None:
+        ## @brief Record that repo *repo_id* confirmed or created a hardlink
+        ##        to this file during the current sync run.
+        ##
+        ## Sets the repo's bit in ``repo_mask`` (idempotent) and increments
+        ## ``ref_count`` so that ``query_deduped`` can identify shared files.
+        ##
+        ## @param repo_id  Session-scoped integer repo ID (must be >= 0).
+        ## @return None
+        bit = 1 << repo_id
+        with self._stat_lock:
+            self.repo_mask |= bit
+            self.ref_count += 1
 
 
 class Inventory:
-    ## @brief Thread-safe bidirectional ``{hash<->inode}`` lookup table.
+    ## @brief Master pool inventory: ``{key -> FileRecord}`` with a reverse
+    ##        inode-to-key index.
     ##
-    ## ``_dict`` maps SHA-256 hex (64-char string) -> inode (int).
-    ## ``_rev`` maps inode (int) -> SHA-256 hex (64-char string).
+    ## The pool inventory is built once from the content-addressed pool at
+    ## startup (``from_pool``), then updated in place as files are promoted
+    ## during sync.  Per-repo inventories share the same class but carry
+    ## only ``stale_paths`` — their ``_dict`` is always empty.
     ##
-    ## Both dicts are always updated under the same lock so they never
-    ## drift apart.  Because the from-scratch factories are called before
-    ## the object is shared, they can write directly to the private dicts
-    ## without acquiring the lock.
-
+    ## ``_lock`` protects structural changes to ``_dict`` and ``_rev``
+    ## (insertions and key registration).  FileRecord-level mutations use
+    ## the record's own locks, not the inventory lock.
 
     def __init__(self, id: str = "", path: str = "") -> None:
         ## @brief Initialise an empty inventory.
-        ## @param id    Unique identifier (e.g. ``"_pool_"``).
+        ## @param id    Unique identifier (e.g. ``"_pool_"`` or a dest name).
         ## @param path  Filesystem path this inventory was built from.
-        self._dict: Dict[str, int] = {}
-        self._rev: Dict[int, str] = {}
+        ## @return None
+        self._dict: Dict[str, FileRecord] = {}   ## key -> FileRecord
+        self._rev: Dict[int, str] = {}           ## inode -> lookup key
         self._lock = threading.Lock()
         self.id: str = id
         self.path: str = path
-        ## @brief Paths found on disk during the pre-sync ``from_repos`` scan.
+
+    # -- readers --------------------------------------------------------------
+
+    def has(self, key: str) -> bool:
+        ## @brief True if *key* maps to a pool-resident FileRecord (``inode > 0``).
         ##
-        ## Populated once by ``from_repos`` with every file path (relative to
-        ## ``repo_root``) present in this repo's destination directory before
-        ## the sync begins.  During sync, each node removes its own path via
-        ## ``Node.sync()`` as soon as it is declared wanted.  Whatever remains
-        ## when ``_sweep_stale`` runs is a file that exists on disk but was
-        ## never wanted - safe to delete.  Only meaningful on per-repo
-        ## inventories; the pool inventory leaves this empty.
-        self.stale_paths: set[str] = set()
-
-    # -- readers ----------------------------------------------------------
-
-    def has(self, hash: str) -> bool:
-        ## @brief Check whether *hash* is present in the inventory.
-        ## @param hash  SHA-256 hex string to look up.
-        ## @return ``True`` if the hash exists.
-        with self._lock:
-            return hash in self._dict
-
-    def get(self, hash: str) -> int | None:
-        ## @brief Return the inode for *hash*, or ``None``.
-        ## @param hash  SHA-256 hex string to look up.
-        ## @return The inode number, or ``None``.
-        with self._lock:
-            return self._dict.get(hash)
+        ## Lock-free: individual dict.get() is GIL-atomic.  Returns False for
+        ## records with ``inode == 0`` (download in progress).
+        ##
+        ## @param key  SHA-256 content hash or temp URI-hash.
+        ## @return bool
+        record = self._dict.get(key)
+        return record is not None and bool(record.inode)
 
     def get_hash(self, inode: int) -> str | None:
-        ## @brief Return the hash for *inode*, or ``None``.
+        ## @brief Return the lookup key for *inode*, or ``None``.
         ## @param inode  Filesystem inode number.
-        ## @return The SHA-256 hex string, or ``None``.
+        ## @return The lookup key string, or ``None``.
+        return self._rev.get(inode)
+
+    def get_record(self, key: str) -> Optional[FileRecord]:
+        ## @brief Return the ``FileRecord`` for *key*, or ``None``.
+        ##
+        ## Lock-free: dict.get() is GIL-atomic.  The returned record may be
+        ## mutated by other threads; callers that need a consistent snapshot
+        ## must acquire the record's own locks.
+        ##
+        ## @param key  SHA-256 content hash or temp URI-hash.
+        ## @return ``FileRecord`` or ``None``.
+        return self._dict.get(key)
+
+    def get(self, key: str, is_temp: bool = False, timeout: float = 5.0) -> FileRecord:
+        ## @brief Return a locked ``FileRecord`` for *key*, creating it if absent.
+        ##
+        ## Atomically gets or creates the record under the inventory lock, then
+        ## acquires the record lock before releasing the inventory lock.  If the
+        ## record lock is contended (another thread is mid-download), the
+        ## inventory lock is released first and this call blocks on the record
+        ## lock — so the inventory is never held for more than microseconds.
+        ##
+        ## The caller **must** release ``record.lock`` when done.
+        ##
+        ## @param key      SHA-256 content hash or URI-derived temp hash.
+        ## @param is_temp  True when *key* is URI-derived (hash-less files).
+        ## @param timeout  Seconds to wait for a contended record lock.
+        ## @return Locked ``FileRecord``; ``inode`` is 0 if not yet promoted.
+        ## @raises StagingLockTimeout  If the record lock is not acquired in time.
+        from .lib.exceptions import StagingLockTimeout
         with self._lock:
-            return self._rev.get(inode)
+            record = self._dict.get(key)
+            if record is None:
+                record = FileRecord(temp=is_temp)
+                self._dict[key] = record
+            if record.lock.acquire(blocking=False):
+                return record
+        # Record lock is held by a downloading thread; block outside the
+        # inventory lock so other inventory ops are not stalled.
+        if not record.lock.acquire(timeout=timeout):
+            raise StagingLockTimeout()
+        return record
 
     def keys(self) -> set:
-        ## @brief Return a snapshot of all hashes currently in the inventory.
-        ## @return A ``set`` of hash strings.
+        ## @brief Return a snapshot of all keys currently in the inventory.
+        ## @return A ``set`` of key strings.
         with self._lock:
             return set(self._dict.keys())
 
     def __len__(self) -> int:
         ## @brief Return the number of entries in the inventory.
-        ## @return The number of hash<->inode mappings.
+        ## @return The number of key→FileRecord mappings.
         with self._lock:
             return len(self._dict)
 
-    # -- writers ----------------------------------------------------------
+    # -- writers --------------------------------------------------------------
 
-    def add(self, hash: str, inode: int) -> None:
-        ## @brief Insert or update a single hash<->inode mapping.
-        ## @param hash   SHA-256 hex string.
-        ## @param inode  Filesystem inode number.
+    def add(self, key: str, inode: int, size: int = 0) -> None:
+        ## @brief Insert or update a key→FileRecord mapping.
+        ##
+        ## If no record exists for *key*, creates one.  If a record already
+        ## exists (from an in-progress download or an earlier pool scan),
+        ## updates ``inode`` and ``size`` in place without replacing the
+        ## object (preserving the existing lock and repo_mask).
+        ##
+        ## @param key    SHA-256 content hash (or temp URI-hash).
+        ## @param inode  Pool inode number.
+        ## @param size   File size in bytes (0 to leave unchanged).
         ## @return None
         with self._lock:
-            self._dict[hash] = inode
-            self._rev[inode] = hash
+            record = self._dict.get(key)
+            if record is None:
+                record = FileRecord(inode=inode, size=size)
+                record.hash = key
+                self._dict[key] = record
+            else:
+                if inode:
+                    record.inode = inode
+                if size:
+                    record.size = size
+            if inode:
+                self._rev[inode] = key
 
     def add_bulk(self, entries: Dict[str, int]) -> None:
-        ## @brief Insert or update multiple mappings atomically.
-        ## @param entries  Dict of ``{hash: inode}`` to add.
+        ## @brief Insert or update multiple key→inode mappings atomically.
+        ## @param entries  Dict of ``{key: inode}`` to add.
         ## @return None
         with self._lock:
-            self._dict.update(entries)
-            for h, ino in entries.items():
-                self._rev[ino] = h
+            for key, ino in entries.items():
+                record = self._dict.get(key)
+                if record is None:
+                    record = FileRecord(inode=ino)
+                    self._dict[key] = record
+                else:
+                    if ino:
+                        record.inode = ino
+                if ino:
+                    self._rev[ino] = key
 
-    # -- factories --------------------------------------------------------
+    def register(self, real_hash: str, record: FileRecord) -> None:
+        ## @brief Register *real_hash* as a second lookup key for *record*.
+        ##
+        ## Called after a temp-keyed (URI-hash) record is promoted to the
+        ## pool: the real content hash is inserted into the inventory so
+        ## future hash-based lookups find the same ``FileRecord`` as the
+        ## temp key.  The reverse inode→key index is updated to point at
+        ## the real hash so ``get_hash()`` returns the canonical value.
+        ##
+        ## @param real_hash  64-char SHA-256 content hash.
+        ## @param record     The ``FileRecord`` that was just promoted.
+        ## @return None
+        with self._lock:
+            if real_hash not in self._dict:
+                self._dict[real_hash] = record
+            if record.inode:
+                self._rev[record.inode] = real_hash
 
-    @staticmethod
-    def from_path_file(
-        path_file: str,
-        pool_inv: "Inventory",
-        dest_name: str,
-        repo_root: str,
-    ) -> "Inventory":
-        ## @brief Build a per-repo Inventory from a pre-sync path list file.
+    def count_repo_files(self, repo_id: int) -> tuple[int, int]:
+        ## @brief Count unique files belonging to *repo_id* in the pool.
         ##
-        ## Called lazily from ``_sync_one()`` when a repo's sync slot opens,
-        ## not upfront for all repos.  The path file is written by
-        ## ``build-repo-paths.sh`` during the startup find pass and lives
-        ## under ``/tmp/mirror-dedupe/<dest_name>.paths``.
+        ## Iterates all pool-resident FileRecords whose repo bit is set,
+        ## deduplicating by inode so temp+real-hash aliases are counted once.
         ##
-        ## The file is unlinked immediately after opening so it vanishes
-        ## even if this process subsequently crashes - the kernel keeps the
-        ## inode alive via the open file descriptor until it is closed.
-        ##
-        ## File format: null-delimited ``rel_path\0inode\0`` pairs, where
-        ## ``rel_path`` is relative to ``repo_root`` (includes the repo
-        ## prefix, e.g. ``postgresql/dists/focal/Release``).
-        ##
-        ## @param path_file   Path to the pre-sync paths file.
-        ## @param pool_inv    Complete pool inventory for inode-to-hash lookup.
-        ## @param dest_name   Repo dest directory name (used as inventory id).
-        ## @param repo_root   Root of the repository tree on disk.
-        ## @return A populated ``Inventory``.
+        ## @param repo_id  Session-scoped integer repo ID.
+        ## @return ``(file_count, total_bytes)`` of files in this repo.
+        bit = 1 << repo_id
+        files = 0
+        total = 0
+        seen_inodes: set[int] = set()
+        with self._lock:
+            for record in self._dict.values():
+                if not record.in_pool:
+                    continue
+                if not (record.repo_mask & bit) or record.ref_count == 0:
+                    continue
+                if record.inode in seen_inodes:
+                    continue
+                seen_inodes.add(record.inode)
+                files += 1
+                total += record.size
+        return files, total
 
-        inv = Inventory(id=dest_name, path=str(Path(repo_root) / dest_name))
+    def query_deduped(self, repo_id: int) -> tuple[int, int]:
+        ## @brief Count files in *repo_id* that are shared with at least one
+        ##        other repo this session.
+        ##
+        ## Iterates all FileRecords, using the pool inode to deduplicate
+        ## entries (a temp record and its real-hash alias share the same
+        ## inode and must be counted once).
+        ##
+        ## @param repo_id  Session-scoped integer repo ID.
+        ## @return ``(file_count, total_bytes)`` of shared files.
+        bit = 1 << repo_id
+        files = 0
+        total = 0
+        seen_inodes: set[int] = set()
+        with self._lock:
+            for record in self._dict.values():
+                if not record.in_pool:
+                    continue
+                if record.inode in seen_inodes:
+                    continue
+                seen_inodes.add(record.inode)
+                if (record.repo_mask & bit) and record.ref_count > 1:
+                    files += 1
+                    total += record.size
+        return files, total
+
+    # -- factories ------------------------------------------------------------
+
+    def load_repo_paths(self, path_file: str, repo_id: int = -1) -> set:
+        ## @brief Read a pre-sync repo path file, set repo bits, return stale paths.
+        ##
+        ## Called on the pool inventory instance.  Reads null-delimited
+        ## ``rel_path\0inode\0`` pairs written by ``build-repo-paths.sh``,
+        ## cross-references each inode against the pool to find its FileRecord,
+        ## and sets the repo's bit when *repo_id* is non-negative.  The
+        ## full set of relative paths is returned as the caller's stale-path
+        ## tracking set — entirely separate from the pool inventory itself.
+        ##
+        ## The path file is unlinked immediately after opening (the kernel
+        ## keeps the inode alive via the open fd until close).
+        ##
+        ## @param path_file  Path to the pre-sync paths file.
+        ## @param repo_id    Session-scoped integer repo ID; -1 to skip bit-setting.
+        ## @return ``set[str]`` of all repo-relative paths found on disk.
+
+        stale: set[str] = set()
 
         try:
             fd = os.open(path_file, os.O_RDONLY)
         except OSError:
-            return inv  ## path file absent - empty inventory, no stale sweep
+            return stale
 
-        ## Unlink while the fd is still open.  The file disappears from the
-        ## directory immediately; the kernel frees the inode when the fd closes.
         try:
             os.unlink(path_file)
         except OSError:
@@ -169,9 +344,8 @@ class Inventory:
             with os.fdopen(fd, "rb") as f:
                 data = f.read()
         except OSError:
-            return inv
+            return stale
 
-        ## Parse null-delimited pairs written by build-repo-paths.sh
         parts = data.split(b"\0")
         for i in range(0, len(parts) - 1, 2):
             rel = parts[i].decode()
@@ -180,30 +354,23 @@ class Inventory:
                 continue
             ino = int(ino_str)
 
-            ## Every path found on disk is a stale candidate until Node.sync()
-            ## discards it by declaring the path wanted.
-            inv.stale_paths.add(rel)
+            stale.add(rel)
 
-            ## Cross-reference against pool inventory to build hash index.
-            h = pool_inv.get_hash(ino)
-            if h is not None:
-                inv._dict[h] = ino
-                inv._rev[ino] = h
+            if repo_id >= 0:
+                key = self.get_hash(ino)
+                if key is not None:
+                    record = self.get_record(key)
+                    if record is not None:
+                        record.set_repo_bit(repo_id)
 
-        return inv
+        return stale
 
     @staticmethod
     def from_pool(pool_root: str) -> "Inventory":
-        ## @brief Build an inventory by scanning the content-addressed pool.
+        ## @brief Build the master pool inventory by scanning the pool on disk.
         ##
-        ## Streams ``find`` output via ``find_stream()`` so the process
-        ## never buffers more than one read chunk regardless of pool size.
-        ## The pool subdirectory structure is
-        ## ``by-hash/SHA256/{ab}/{cd}/{hash}``, so ``%f`` (filename) is
-        ## the SHA-256 hash and ``%i`` the inode.
-        ##
-        ## No lock is needed during construction - the inventory is not
-        ## shared before this method returns.
+        ## Streams ``find`` output using ``%f\0%i\0%s\0`` so filename (hash),
+        ## inode, and size are read in one pass with no extra ``stat()`` calls.
         ##
         ## @param pool_root  Root directory of the content-addressed pool.
         ## @return A populated ``Inventory`` (empty if the pool does not
@@ -214,74 +381,15 @@ class Inventory:
 
         inv = Inventory(id="_pool_", path=pool_root)
         try:
-            it = find_stream(str(pool_dir), r"%f\0%i\0")
-            for h, ino_str in zip(it, it):
+            it = find_stream(str(pool_dir), r"%f\0%i\0%s\0")
+            for h, ino_str, sz_str in zip(it, it, it):
                 ino = int(ino_str)
-                inv._dict[h] = ino
+                record = FileRecord(inode=ino, size=int(sz_str))
+                record.hash = h
+                inv._dict[h] = record
                 inv._rev[ino] = h
         except (ExceptionMsg, OSError):
             pass
 
         return inv
 
-    @staticmethod
-    def from_repos(
-        repo_root: str,
-        pool_inv: "Inventory",
-        managed_dests: set,
-    ) -> dict:
-        ## @brief Build per-repo inventories from a single ``find`` pass.
-        ##
-        ## Runs ``find`` on *repo_root* once, collecting every regular
-        ## file's relative path and inode.  Files whose first path
-        ## component matches a name in *managed_dests* are
-        ## cross-referenced against *pool_inv* via reverse (inode->hash)
-        ## lookup - if the inode maps to a known pool hash, the pair is
-        ## stored in that dest's ``Inventory``.
-        ##
-        ## Directories not in *managed_dests* are silently skipped.
-        ##
-        ## Lock-free during construction - none of the returned
-        ## inventories are shared until the caller distributes them.
-        ##
-        ## @param repo_root     Root of the repository tree.
-        ## @param pool_inv      Already-populated pool ``Inventory``.
-        ## @param managed_dests Set of directory names under *repo_root*
-        ##                      to scan (e.g. ``{"postgresql", "test"}``).
-        ## @return ``{dest_name: Inventory}`` - one entry per managed
-        ##         destination.
-        root = Path(repo_root)
-        if not root.is_dir():
-            return {}
-
-        result: dict = {
-            d: Inventory(id=d, path=str(root / d)) for d in managed_dests
-        }
-        if not result:
-            return result
-
-        try:
-            it = find_stream(str(root), r"%P\0%i\0", extra_args=["-xdev"])
-            for rel, ino_str in zip(it, it):
-                ino = int(ino_str)
-                dest_name = rel.split("/", 1)[0]
-
-                inv = result.get(dest_name)
-                if inv is None:
-                    continue
-
-                # Record every path we find - pool-linked or not.  Release,
-                # InRelease, Packages, and Sources files all land here even
-                # though they have no pool hash.  Node.sync() removes a path
-                # from this set the moment it is declared wanted, so anything
-                # left after the sync is stale and safe to delete.
-                inv.stale_paths.add(rel)
-
-                h = pool_inv.get_hash(ino)
-                if h is not None:
-                    inv._dict[h] = ino
-                    inv._rev[ino] = h
-        except (ExceptionMsg, OSError):
-            pass
-
-        return result

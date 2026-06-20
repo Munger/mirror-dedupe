@@ -16,10 +16,36 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from mirror_dedupe import schema as Schema
-from mirror_dedupe.lib.exceptions import ExceptionMsg, RepoAbortError
-from mirror_dedupe.lib.gpg import verify_release
+from mirror_dedupe.lib.exceptions import ExceptionMsg
 from mirror_dedupe.lib.html_helpers import build_url
 from .index import AptIndex
+
+
+def strip_pgp_wrapper(text: str) -> str:
+    ## @brief Strip a PGP cleartext signature envelope from *text*.
+    ##
+    ## Returns the raw Release body unchanged if *text* is not a
+    ## cleartext-signed InRelease file.  De-dash-escapes body lines
+    ## per RFC 4880 §7.1 (lines starting with ``"- "`` lose that prefix).
+    ##
+    ## @param text  Raw file content (InRelease or plain Release).
+    ## @return      Pure Release body text.
+
+    if not text.startswith("-----BEGIN PGP SIGNED MESSAGE-----"):
+        return text
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines) and lines[i].strip():
+        i += 1
+    i += 1
+    body: List[str] = []
+    while i < len(lines) and not lines[i].startswith("-----BEGIN PGP SIGNATURE-----"):
+        line = lines[i]
+        if line.startswith("- "):
+            line = line[2:]
+        body.append(line)
+        i += 1
+    return "\n".join(body)
 
 
 class Release(Schema.Release):
@@ -61,6 +87,7 @@ class Release(Schema.Release):
         upstream: str,
         suite: str,
         dest: str = "",
+        filename: str = "Release",
     ) -> None:
         ## @brief Construct an APT Release bound to a URL.
         ##
@@ -76,7 +103,7 @@ class Release(Schema.Release):
 
         pocket: str | None = None
         relative_dir = f"dists/{suite}"
-        path = f"{dest}/dists/{suite}/Release" if dest else f"dists/{suite}/Release"
+        path = f"{dest}/dists/{suite}/{filename}" if dest else f"dists/{suite}/{filename}"
         repo_type = "apt"
         kind = "release"
 
@@ -87,7 +114,7 @@ class Release(Schema.Release):
             path=path,
             repo_type=repo_type,
             kind=kind,
-            signature_extension=None,
+            signature_extension=".gpg",
             digest=None,
             uri=url,
         )
@@ -96,6 +123,7 @@ class Release(Schema.Release):
         self.upstream = upstream
         self.suite = suite
         self._dest = dest
+        self._filename = filename
 
     def _parse_hash_section(self, data: str, section: str) -> List[Dict[str, Any]]:
         ## @brief Parse a single hash section (``MD5Sum``, ``SHA1``, ``SHA256``)
@@ -160,6 +188,8 @@ class Release(Schema.Release):
             text = raw.read().decode("utf-8", errors="replace")
         finally:
             raw.close()
+
+        text = strip_pgp_wrapper(text)
 
         arch_filter: Optional[List[str]] = getattr(self, "_arch_filter", None)
         comp_filter: Optional[List[str]] = getattr(self, "_comp_filter", None)
@@ -281,51 +311,19 @@ class Release(Schema.Release):
         self.indices = indices
 
     def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
-        ## @brief Download the Release file then verify its GPG signature.
-        ##
-        ## Calls the base ``MDNode.sync()`` to download and hardlink the
-        ## Release file, then - if a keyring is available on ``_repo_vars``
-        ## - fetches ``Release.gpg`` and verifies the signature.
-        ##
-        ## On verification failure the repo is aborted immediately:
-        ## ``self.abort()`` kills all in-flight curl processes for this
-        ## repo and ``RepoAbortError`` is raised so the coordinator stops
-        ## submitting further work and skips the stale sweep.
+        ## @brief Download the Release file, verifying its GPG signature
+        ##        before accepting it into the pool.
         ##
         ## @param config  Optional config dict forwarded to base ``sync()``.
         ## @raises RepoAbortError  If GPG verification fails.
         ## @return Paths hardlinked into the repo (from base ``sync()``).
 
-        paths = super().sync(config=config)
-
         rv = self._repo_vars
-        if not (rv and rv.gpg_keyring_path):
-            return paths
-
-        release_path = Path(rv.repo_root) / self.get("path")
-        if not release_path.exists():
-            return paths
-
-        sig_url = self.url + ".gpg"
-        inrelease_url = self.url.rsplit("/", 1)[0] + "/InRelease"
-        ok = verify_release(
-            release_path,
-            sig_url,
-            Path(rv.gpg_keyring_path),
-            connect_timeout=rv.connect_timeout,
-            inrelease_url=inrelease_url,
-            label=f"{self.suite}/Release",
-        )
-        if not ok:
-            if rv.stats is not None:
-                rv.stats.add_gpg_failure()
-            self.abort()
-            raise RepoAbortError(
-                f"GPG verification failed for {self.suite}/Release - "
-                "repo is compromised, sync aborted"
-            )
-
-        return paths
+        if rv and rv.gpg_keyring_path:
+            check = 'gpg_inrelease' if self._filename == 'InRelease' else 'gpg'
+        else:
+            check = None
+        return super().sync(config=config, check=check)
 
     def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
         ## @brief Fetch the Release body and stream-parse into Index children.

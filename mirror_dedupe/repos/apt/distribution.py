@@ -22,9 +22,11 @@ class Distribution(Schema.Distribution):
     ##        release headers (components, architectures, fields) and hash sections
     ##        (MD5Sum, SHA1, SHA256), and populates metadata.
 
-    _children = ("release",)
+    _children = ("release", "release_gpg", "inrelease")
     ## @brief Base ``Node.parse()`` recurses into the child Release after
-    ##        ``on_parse()`` completes.
+    ##        ``on_parse()`` completes.  ``release_gpg`` and ``inrelease``
+    ##        are optional companion nodes that trail in DFS order so the
+    ##        LIFO sync stack processes them before ``release``.
 
     class Metadata(Schema.Distribution.Metadata):
         ## @brief APT-specific metadata for a distribution derived from a Release.
@@ -176,15 +178,8 @@ class Distribution(Schema.Distribution):
         return sections
 
     def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
-        ## @brief Populate the Distribution and create child Release.
-        ##
-        ## In scan mode, fetches the Release body via HTTP, parses headers
-        ## into ``self["metadata"]``, and creates a child Release node
-        ## with the body pre-cached.
-        ##
-        ## In sync mode, skips the HTTP fetch (the Release will fetch
-        ## through the pool when its own ``on_parse()`` runs) and creates
-        ## the child Release directly with the correct path and dest.
+        ## @brief Fetch the Release body via HTTP, parse headers into metadata,
+        ##        and create a child Release node with the body pre-cached.
         ##
         ## Architecture/component filters from the parent Repo are set on
         ## the child Release for index filtering.
@@ -193,22 +188,6 @@ class Distribution(Schema.Distribution):
         ## @return None
 
         repo = getattr(self, "_repo", None)
-
-        if self._repo_vars is not None and self._repo_vars.sync_mode:
-            # Sync mode: Release downloads through the pool - no fetch needed here
-            dest = repo.get("dest", "") if repo else ""
-            from .release import Release as AptRelease
-            self.release = AptRelease(
-                url=self.get("uri"),
-                upstream=self.upstream,
-                suite=self.name,
-                dest=dest,
-            )
-            self.release._repo_vars = self._repo_vars
-            if repo is not None:
-                self.release._arch_filter = getattr(repo, "_arch_filter", None)
-                self.release._comp_filter = getattr(repo, "_comp_filter", None)
-            return
 
         # Scan mode: fetch Release body via HTTP, parse headers, create Release
         try:
@@ -246,10 +225,13 @@ class Distribution(Schema.Distribution):
         # does not re-fetch it from upstream.
         from .release import Release as AptRelease
 
+        anchor_url = self.get("uri") or ""
+        anchor_fn = anchor_url.rsplit("/", 1)[-1] if "/" in anchor_url else "Release"
         self.release = AptRelease(
-            url=self.get("uri"),
+            url=anchor_url,
             upstream=self.upstream,
             suite=self.name,
+            filename=anchor_fn,
         )
         self.release._repo_vars = self._repo_vars
         self.release._cache = text_bytes

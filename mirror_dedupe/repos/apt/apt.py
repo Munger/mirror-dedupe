@@ -133,6 +133,8 @@ class Apt(Schema.Repo):
         p = self.params or {}
         self._arch_filter = p.get("architectures")
         self._comp_filter = p.get("components")
+        anchor_fn: str = p.get("anchor_filename") or "Release"
+        suite_anchor_exceptions: dict = p.get("suite_anchor_exceptions", {})
         suites: List[str] = p.get("suites", [])
         expand = p.get("expand_distributions", True)
         if expand:
@@ -151,24 +153,54 @@ class Apt(Schema.Repo):
         from .distribution import Distribution
         from .release import Release as AptRelease
         dest = self.get("dest", "")
+        base_uri = self.get("uri") or ""
         for suite_name in suites:
-            url = build_url(self.get("uri") or "", "dists", suite_name, "Release")
+            suite_dir = f"{dest}/dists/{suite_name}" if dest else f"dists/{suite_name}"
+            dir_url = build_url(base_uri, "dists", suite_name)
+            this_anchor = suite_anchor_exceptions.get(suite_name, anchor_fn)
+            anchor_url = f"{dir_url}/{this_anchor}"
+
             dist = Distribution(
-                url=url, upstream=self.get("uri") or "", name=suite_name,
+                url=anchor_url, upstream=base_uri, name=suite_name,
             )
             dist._repo = self
             dist._repo_vars = self._repo_vars
 
-            release = AptRelease(
-                url=url,
-                upstream=self.get("uri") or "",
+            anchor = AptRelease(
+                url=anchor_url,
+                upstream=base_uri,
                 suite=suite_name,
                 dest=dest,
+                filename=this_anchor,
             )
-            release._arch_filter = self._arch_filter
-            release._comp_filter = self._comp_filter
-            release._repo_vars = self._repo_vars
-            dist.release = release
+            anchor._arch_filter = self._arch_filter
+            anchor._comp_filter = self._comp_filter
+            anchor._repo_vars = self._repo_vars
+
+            # Assign anchor to the correct slot; companions go in the other slots.
+            if this_anchor == "InRelease":
+                dist.inrelease = anchor
+                dist.release = Schema.Node({
+                    "uri": f"{dir_url}/Release",
+                    "path": f"{suite_dir}/Release",
+                    "optional": True,
+                })
+                dist.release._repo_vars = self._repo_vars
+            else:
+                dist.release = anchor
+                dist.inrelease = Schema.Node({
+                    "uri": f"{dir_url}/InRelease",
+                    "path": f"{suite_dir}/InRelease",
+                    "optional": True,
+                })
+                dist.inrelease._repo_vars = self._repo_vars
+
+            dist.release_gpg = Schema.Node({
+                "uri": f"{dir_url}/Release.gpg",
+                "path": f"{suite_dir}/Release.gpg",
+                "optional": True,
+            })
+            dist.release_gpg._repo_vars = self._repo_vars
 
             self.distributions.append(dist)
             self.suites.append(Schema.Suite(name=suite_name))
