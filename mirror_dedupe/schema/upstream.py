@@ -11,7 +11,7 @@
 ## @par Licence: MIT
 
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .mdnode import MDNode as Node
 from ..lib.node_x import SerialisableNodeList as NodeList
@@ -46,7 +46,7 @@ class Upstream(Node):
         self,
         *,
         url: str,
-        metadata: "Upstream.Metadata" | None = None,
+        metadata: Optional["Upstream.Metadata"] = None,
     ) -> None:
         ## @brief Initialise an Upstream endpoint descriptor.
         ##

@@ -1,8 +1,11 @@
-mirror-dedupe (1.0.7-1) noble; urgency=medium
+mirror-dedupe (1.1.0-1) noble; urgency=medium
 
   * Fix packaging: include lib/ and repos/ subpackages in .deb
   * Switch pyproject.toml to setuptools auto-discovery
   * Fix NameError: quote all forward references in node_x.py and mdnode.py
+  * Fix TypeError: Optional[string forward ref] | None in distribution.py, upstream.py
+  * Gate PyPI publishing on build-deb CI success
+  * Add explicit module import verification to publish-pypi.yml
 
  -- Tim Hosking <tim@mungerware.com>  Sun, 26 Jul 2026 18:30:00 +1200
 

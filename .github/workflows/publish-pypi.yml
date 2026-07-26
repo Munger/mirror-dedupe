@@ -10,12 +10,15 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Build Debian Package"]
+    types:
+      - completed
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     
     steps:
     - uses: actions/checkout@v4
@@ -30,7 +33,18 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install build twine
+        pip install build twine PyYAML
+    
+    - name: Verify all modules import
+      run: |
+        python -c "
+        import pkgutil, importlib, mirror_dedupe
+        for _, name, _ in pkgutil.walk_packages(mirror_dedupe.__path__, mirror_dedupe.__name__ + '.'):
+            if name.endswith('.__main__'):
+                continue
+            importlib.import_module(name)
+        print('All modules imported successfully')
+        "
     
     - name: Build package
       run: python -m build
