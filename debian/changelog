@@ -1,3 +1,15 @@
+mirror-dedupe (1.0.1-1) noble; urgency=medium
+
+  * GPG verification for InRelease/Release files
+  * InRelease/anchor support with suite_anchor_exceptions
+  * New log_it tabular logging library
+  * CLI subcommand refactor; argcomplete support
+  * Python >=3.10 required
+  * 27 pre-configured repository definitions
+  * Updated systemd service command syntax
+
+ -- Tim Hosking <tim@mungerware.com>  Sat, 26 Jul 2026 14:00:00 +1200
+
 mirror-dedupe (1.0.0-1) noble; urgency=medium
 
   * Complete stream-architecture rewrite:
