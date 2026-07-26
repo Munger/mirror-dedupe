@@ -10,12 +10,15 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Build Debian Package"]
+    types:
+      - completed
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     
     steps:
     - uses: actions/checkout@v4
@@ -30,7 +33,52 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install build twine
+        pip install build twine PyYAML
+    
+    - name: Verify all modules import
+      run: |
+        python -c "
+        import mirror_dedupe
+        import mirror_dedupe.cli
+        import mirror_dedupe.config
+        import mirror_dedupe.deps
+        import mirror_dedupe.inventory
+        import mirror_dedupe.repo_vars
+        import mirror_dedupe.scan
+        import mirror_dedupe.stats
+        import mirror_dedupe.lib
+        import mirror_dedupe.lib.codenames
+        import mirror_dedupe.lib.datetimeutils
+        import mirror_dedupe.lib.exceptions
+        import mirror_dedupe.lib.fault_inject
+        import mirror_dedupe.lib.find
+        import mirror_dedupe.lib.gpg
+        import mirror_dedupe.lib.html_helpers
+        import mirror_dedupe.lib.http_download
+        import mirror_dedupe.lib.log
+        import mirror_dedupe.lib.node_x
+        import mirror_dedupe.lib.subproc
+        import mirror_dedupe.repos
+        import mirror_dedupe.repos.apt
+        import mirror_dedupe.repos.apt.apt
+        import mirror_dedupe.repos.apt.discovery
+        import mirror_dedupe.repos.apt.distribution
+        import mirror_dedupe.repos.apt.distributions
+        import mirror_dedupe.repos.apt.index
+        import mirror_dedupe.repos.apt.release
+        import mirror_dedupe.schema
+        import mirror_dedupe.schema.architecture
+        import mirror_dedupe.schema.component
+        import mirror_dedupe.schema.distribution
+        import mirror_dedupe.schema.index
+        import mirror_dedupe.schema.mdnode
+        import mirror_dedupe.schema.package
+        import mirror_dedupe.schema.release
+        import mirror_dedupe.schema.repo
+        import mirror_dedupe.schema.suite
+        import mirror_dedupe.schema.upstream
+        print('All modules imported successfully')
+        "
     
     - name: Build package
       run: python -m build
