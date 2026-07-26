@@ -443,7 +443,7 @@ class MDNode(Node, StreamMixin, Serialisable):
 
     def parse(
         self, *, config: Optional[Dict[str, Any]] = None
-    ) -> MDNode:
+    ) -> "MDNode":
         ## @brief Populate this node and recursively parse its children.
         ##
         ## Calls ``on_parse()`` to populate this node, then walks each
@@ -467,7 +467,7 @@ class MDNode(Node, StreamMixin, Serialisable):
 
     def recurse(
         self, *, config: Optional[Dict[str, Any]] = None
-    ) -> MDNode:
+    ) -> "MDNode":
         ## @brief Walk declared children and call ``parse()`` on each.
         ##
         ## Skips this node's ``on_parse()`` - use when the tree already

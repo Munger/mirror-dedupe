@@ -1,10 +1,10 @@
-mirror-dedupe (1.0.3-1) noble; urgency=medium
+mirror-dedupe (1.0.7-1) noble; urgency=medium
 
   * Fix packaging: include lib/ and repos/ subpackages in .deb
   * Switch pyproject.toml to setuptools auto-discovery
-  * Fix NameError: quote forward references to Node/NodeList in node_x.py
+  * Fix NameError: quote all forward references in node_x.py and mdnode.py
 
- -- Tim Hosking <tim@mungerware.com>  Sun, 26 Jul 2026 17:50:00 +1200
+ -- Tim Hosking <tim@mungerware.com>  Sun, 26 Jul 2026 18:30:00 +1200
 
 mirror-dedupe (1.0.2-1) noble; urgency=medium
 
