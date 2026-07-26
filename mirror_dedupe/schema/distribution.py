@@ -11,7 +11,7 @@
 ## @par Licence: MIT
 
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from .mdnode import MDNode as Node
 from ..lib.node_x import SerialisableNodeList as NodeList
@@ -35,7 +35,7 @@ class Distribution(Node):
         components: Components,
         architectures: Architectures,
         release_path: str,
-        metadata: "Distribution.Metadata" | None = None,
+        metadata: Optional["Distribution.Metadata"] = None,
     ) -> None:
         ## @brief Initialise a Distribution descriptor.
         ##
