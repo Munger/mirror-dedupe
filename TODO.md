@@ -8,4 +8,5 @@
   Same applies to ports: use `rsync://rsync.ports.ubuntu.com/ubuntu-ports`.
   Config files `/etc/mirror-dedupe/repos-enabled/*.conf` have been updated
   but this may break if Canonical changes their DNS setup.
-- [ ] Document the full deployment flow from release to munger repo in one place.
+- [x] Document the full deployment flow from release to munger repo in one place.
+  See `PUBLISHING.md` — pipeline now includes `deploy-apt.yml` pushing `.deb` to `Munger/packages`.
