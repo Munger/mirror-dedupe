@@ -1,3 +1,9 @@
+mirror-dedupe (1.0.5-1) noble; urgency=medium
+
+  * Fix remaining unquoted forward reference (Node in merge() parameter)
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 26 Jul 2026 17:50:00 +1200
+
 mirror-dedupe (1.0.4-1) noble; urgency=medium
 
   * Fix NameError: quote forward references to Node/NodeList in node_x.py

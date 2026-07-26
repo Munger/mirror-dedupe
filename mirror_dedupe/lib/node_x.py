@@ -646,7 +646,7 @@ class Node(dict):
             recurse(val)
 
     def merge(
-        self, other: Dict[str, Any] | Node
+        self, other: Dict[str, Any] | "Node"
     ) -> "Node":
         ## @brief Merge another mapping or Node into this one recursively.
         ##
