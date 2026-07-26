@@ -1,3 +1,9 @@
+mirror-dedupe (1.0.4-1) noble; urgency=medium
+
+  * Fix NameError: quote forward references to Node/NodeList in node_x.py
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 26 Jul 2026 17:45:00 +1200
+
 mirror-dedupe (1.0.3-1) noble; urgency=medium
 
   * Fix packaging: include lib/ and repos/ subpackages in .deb

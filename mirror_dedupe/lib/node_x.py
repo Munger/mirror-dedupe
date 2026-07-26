@@ -595,8 +595,8 @@ class Node(dict):
 
     def _walk_child_nodes(
         self,
-        func: Callable[[Node], None],
-        list_func: Optional[Callable[[NodeList], None]] = None,
+        func: Callable[["Node"], None],
+        list_func: Optional[Callable[["NodeList"], None]] = None,
     ) -> None:
         ## @brief Apply *func* to every descendant Node and *list_func*
         ##        to every descendant NodeList.
@@ -647,7 +647,7 @@ class Node(dict):
 
     def merge(
         self, other: Dict[str, Any] | Node
-    ) -> Node:
+    ) -> "Node":
         ## @brief Merge another mapping or Node into this one recursively.
         ##
         ## Node fields are merged recursively; scalars are overwritten.
