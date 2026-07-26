@@ -1,0 +1,67 @@
+#
+# deploy-apt.yml : Ubuntu mirror synchronisation with global deduplication
+#
+# Copyright (c) 2025 Tim Hosking
+# Email: tim@mungerware.com
+# Website: https://github.com/munger
+# Licence: MIT
+#
+
+name: Deploy to APT Repository
+
+on:
+  workflow_run:
+    workflows: ["Build Debian Package"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deploy-apt:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download .deb from release
+      run: |
+        TAG="${{ github.event.workflow_run.head_branch }}"
+        ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+        DEB=$(echo "$ASSETS" | grep '^mirror-dedupe_.*\.deb$')
+        if [ -z "$DEB" ]; then
+          echo "No mirror-dedupe .deb found in release $TAG"
+          exit 1
+        fi
+        gh release download "$TAG" -p "$DEB"
+        echo "DEB_FILE=$DEB" >> "$GITHUB_ENV"
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Checkout packages repo
+      uses: actions/checkout@v4
+      with:
+        repository: Munger/packages
+        token: ${{ secrets.PACKAGES_REPO_TOKEN }}
+        path: packages
+
+    - name: Add .deb to apt repo
+      run: |
+        DEST="packages/pool/main/m/mirror-dedupe"
+        mkdir -p "$DEST"
+        cp "$DEB_FILE" "$DEST/"
+        echo "Deployed: $DEST/$DEB_FILE"
+
+    - name: Commit and push
+      run: |
+        cd packages
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add -A
+        git diff --cached --quiet && echo "No changes" && exit 0
+        git commit -m "Add mirror-dedupe $DEB_FILE"
+        git push
+      env:
+        DEB_FILE: ${{ env.DEB_FILE }}
