@@ -1,3 +1,10 @@
+mirror-dedupe (1.0.3-1) noble; urgency=medium
+
+  * Fix packaging: include lib/ and repos/ subpackages in .deb
+  * Switch pyproject.toml to setuptools auto-discovery
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 26 Jul 2026 17:30:00 +1200
+
 mirror-dedupe (1.0.2-1) noble; urgency=medium
 
   * Reimplement exclude_packages / exclude_paths filtering (params block)
