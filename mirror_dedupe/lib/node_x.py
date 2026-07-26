@@ -595,8 +595,8 @@ class Node(dict):
 
     def _walk_child_nodes(
         self,
-        func: Callable[[Node], None],
-        list_func: Optional[Callable[[NodeList], None]] = None,
+        func: Callable[["Node"], None],
+        list_func: Optional[Callable[["NodeList"], None]] = None,
     ) -> None:
         ## @brief Apply *func* to every descendant Node and *list_func*
         ##        to every descendant NodeList.
@@ -646,8 +646,8 @@ class Node(dict):
             recurse(val)
 
     def merge(
-        self, other: Dict[str, Any] | Node
-    ) -> Node:
+        self, other: Dict[str, Any] | "Node"
+    ) -> "Node":
         ## @brief Merge another mapping or Node into this one recursively.
         ##
         ## Node fields are merged recursively; scalars are overwritten.
@@ -670,7 +670,7 @@ class Node(dict):
                 f"got {type(other).__name__}."
             ) from exc
 
-        deferred: List[tuple[Node, Node]] = []
+        deferred: "List[tuple[Node, Node]]" = []
 
         with self._write_guard():
             with self._lock:
@@ -691,7 +691,7 @@ class Node(dict):
 
         return self
 
-    def _tree_iter(self) -> Iterable[Node]:
+    def _tree_iter(self) -> "Iterable[Node]":
         ## @brief Depth-first generator over this node and its children.
         ##
         ## Walks all attributes named in ``_children`` recursively.
@@ -1277,7 +1277,7 @@ class SerialisableNodeList(NodeList[T], Generic[T]):
         cls,
         snapshots: Iterable[Any],
         item_type: type[T],
-    ) -> SerialisableNodeList[T]:
+    ) -> "SerialisableNodeList[T]":
         ## @brief Rebuild a ``SerialisableNodeList`` from a list of
         ##        element snapshots.
         ##
@@ -1290,7 +1290,7 @@ class SerialisableNodeList(NodeList[T], Generic[T]):
         ##                   element as.
         ## @return A reconstructed ``SerialisableNodeList``.
 
-        lst: SerialisableNodeList[T] = cls()
+        lst: "SerialisableNodeList[T]" = cls()
         restore_func = getattr(item_type, "restore", None)
         for snap in snapshots:
             if isinstance(snap, item_type):
@@ -1360,7 +1360,7 @@ class NodeTransaction:
         self._nodes = sorted(unique, key=id)
         self._guards: List[Any] = []
 
-    def __enter__(self) -> NodeTransaction:
+    def __enter__(self) -> "NodeTransaction":
         ## @brief Acquire all write guards and locks in sorted order.
         ##
         ## For each node, ``_write_guard`` is entered before ``_lock``
