@@ -12,6 +12,7 @@
 ## @par Licence: MIT
 
 
+from fnmatch import fnmatch
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
@@ -50,6 +51,8 @@ class AptIndex(Schema.Index):
         dest = self._dest
         uri = self.get("uri", "")
         base = uri.split("/dists/", 1)[0] if "/dists/" in uri else ""
+        excl_pkgs = getattr(self, "_exclude_packages", None)
+        excl_paths = getattr(self, "_exclude_paths", None)
 
         def _generate():
             ## @brief True generator: yield one Package per parsed stanza.
@@ -88,6 +91,13 @@ class AptIndex(Schema.Index):
                             filename = filename[2:]
                         pkg_uri = f"{base.rstrip('/')}/{quote(filename, safe='/')}" if base else ""
                         pkg_path = f"{dest}/{filename}" if dest else filename
+                        pkg_name = stanza.get("Package", "")
+                        if excl_pkgs and any(fnmatch(pkg_name, p) for p in excl_pkgs):
+                            stanza_lines = []
+                            continue
+                        if excl_paths and any(fnmatch(pkg_path, p) for p in excl_paths):
+                            stanza_lines = []
+                            continue
                         pkg = Package(
                             path=pkg_path,
                             hash=sha256_val,
@@ -120,6 +130,11 @@ class AptIndex(Schema.Index):
                         filename = filename[2:]
                     pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
                     pkg_path = f"{dest}/{filename}" if dest else filename
+                    pkg_name = stanza.get("Package", "")
+                    if excl_pkgs and any(fnmatch(pkg_name, p) for p in excl_pkgs):
+                        return
+                    if excl_paths and any(fnmatch(pkg_path, p) for p in excl_paths):
+                        return
                     pkg = Package(
                         path=pkg_path,
                         hash=sha256_val,

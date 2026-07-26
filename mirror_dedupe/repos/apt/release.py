@@ -193,6 +193,8 @@ class Release(Schema.Release):
 
         arch_filter: Optional[List[str]] = getattr(self, "_arch_filter", None)
         comp_filter: Optional[List[str]] = getattr(self, "_comp_filter", None)
+        exclude_packages: Optional[List[str]] = getattr(self, "_exclude_packages", None)
+        exclude_paths: Optional[List[str]] = getattr(self, "_exclude_paths", None)
         dest = self._dest
 
         # Collect all hash-section entries, excluding non-Packages/Sources
@@ -280,6 +282,8 @@ class Release(Schema.Release):
                 size=primary["size"],
             )
             primary_index._repo_vars = self._repo_vars
+            primary_index._exclude_packages = exclude_packages
+            primary_index._exclude_paths = exclude_paths
             indices.append(primary_index)
             yield primary_index
 
