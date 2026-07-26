@@ -57,7 +57,7 @@ debian/.debhelper/
 *.buildinfo
 *.changes
 
-# AI tooling (local only)
+# Local config
 AGENTS.md
 opencode.json
 .opencode/
