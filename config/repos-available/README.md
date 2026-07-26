@@ -45,6 +45,10 @@ params:
   # anchor_filename: InRelease           # override the default "Release" anchor per repo
   # suite_anchor_exceptions:             # per-suite anchor overrides for mixed InRelease/Release repos
   #   bionic/mongodb-org/4.0: Release
+  # exclude_packages:                    # skip packages matching glob patterns
+  #   - "*nightly*"
+  # exclude_paths:                       # skip files matching glob patterns
+  #   - "*/debug/*"
 ```
 
 ### Distribution Expansion
@@ -83,6 +87,24 @@ params:
   suite_anchor_exceptions:              # per-suite overrides where the default doesn't apply
     bionic/mongodb-org/4.0: Release
 ```
+
+### Package Filtering
+
+Use `exclude_packages` and `exclude_paths` in the `params` block to skip
+packages during sync.  Patterns use Python `fnmatch` syntax (shell-style
+wildcards):
+
+```yaml
+params:
+  exclude_packages:
+    - "*nightly*"           # skip any package with "nightly" in its name
+    - "*-dbg"               # skip debug symbol packages
+  exclude_paths:
+    - "*/debug/*"           # skip files under debug directories
+```
+
+Filtering is applied per-stanza when parsing `Packages`/`Sources` indices,
+so excluded packages never enter the download pipeline.
 
 ## Generating Configs
 

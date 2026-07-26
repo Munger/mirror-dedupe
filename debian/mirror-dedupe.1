@@ -1,4 +1,4 @@
-.TH MIRROR-DEDUPE 1 "June 2026" "mirror-dedupe 1.0.1" "User Commands"
+.TH MIRROR-DEDUPE 1 "July 2026" "mirror-dedupe 1.0.2" "User Commands"
 .SH NAME
 mirror-dedupe \- Ubuntu/Debian mirror synchronisation with global deduplication via hardlinks
 .SH SYNOPSIS
@@ -306,6 +306,14 @@ Optional per-repo parameter overrides:
 .TP
 .I discovery_method
 Upstream layout discovery method: "html_bfs" or "explicit".
+.TP
+.I exclude_packages
+List of glob patterns.  Packages whose \fBPackage:\fR field matches any
+pattern are skipped during sync (e.g. \fB["*nightly*"]\fR).
+.TP
+.I exclude_paths
+List of glob patterns.  Files whose pool path matches any pattern are
+skipped during sync.
 .TP
 .I log_colour / log_colour_bg
 Per-repo log colour overrides.

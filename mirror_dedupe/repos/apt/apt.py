@@ -87,6 +87,8 @@ class Apt(Schema.Repo):
         p = self.params or {}
         self._arch_filter = p.get("architectures")
         self._comp_filter = p.get("components")
+        self._exclude_packages = p.get("exclude_packages")
+        self._exclude_paths = p.get("exclude_paths")
 
         # After discovery, filter upstreams to only those that actually served
         # distributions.  This ensures generated configs only contain working
@@ -133,6 +135,8 @@ class Apt(Schema.Repo):
         p = self.params or {}
         self._arch_filter = p.get("architectures")
         self._comp_filter = p.get("components")
+        self._exclude_packages = p.get("exclude_packages")
+        self._exclude_paths = p.get("exclude_paths")
         anchor_fn: str = p.get("anchor_filename") or "Release"
         suite_anchor_exceptions: dict = p.get("suite_anchor_exceptions", {})
         suites: List[str] = p.get("suites", [])
@@ -175,6 +179,8 @@ class Apt(Schema.Repo):
             )
             anchor._arch_filter = self._arch_filter
             anchor._comp_filter = self._comp_filter
+            anchor._exclude_packages = self._exclude_packages
+            anchor._exclude_paths = self._exclude_paths
             anchor._repo_vars = self._repo_vars
 
             # Assign anchor to the correct slot; companions go in the other slots.

@@ -1,3 +1,10 @@
+mirror-dedupe (1.0.2-1) noble; urgency=medium
+
+  * Reimplement exclude_packages / exclude_paths filtering (params block)
+  * Fix expand_distributions default for mungerware.conf
+
+ -- Tim Hosking <tim@mungerware.com>  Sun, 26 Jul 2026 16:30:00 +1200
+
 mirror-dedupe (1.0.1-1) noble; urgency=medium
 
   * GPG verification for InRelease/Release files
