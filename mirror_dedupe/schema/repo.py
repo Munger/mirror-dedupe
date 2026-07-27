@@ -678,6 +678,12 @@ class Repo(Node):
         comps = mirror_cfg.get("components")
         if comps:
             params["components"] = comps if isinstance(comps, list) else [comps]
+        excl_pkgs = mirror_cfg.get("exclude_packages")
+        if excl_pkgs:
+            params["exclude_packages"] = excl_pkgs if isinstance(excl_pkgs, list) else [excl_pkgs]
+        excl_paths = mirror_cfg.get("exclude_paths")
+        if excl_paths:
+            params["exclude_paths"] = excl_paths if isinstance(excl_paths, list) else [excl_paths]
 
         if params:
             repo["params"] = params

@@ -214,9 +214,7 @@ class Config:
 
         if mask_arches is not None:
             for mirror in mirrors:
-                repo_arches = mirror.get('architectures')
-                if not repo_arches:
-                    continue
+                repo_arches = mirror.get('architectures') or mask_arches
                 effective = [a for a in repo_arches if a in mask_arches]
                 if effective:
                     mirror['architectures'] = effective
@@ -278,6 +276,7 @@ class Config:
     def config_dir(self) -> str:
         ## @brief Return the configuration directory.
         ## @return Absolute path to the config directory.
+        assert self._config_dir is not None
         return self._config_dir
 
     def __getitem__(self, key):
@@ -347,6 +346,7 @@ class Config:
 
         names: set[str] = set()
 
+        assert self._config_dir is not None
         # Repos-available config files
         repa = Path(self._config_dir) / "repos-available"
         if repa.exists():
