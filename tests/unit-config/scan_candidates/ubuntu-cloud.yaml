@@ -6,10 +6,11 @@ dest: ubuntu-cloud
 upstreams:
 - https://ubuntu-cloud.archive.canonical.com/ubuntu
 distributions:
-- noble-proposed/dalmation
+- noble-proposed/dalmatian
 - noble-proposed/epoxy
 - noble-proposed/flamingo
-- noble-updates/dalmation
+- noble-updates/dalmatian
 - noble-updates/epoxy
 - noble-updates/flamingo
-gpg_key_url: http://archive.ubuntu.com/ubuntu/project/ubuntu-archive-keyring.gpg
+gpg_key_url: file:///usr/share/keyrings/ubuntu-cloud-keyring.gpg
+gpg_key_path: /usr/share/keyrings/ubuntu-cloud-keyring.gpg

@@ -1,6 +1,9 @@
 config/mirror-dedupe.conf etc/mirror-dedupe/
 config/repos-available/*.conf etc/mirror-dedupe/repos-available/
 config/repos-available/README.md etc/mirror-dedupe/repos-available/
+scripts/build-repo-paths.sh usr/lib/python3/dist-packages/scripts/
+scripts/list-codenames.sh usr/lib/python3/dist-packages/scripts/
+scripts/sync-hashes.sh usr/lib/python3/dist-packages/scripts/
 systemd/mirror-dedupe.service lib/systemd/system/
 systemd/mirror-dedupe.timer lib/systemd/system/
 debian/mirror-dedupe.1 usr/share/man/man1/
