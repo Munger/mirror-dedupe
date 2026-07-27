@@ -1,3 +1,12 @@
+mirror-dedupe (1.1.1-1) noble; urgency=medium
+
+  * Gate SIGINFO registration on platform support (hasattr check)
+  * Fix GPG key URLs: ubuntu-cloud uses cloud-archive keyring, influxdb uses non-compat key
+  * Fix dalmatian spelling in ubuntu-cloud config (was "dalamation")
+  * Include scripts/ in .deb package (build-repo-paths.sh, list-codenames.sh, sync-hashes.sh)
+
+ -- Tim Hosking <tim@mungerware.com>  Mon, 27 Jul 2026 21:00:00 +1200
+
 mirror-dedupe (1.1.0-1) noble; urgency=medium
 
   * Fix packaging: include lib/ and repos/ subpackages in .deb

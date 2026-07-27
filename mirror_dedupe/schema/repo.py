@@ -1055,7 +1055,8 @@ class Repos(NodeList[Repo]):
         self.session_start = datetime.now(timezone.utc)
         self.session_ts = int(self.session_start.timestamp())
         original_sigint = signal.signal(signal.SIGINT, _sigint_handler)
-        faulthandler.register(signal.SIGINFO)
+        if hasattr(signal, "SIGINFO"):
+            faulthandler.register(signal.SIGINFO)
 
         # Enforce repo name uniqueness - names map to directories under
         # repo_root, so duplicates would cause two workers to fight over
