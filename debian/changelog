@@ -1,7 +1,9 @@
-mirror-dedupe (1.1.4-1) noble; urgency=medium
+mirror-dedupe (1.2.0-1) noble; urgency=medium
 
-  * Fix nginx install paths in debian/install (dh_install DEST semantics)
-  * Correct nginx assets install to avoid nested assets/assets/ directory
+  * Fix all ~54 LSP type errors across the project
+  * Fix deploy-apt.yml tag resolution race
+  * Promote test configs to config/ for extended coverage
+  * Bump version to 1.2.0
 
  -- Tim Hosking <tim@mungerware.com>  Tue, 28 Jul 2026 15:00:00 +1200
 
