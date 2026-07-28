@@ -510,7 +510,7 @@ def run() -> Tuple[int, int]:
     c = ChildNode()
     c.sub = gc
     p = ParentNode()
-    p.items = NodeList([c])
+    p["items"] = NodeList([c])
 
     visited = list(p._tree_iter())
     check(passed, failed, len(visited) == 3,

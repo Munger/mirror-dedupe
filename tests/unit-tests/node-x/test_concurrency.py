@@ -91,6 +91,7 @@ def run() -> Tuple[int, int]:
     # id()-sorted acquisition scales without issue.
 
     nodes = [Node({"i": i}) for i in range(50)]
+    total = 0
     with NodeTransaction(*nodes):
         total = sum(n["i"] for n in nodes)
     check(passed, failed, total == sum(range(50)),
@@ -104,6 +105,7 @@ def run() -> Tuple[int, int]:
 
     items = [Node({"x": i}) for i in range(5)]
     nl = NodeList(items)
+    total = 0
     with NodeTransaction(nl, items[0]):
         total = sum(n["x"] for n in nl)
     check(passed, failed, total == 10,
@@ -185,6 +187,7 @@ def run() -> Tuple[int, int]:
     tx_done: List[bool] = []
     reader_thread_obj = threading.Thread(target=tx_reader)
 
+    ran_inside = False
     with NodeTransaction(rw_tx):
         reader_thread_obj.start()
         time.sleep(0.05)
@@ -208,10 +211,10 @@ def run() -> Tuple[int, int]:
     # Writers block until all active reading() contexts have exited.
     # Normal writes outside reading() contexts proceed immediately.
 
-    class RWNode(ReadWriteMixin, Node):
+    class RWNode2(ReadWriteMixin, Node):
         pass
 
-    n = RWNode({"counter": 0})
+    n = RWNode2({"counter": 0})
     with n.reading():
         val = n["counter"]
     check(passed, failed, val == 0,

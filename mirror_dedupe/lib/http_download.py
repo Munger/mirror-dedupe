@@ -26,7 +26,7 @@
 import os
 import tempfile
 import time
-from typing import List
+from typing import List, cast
 
 from ..config import Config
 from .. import deps
@@ -338,7 +338,7 @@ def HTTPDownload(
         # Tool resolved by deps.check_dependencies() at startup.
         rc, out, _ = run_subprocess([*deps.HASH_TOOL, output_str])
         if rc == 0:
-            return out.decode("utf-8").split()[0]
+            return (out or b"").decode("utf-8").split()[0]
         raise ExceptionMsg(rc, "sha256sum failed")
 
     # -- retry loop ----------------------------------------------------------
@@ -421,7 +421,8 @@ def HTTPDownload(
         # Exit 28 (timeout or stall) gets its own exception type so
         # the sync coordinator can count consecutive upstream failures.
         if http_info:
-            raise HTTPException(_http_code)
+            rc = cast(int, _http_code)
+            raise HTTPException(rc)
         if rc == CurlException.TIMEOUT:
             raise HostNotRespondingError()
         raise CurlException(rc)

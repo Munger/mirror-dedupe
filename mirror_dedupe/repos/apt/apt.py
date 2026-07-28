@@ -12,7 +12,7 @@
 ## @par Licence: MIT
 
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 from fnmatch import fnmatch
 
 from mirror_dedupe import schema as Schema
@@ -55,7 +55,7 @@ class Apt(Schema.Repo):
         ## @param snapshot  Plain dict from an earlier ``snapshot()`` call.
         ## @return A reconstructed Apt instance.
 
-        return cls.from_snapshot(snapshot)
+        return cast("Apt", cls.from_snapshot(snapshot))
 
     def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
         ## @brief Discover distributions and populate suites.
@@ -197,19 +197,25 @@ class Apt(Schema.Repo):
             # Assign anchor to the correct slot; companions go in the other slots.
             if this_anchor == "InRelease":
                 dist.inrelease = anchor
-                dist.release = Schema.Node({
-                    "uri": f"{dir_url}/Release",
-                    "path": f"{suite_dir}/Release",
-                    "optional": True,
-                })
+                dist.release = AptRelease(
+                    url=f"{dir_url}/Release",
+                    upstream=base_uri,
+                    suite=suite_name,
+                    dest=dest,
+                    filename="Release",
+                )
+                dist.release["optional"] = True
                 dist.release._repo_vars = self._repo_vars
             else:
                 dist.release = anchor
-                dist.inrelease = Schema.Node({
-                    "uri": f"{dir_url}/InRelease",
-                    "path": f"{suite_dir}/InRelease",
-                    "optional": True,
-                })
+                dist.inrelease = AptRelease(
+                    url=f"{dir_url}/InRelease",
+                    upstream=base_uri,
+                    suite=suite_name,
+                    dest=dest,
+                    filename="InRelease",
+                )
+                dist.inrelease["optional"] = True
                 dist.inrelease._repo_vars = self._repo_vars
 
             dist.release_gpg = Schema.Node({

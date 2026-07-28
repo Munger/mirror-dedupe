@@ -31,7 +31,7 @@ import io
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, cast
 
 from ..lib.exceptions import ExceptionMsg
 from ..lib.gpg import verify_release, verify_inrelease
@@ -551,7 +551,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         self.sync(config=config)
         if self._repo_vars is not None:
             return (
-                Path(self._repo_vars.repo_root) / self.get("path")
+                Path(self._repo_vars.repo_root) / self.get("path", "")
             ).read_bytes()
         return None
 
@@ -677,70 +677,67 @@ class MDNode(Node, StreamMixin, Serialisable):
         # the file is already on disk in the correct state.
         if hash_val:
             _record_p1 = rv.pool_inv.get_record(hash_val) if rv.pool_inv else None
-            _inv_has = (
-                _record_p1 is not None
-                and rv.repo_id >= 0
-                and bool(_record_p1.repo_mask & (1 << rv.repo_id))
-            )
-            _pool_has = _record_p1 is not None and _record_p1.in_pool
+            if _record_p1 is not None:
+                _inv_has = rv.repo_id >= 0 and bool(_record_p1.repo_mask & (1 << rv.repo_id))
+                _pool_has = _record_p1.in_pool
 
-            if _inv_has and _pool_has:
-                # Startup scan confirmed the file exists in both repo and pool.
-                # stale_paths.discard() already claimed it; skip the dest stat.
-                _record_p1.mark_linked(rv.repo_id)
-                _record(hit=1)
-                _log_outcome("Unchanged", self.get("size") or 0)
-                return [dest]
-
-            if _inv_has:
-
-                # Repo bit set but pool inode absent.  The pool entry may
-                # have been deleted externally.  Check disk and repair.
-                pool_path = _pool_path(rv.pool_root, hash_val)
-                if pool_path.exists():
-                    _pst = pool_path.stat()
-                    if rv.pool_inv is not None:
-                        rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
+                if _inv_has and _pool_has:
+                    # Startup scan confirmed the file exists in both repo and pool.
+                    # stale_paths.discard() already claimed it; skip the dest stat.
                     _record_p1.mark_linked(rv.repo_id)
                     _record(hit=1)
                     _log_outcome("Unchanged", self.get("size") or 0)
                     return [dest]
 
-                # Pool file is gone but repo hardlink survives.  Verify the
-                # repo file's hash and back-link it into the pool to heal the
-                # damage without any network I/O.
-                _corrupt = False
-                pool_path = _pool_path(rv.pool_root, hash_val)
-                try:
-                    _file_to_dest(dest, pool_path, hash_val=hash_val, move=False)
-                except FileExistsError:
-                    # Another thread back-linked concurrently — pool is intact.
-                    pass
-                except ExceptionMsg:
-                    # Hash mismatch: repo file is corrupt.  Remove it so the
-                    # Phase 2 double-check does not return a stale "Unchanged".
-                    dest.unlink(missing_ok=True)
-                    _corrupt = True
-                if not _corrupt and pool_path.exists():
-                    _pst = pool_path.stat()
-                    if rv.pool_inv is not None:
-                        rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
-                    _record_p1.mark_linked(rv.repo_id)
-                    _record(hit=1)
-                    _log_outcome("Recovered", self.get("size") or 0)
-                    return [dest]
-                # dest was corrupt — fall through to Phase 2 for re-download.
+                if _inv_has:
 
-            # Pool has it but the repo hardlink is absent (or bit was stale).
-            if _pool_has:
-                pool_path = _pool_path(rv.pool_root, hash_val)
-                _sync_link(pool_path, dest, rv, _record_p1)
-                _record(hit=1)
-                _log_outcome(
-                    "Linked*" if _inv_has else "Linked",
-                    self.get("size") or 0,
-                )
-                return [dest]
+                    # Repo bit set but pool inode absent.  The pool entry may
+                    # have been deleted externally.  Check disk and repair.
+                    pool_path = _pool_path(rv.pool_root, hash_val)
+                    if pool_path.exists():
+                        _pst = pool_path.stat()
+                        if rv.pool_inv is not None:
+                            rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
+                        _record_p1.mark_linked(rv.repo_id)
+                        _record(hit=1)
+                        _log_outcome("Unchanged", self.get("size") or 0)
+                        return [dest]
+
+                    # Pool file is gone but repo hardlink survives.  Verify the
+                    # repo file's hash and back-link it into the pool to heal the
+                    # damage without any network I/O.
+                    _corrupt = False
+                    pool_path = _pool_path(rv.pool_root, hash_val)
+                    try:
+                        _file_to_dest(dest, pool_path, hash_val=hash_val, move=False)
+                    except FileExistsError:
+                        # Another thread back-linked concurrently — pool is intact.
+                        pass
+                    except ExceptionMsg:
+                        # Hash mismatch: repo file is corrupt.  Remove it so the
+                        # Phase 2 double-check does not return a stale "Unchanged".
+                        dest.unlink(missing_ok=True)
+                        _corrupt = True
+                    if not _corrupt and pool_path.exists():
+                        _pst = pool_path.stat()
+                        if rv.pool_inv is not None:
+                            rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
+                        _record_p1.mark_linked(rv.repo_id)
+                        _record(hit=1)
+                        _log_outcome("Recovered", self.get("size") or 0)
+                        return [dest]
+                    # dest was corrupt — fall through to Phase 2 for re-download.
+
+                # Pool has it but the repo hardlink is absent (or bit was stale).
+                if _pool_has:
+                    pool_path = _pool_path(rv.pool_root, hash_val)
+                    _sync_link(pool_path, dest, rv, _record_p1)
+                    _record(hit=1)
+                    _log_outcome(
+                        "Linked*" if _inv_has else "Linked",
+                        self.get("size") or 0,
+                    )
+                    return [dest]
 
         # ---------------------------------------------------------
         # Phase 2 -- FileRecord lock + fallbacks
@@ -763,7 +760,7 @@ class MDNode(Node, StreamMixin, Serialisable):
                 # Temp-keyed file (e.g. Release): B acquired the lock after
                 # A already promoted the file.  A valid inode means the pool
                 # file exists; link to it directly without re-downloading.
-                pool_path = _pool_path(rv.pool_root, record.hash)
+                pool_path = _pool_path(rv.pool_root, record.hash or "")
                 _sync_link(pool_path, dest, rv, record)
                 _record(hit=1)
                 _log_outcome("Linked", record.size)
@@ -905,6 +902,9 @@ class MDNode(Node, StreamMixin, Serialisable):
         finally:
             record.lock.release()
 
+
+    def _tree_iter(self) -> "Iterable[MDNode]":
+        yield from cast("Iterable[MDNode]", super()._tree_iter())
 
     def abort(self) -> None:
         ## @brief Signal an immediate abort of this repo's sync.

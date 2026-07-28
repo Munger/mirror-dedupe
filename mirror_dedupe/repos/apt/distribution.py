@@ -191,7 +191,8 @@ class Distribution(Schema.Distribution):
 
         # Scan mode: fetch Release body via HTTP, parse headers, create Release
         try:
-            text_bytes = self.fetch(uri=self.get("uri"), config=config)
+            uri: str = self.get("uri", "")
+            text_bytes = self.fetch(uri=uri, config=config)
         except ExceptionMsg:
             return
         if text_bytes is None:

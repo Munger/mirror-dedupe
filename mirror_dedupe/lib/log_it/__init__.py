@@ -25,7 +25,7 @@
 ## @par Licence: MIT
 
 
-from typing import TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 from . import _state
 from ._ansi    import fg_code, bg_code, build_code
@@ -52,8 +52,8 @@ __all__ = [
 
 
 def configure(
-    colour_source: object | None = None,
-    context_source: object | None = None,
+    colour_source: "ColourSource | None" = None,
+    context_source: "Callable[[], str | None] | None" = None,
     sinks: list | None = None,
     context_width: int = 16,
     prefix: str = "  ",

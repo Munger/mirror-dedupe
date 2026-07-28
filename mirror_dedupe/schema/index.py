@@ -114,7 +114,8 @@ class Index(Node):
         if rv is None or not rv.sync_mode:
             return self
         try:
-            data = self.fetch(uri=self.get("uri"), config=config)
+            uri: str = self.get("uri", "")
+            data = self.fetch(uri=uri, config=config)
         except ExceptionMsg:
             from ..lib.log import log
             log(f"  FAILED index {self.get('uri', 'unknown')}")

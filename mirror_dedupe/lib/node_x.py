@@ -107,9 +107,11 @@ from typing import (
     Iterator,
     List,
     Optional,
+    SupportsIndex,
     Tuple,
     Type,
     TypeVar,
+    cast,
 )
 
 T = TypeVar("T", bound="Node")
@@ -279,7 +281,7 @@ class Node(dict):
                     f"Node accepts at most 1 positional argument "
                     f"(a mapping), got {len(args)}."
                 )
-            initial = args[0]
+            initial = cast("Tuple[Any, ...]", args)[0]
             if isinstance(initial, dict):
                 for k, v in initial.items():
                     self[k] = v
@@ -463,7 +465,7 @@ class Node(dict):
                             f"Node.update() accepts at most 1 positional "
                             f"argument, got {len(args)}."
                         )
-                    other = args[0]
+                    other = cast("Tuple[Any, ...]", args)[0]
                     pairs: list = (
                         list(other.items()) if hasattr(other, "items")
                         else list(other)
@@ -646,7 +648,7 @@ class Node(dict):
             recurse(val)
 
     def merge(
-        self, other: Dict[str, Any] | "Node"
+        self, other: Any
     ) -> "Node":
         ## @brief Merge another mapping or Node into this one recursively.
         ##
@@ -735,6 +737,9 @@ class NodeList(list, Generic[T]):
     ##
     ## Like ``Node``, this class supports ``freeze``/``thaw`` with
     ## optional deep recursion into contained Node instances.
+
+    _lock: threading.RLock
+    _frozen: bool
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         ## @brief Initialise an empty list with RLock and frozen state.
@@ -871,7 +876,7 @@ class NodeList(list, Generic[T]):
                         )
                 super(NodeList, self).extend(items)
 
-    def insert(self, __index: int, __object: T) -> None:
+    def insert(self, __index: SupportsIndex, __object: T) -> None:
         ## @brief Insert a Node at a given index under lock.
         ## @param __index   The position to insert at.
         ## @param __object  The Node instance to insert.
@@ -888,7 +893,7 @@ class NodeList(list, Generic[T]):
                     )
                 super(NodeList, self).insert(__index, __object)
 
-    def pop(self, __index: int = -1) -> T:
+    def pop(self, __index: SupportsIndex = -1) -> T:
         ## @brief Remove and return the Node at *__index* under lock.
         ## @param __index  The index to pop (default -1, last element).
         ## @return The removed Node instance.
@@ -937,7 +942,7 @@ class NodeList(list, Generic[T]):
                 super(NodeList, self).sort(**kwargs)
 
     def __setitem__(
-        self, __key: int | slice, __value: T | Iterable[T]
+        self, __key: SupportsIndex | slice, __value: T | Iterable[T]
     ) -> None:
         ## @brief Set item at index or slice with type validation.
         ## @param __key    Index or slice.
@@ -966,7 +971,7 @@ class NodeList(list, Generic[T]):
                         )
                     super(NodeList, self).__setitem__(__key, __value)
 
-    def __delitem__(self, __key: int | slice) -> None:
+    def __delitem__(self, __key: SupportsIndex | slice) -> None:
         ## @brief Delete element at index or slice under lock.
         ## @param __key  Index or slice.
         ## @return None
@@ -1042,6 +1047,9 @@ class Serialisable:
     _list_fields: ClassVar[Dict[str, Tuple[Type[Any], Type[Any]]]] = {}
     ## @brief Mapping of field name -> (NodeList subclass, item Node
     ##        subclass) for restoring list-child attributes.
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
 
     def to_plain(self) -> Any:
         ## @brief Recursively convert this node tree to plain Python
@@ -1144,7 +1152,7 @@ class Serialisable:
         ## @return A new instance of ``cls``.
 
         instance = cls.__new__(cls)
-        dict.__init__(instance, payload)
+        dict.__init__(cast("Dict[str, Any]", instance), payload)
         object.__setattr__(instance, "_lock", threading.RLock())
         object.__setattr__(instance, "_frozen", False)
         if issubclass(cls, ReadWriteMixin):

@@ -17,9 +17,10 @@
 
 
 from datetime import datetime as _datetime, timezone as _timezone
+from typing import Optional
 
 
-def fmt_date(dt: _datetime = None) -> str:
+def fmt_date(dt: Optional[_datetime] = None) -> str:
     ## @brief Return an ISO date string like ``"2026-06-08"``.
     ##
     ## If *dt* is ``None``, the current UTC date is used.
@@ -32,7 +33,7 @@ def fmt_date(dt: _datetime = None) -> str:
     return dt.strftime("%Y-%m-%d")
 
 
-def fmt_isotimestamp(dt: _datetime = None) -> str:
+def fmt_isotimestamp(dt: Optional[_datetime] = None) -> str:
     ## @brief Return an ISO-8601 timestamp like ``"2026-06-08T13:47:04.123456+00:00"``.
     ##
     ## If *dt* is ``None``, the current UTC time is used.
@@ -46,7 +47,7 @@ def fmt_isotimestamp(dt: _datetime = None) -> str:
     return dt.isoformat()
 
 
-def fmt_compact_ts(dt: _datetime = None) -> str:
+def fmt_compact_ts(dt: Optional[_datetime] = None) -> str:
     ## @brief Return a compact timestamp safe for directory names.
     ##
     ## Format: ``20260608T215910`` - no colons, no spaces, no timezone.
@@ -60,7 +61,7 @@ def fmt_compact_ts(dt: _datetime = None) -> str:
     return dt.strftime("%Y%m%dT%H%M%S")
 
 
-def fmt_datetime(dt: _datetime = None) -> str:
+def fmt_datetime(dt: Optional[_datetime] = None) -> str:
     ## @brief Format a ``datetime`` as ``"YYYY-MM-DD HH:MM:SS"``.
     ##
     ## If *dt* is ``None``, the current UTC time is used.

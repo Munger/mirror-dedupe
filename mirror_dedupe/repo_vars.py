@@ -187,6 +187,9 @@ class RepoVars:
     sync_mode: bool = False
     stats: Optional[SyncStats] = None
     repo_id: int = -1                    ## session-scoped integer ID; -1 until assigned
+    skip_sweep: bool = False             ## set True when a primary index fails;
+                                         ## prevents _sweep_stale from deleting
+                                         ## packages whose index was never parsed
 
     def __post_init__(self) -> None:
         ## @brief Initialise fields that cannot use dataclass defaults.

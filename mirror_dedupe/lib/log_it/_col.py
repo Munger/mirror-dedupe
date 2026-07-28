@@ -7,6 +7,7 @@
 ## @par Licence: MIT
 
 
+from typing import Any, Callable, Optional
 from dataclasses import dataclass
 
 
@@ -41,8 +42,8 @@ class Col:
     align:  str        = "left"
     colour: str | None = None
     header: str | None = None
-    fmt:    object     = None
-    footer: object     = None
+    fmt:    "Optional[Callable[[Any], str]]" = None
+    footer: "Optional[Callable[[list], Any]]" = None
 
 
 class Coloured:
