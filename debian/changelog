@@ -1,3 +1,19 @@
+mirror-dedupe (1.1.2-1) noble; urgency=medium
+
+  * Add glob pattern support (fnmatch) for distributions: noble*, noble/*, */mongodb-org/7.0
+  * Remove expand_distributions: replaced by sync-time glob resolution via fnmatch
+  * Remove collapse_dists / collapse_distributions entirely
+  * Scan always writes full explicit distributions list (no collapse logic)
+  * YAML quoting for glob values starting with * ? [ { and other special chars
+  * Fix global architecture mask applied even when per-repo architectures absent
+  * Add Sources/Sources.gz/Sources.bz2 sync support (directory, checksums, files stanzas)
+  * Gate all [apt] debug logs behind --debug flag
+  * Fix 3-tuple unpacking in apt.py glob resolution (discovery returns 3-tuples)
+  * Fix type annotations in discovery.py (probe_fallback_suites return type)
+  * Remove stale collapse_distributions from man pages and config templates
+
+ -- Tim Hosking <tim@mungerware.com>  Tue, 28 Jul 2026 01:30:00 +1200
+
 mirror-dedupe (1.1.1-1) noble; urgency=medium
 
   * Gate SIGINFO registration on platform support (hasattr check)

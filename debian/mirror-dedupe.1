@@ -1,4 +1,4 @@
-.TH MIRROR-DEDUPE 1 "July 2026" "mirror-dedupe 1.1.1" "User Commands"
+.TH MIRROR-DEDUPE 1 "July 2026" "mirror-dedupe 1.1.2" "User Commands"
 .SH NAME
 mirror-dedupe \- Ubuntu/Debian mirror synchronisation with global deduplication via hardlinks
 .SH SYNOPSIS
@@ -224,10 +224,6 @@ Global architecture mask.  Only architectures present in both this list
 and each mirror's own list are synced.  "*" or "all" means passthrough.
 Default: "*".
 .TP
-.I collapse_distributions
-When true, collapse distribution directory names (e.g. "dists/stable"
-to "stable").  Default: false.
-.TP
 .I parallel_downloads
 Number of concurrent downloads per-repo.  Default: 10.
 .TP
@@ -282,17 +278,10 @@ List of repository components (e.g. main, universe, multiverse).
 If absent, all components from the Release file are used.
 .TP
 .I distributions
-List of releases/suites to mirror (e.g. noble, jammy).
-.TP
-.I expand_distributions
-Controls automatic pocket expansion at sync time.  When true (the
-default if the field is absent), a base distribution like "noble" is
-automatically expanded to include "noble-updates", "noble-security",
-"noble-backports", and "noble-proposed" \*(em so a single entry in
-\fBdistributions:\fR results in 5 suites being synced.  Expansion only
-applies to distributions that do not already contain a hyphen (e.g.
-"noble-pgdg" is left as-is).  Set to false to sync only the
-distributions listed, with no automatic expansion.
+List of releases/suites to mirror (e.g. noble, jammy).  Glob patterns
+are supported and resolved at sync time against what actually exists
+upstream: \fBnoble*\fR matches noble, noble-updates, noble-security,
+etc.; \fB*\fR matches everything.  You can mix globs and explicit names.
 .TP
 .I gpg_key_url
 URL to the repository's GPG signing key.

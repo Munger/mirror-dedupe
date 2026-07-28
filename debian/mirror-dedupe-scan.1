@@ -1,4 +1,4 @@
-.TH MIRROR-DEDUPE-SCAN 1 "July 2026" "mirror-dedupe 1.1.1" "User Commands"
+.TH MIRROR-DEDUPE-SCAN 1 "July 2026" "mirror-dedupe 1.1.2" "User Commands"
 .SH NAME
 mirror-dedupe-scan \- generate repository configuration for mirror-dedupe (invoked as \fBmirror-dedupe \-\-scan\fR)
 .SH SYNOPSIS
@@ -109,7 +109,7 @@ Parses architectures and components from each selected suite's
 \fBRelease\fR file.
 .IP \(bu 3
 Behaves as if \fB\-\-releases all\fR was specified — writes every
-discovered suite into the config with \fBexpand_distributions: false\fR.
+discovered suite into the config explicitly.
 .SH EXAMPLES
 .TP
 Scan Ubuntu noble:
