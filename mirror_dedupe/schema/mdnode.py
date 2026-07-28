@@ -682,11 +682,21 @@ class MDNode(Node, StreamMixin, Serialisable):
                 _pool_has = _record_p1.in_pool
 
                 if _inv_has and _pool_has:
-                    # Startup scan confirmed the file exists in both repo and pool.
-                    # stale_paths.discard() already claimed it; skip the dest stat.
-                    _record_p1.mark_linked(rv.repo_id)
+                    if dest.exists():
+                        # Startup scan confirmed the file exists in both repo
+                        # and pool.  stale_paths.discard() already claimed it;
+                        # skip the dest stat.
+                        _record_p1.mark_linked(rv.repo_id)
+                        _record(hit=1)
+                        _log_outcome("Unchanged", self.get("size") or 0)
+                        return [dest]
+                    # Hash is known but this specific dest path was never
+                    # linked (e.g. multiple paths share the same empty content
+                    # — the per-hash repo bit is set by another path).
+                    pool_path = _pool_path(rv.pool_root, hash_val)
+                    _sync_link(pool_path, dest, rv, _record_p1)
                     _record(hit=1)
-                    _log_outcome("Unchanged", self.get("size") or 0)
+                    _log_outcome("Linked", self.get("size") or 0)
                     return [dest]
 
                 if _inv_has:
