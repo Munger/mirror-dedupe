@@ -10,17 +10,19 @@
 name: Deploy to APT Repository
 
 on:
-  workflow_run:
-    workflows: ["Build Debian Package"]
-    types: [completed]
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      TAG:
+        description: 'Release tag to deploy (e.g. v1.2.0)'
+        required: true
 
 permissions:
   contents: write
 
 jobs:
   deploy-apt:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
@@ -28,15 +30,25 @@ jobs:
 
     - name: Download .deb from release
       run: |
-        TAG="${{ github.event.workflow_run.head_branch }}"
-        ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-        DEB=$(echo "$ASSETS" | grep '^mirror-dedupe_.*\.deb$')
-        if [ -z "$DEB" ]; then
-          echo "No mirror-dedupe .deb found in release $TAG"
+        TAG="${{ github.event.release.tag_name || github.event.inputs.TAG }}"
+        if [ -z "$TAG" ]; then
+          echo "No tag determined from event.  Use workflow_dispatch with TAG input."
           exit 1
         fi
-        gh release download "$TAG" -p "$DEB"
-        echo "DEB_FILE=$DEB" >> "$GITHUB_ENV"
+        for i in $(seq 30); do
+          ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null)
+          DEB=$(echo "$ASSETS" | grep '^mirror-dedupe_.*\.deb$')
+          if [ -n "$DEB" ]; then
+            echo "Found: $DEB"
+            gh release download "$TAG" -p "$DEB"
+            echo "DEB_FILE=$DEB" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          echo "Attempt $i — .deb not yet uploaded, waiting 10 s..."
+          sleep 10
+        done
+        echo "Timed out waiting for .deb in release $TAG"
+        exit 1
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
