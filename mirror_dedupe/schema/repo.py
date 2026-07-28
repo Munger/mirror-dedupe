@@ -27,7 +27,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Tuple, Type, TypeVar, cast
 from datetime import datetime, timezone
 
 import yaml
@@ -44,8 +44,13 @@ from ..schema.vars import Vars
 from ..schema.upstream import Upstream, Upstreams
 from ..lib.log import log
 from ..lib import LOG
+from ..lib.exceptions import ExceptionMsg
 from ..lib.subproc import kill_active_subprocesses_signal_safe
 from ..lib.http_download import HostNotRespondingError
+
+
+if TYPE_CHECKING:
+    from ..config import Config
 from .. import stats
 from ..inventory import Inventory
 from ..repo_vars import RepoVars, SyncStats
@@ -319,7 +324,7 @@ class Repo(Node):
         ## @param config  Optional configuration dict.
         ## @return This Repo after parsing (for chaining).
 
-        return super().parse(config=config)
+        return cast("Repo", super().parse(config=config))
 
     def analyse(self, *, config: Optional[Dict[str, Any]] = None) -> "Repo":
         ## @brief Discover upstream and populate the schema tree (scan mode).
@@ -333,7 +338,7 @@ class Repo(Node):
 
         return self.parse(config=config)
 
-    def sync(
+    def sync_tree(
         self,
         *,
         config: Optional[Dict[str, Any]] = None,
@@ -420,7 +425,7 @@ class Repo(Node):
                 raise
             except StagingLockTimeout as e:
                 n = e.context
-                path = os.path.basename(n.get("path", "?")) if n is not None else "?"
+                path = os.path.basename(n.get("path", "?")) if isinstance(n, Node) else "?"
                 LOG("File Locked.", path=f"Retrying  {path}")
                 raise
             except Exception as e:
@@ -471,6 +476,8 @@ class Repo(Node):
                     except Exception as e:
                         if rv.stats is not None:
                             rv.stats.add_error()
+                        if not node.get("optional"):
+                            rv.skip_sweep = True
                         LOG("FAILED", "", f"{e}  {node.get('path', '')}")
                     continue
 
@@ -506,6 +513,8 @@ class Repo(Node):
                 except Exception:
                     if rv.stats is not None:
                         rv.stats.add_error()
+                    if not node.get("optional"):
+                        rv.skip_sweep = True
 
             if _paused and not futures:
                 current_misses = rv.stats.pool_misses if rv.stats else 0
@@ -546,6 +555,13 @@ class Repo(Node):
         from ..lib import fmt_size, LOG
 
         rv = self._repo_vars
+        if rv.skip_sweep:
+            log(
+                "Sweep skipped — primary index failed this run; "
+                "packages may be incomplete.",
+                level="WARN",
+            )
+            return 0
         if not rv.stale_paths:
             return 0
 
@@ -1173,7 +1189,7 @@ class Repos(NodeList[Repo]):
             rss_mb = self._get_peak_rss_mb()
             for repo in self:
                 stats.write_ndjson(
-                    self.session_ts, repo,
+                    str(self.session_ts), repo,
                     mirror_root=repo._repo_vars.mirror_root if repo._repo_vars else "",
                     peak_rss_mb=rss_mb,
                 )
@@ -1286,7 +1302,7 @@ class Repos(NodeList[Repo]):
                     max_workers=workers,
                     initializer=self._make_worker_init(name),
                 ) as pool:
-                    repo.sync(pool=pool, config=config, workers=workers)
+                    repo.sync_tree(pool=pool, config=config, workers=workers)
         except TimeoutError:
             log(f"[{name}] Skipping - sync already running", level="WARN")
         except RepoAbortError as e:

@@ -114,5 +114,6 @@ def find_stream(
                 field, buf = buf.split(b"\0", 1)
                 yield field.decode()
     finally:
-        proc.stdout.close()
+        if proc.stdout:
+            proc.stdout.close()
         proc.wait()

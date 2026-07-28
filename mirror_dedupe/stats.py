@@ -13,7 +13,7 @@
 
 import json
 from pathlib import Path
-from typing import Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 
 def _ensure_dir(mirror_root: str, name: str) -> Path:
@@ -30,7 +30,7 @@ def _ensure_dir(mirror_root: str, name: str) -> Path:
 
 def write_ndjson(
     session_ts: str,
-    repo: object,
+    repo: Any,
     mirror_root: Optional[str] = None,
     peak_rss_mb: int = 0,
 ) -> None:
@@ -56,6 +56,7 @@ def write_ndjson(
         cfg = Config.load()
         mirror_root = cfg.mirror_root
 
+    assert mirror_root is not None
     stats_file = _ensure_dir(mirror_root, name)
 
     import time

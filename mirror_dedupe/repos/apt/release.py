@@ -197,25 +197,34 @@ class Release(Schema.Release):
         exclude_paths: Optional[List[str]] = getattr(self, "_exclude_paths", None)
         dest = self._dest
 
-        # Collect all hash-section entries, excluding non-Packages/Sources
+        # Collect all hash-section entries — currently supports
+        # Packages, Sources, Translation-*, and Commands-*.
         entries: List[Dict[str, Any]] = []
         for section in ("MD5Sum", "SHA1", "SHA256"):
             for entry in self._parse_hash_section(text, section):
                 entry_path = entry["path"]
-                if "Packages" not in entry_path and "Sources" not in entry_path:
+                if "Packages" in entry_path:
+                    entry["_kind"] = "packages"
+                elif "Sources" in entry_path:
+                    entry["_kind"] = "sources"
+                elif "Translation-" in entry_path:
+                    entry["_kind"] = "translations"
+                elif "Commands-" in entry_path:
+                    entry["_kind"] = "commands"
+                else:
                     continue
-                entry["_kind"] = "packages" if "Packages" in entry_path else "sources"
 
                 if arch_filter is not None or comp_filter is not None:
                     parts = entry_path.split("/")
                     if len(parts) >= 2:
                         comp = parts[0]
-                        arch_part = parts[1]
-                        arch = arch_part[7:] if arch_part.startswith("binary-") else arch_part
-                        if arch_filter is not None and arch not in arch_filter:
-                            continue
                         if comp_filter is not None and comp not in comp_filter:
                             continue
+                        if arch_filter is not None and entry["_kind"] in ("packages", "sources"):
+                            arch_part = parts[1]
+                            arch = arch_part[7:] if arch_part.startswith("binary-") else arch_part
+                            if arch not in arch_filter:
+                                continue
                 entries.append(entry)
 
         # Deduplicate by path - later sections (SHA256) overwrite MD5/SHA1
@@ -309,12 +318,18 @@ class Release(Schema.Release):
                     size=variant["size"],
                 )
                 v_index._repo_vars = self._repo_vars
+                v_index["optional"] = True
                 indices.append(v_index)
                 yield v_index
 
         self.indices = indices
 
-    def sync(self, *, config: Optional[Dict[str, Any]] = None) -> List[Path]:
+    def sync(
+        self,
+        *,
+        config: Optional[Dict[str, Any]] = None,
+        check: Optional[str] = None,
+    ) -> List[Path]:
         ## @brief Download the Release file, verifying its GPG signature
         ##        before accepting it into the pool.
         ##
@@ -324,10 +339,10 @@ class Release(Schema.Release):
 
         rv = self._repo_vars
         if rv and rv.gpg_keyring_path:
-            check = 'gpg_inrelease' if self._filename == 'InRelease' else 'gpg'
+            gpg_check = 'gpg_inrelease' if self._filename == 'InRelease' else 'gpg'
         else:
-            check = None
-        return super().sync(config=config, check=check)
+            gpg_check = None
+        return super().sync(config=config, check=gpg_check)
 
     def on_parse(self, *, config: Optional[Dict[str, Any]] = None) -> None:
         ## @brief Fetch the Release body and stream-parse into Index children.
@@ -339,7 +354,8 @@ class Release(Schema.Release):
         ## @param config  Optional config dict (suite/arch/component filters).
         ## @return None
 
-        text_bytes = self.fetch(uri=self.get("uri"), config=config)
+        uri: str = self.get("uri", "")
+        text_bytes = self.fetch(uri=uri, config=config)
         if text_bytes is None:
             raise ExceptionMsg(0,
                 f"No content for Release at {self.get('uri', 'unknown')}",

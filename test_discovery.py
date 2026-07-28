@@ -15,7 +15,6 @@ from typing import List
 from urllib.parse import urlparse
 
 from mirror_dedupe import schema as Schema
-from mirror_dedupe.schema.node import Node
 from mirror_dedupe.schema.repo import Repo, Repos
 from mirror_dedupe.repos.apt.apt import Apt
 
@@ -59,7 +58,6 @@ def test_http_discovery() -> None:
             # repo_type to "apt" so the Apt implementation is always used.
             repo_obj = Repo.from_url(
                 url,
-                ipv6_ok=global_ipv6_ok,
                 repo_type="apt",
             )
 

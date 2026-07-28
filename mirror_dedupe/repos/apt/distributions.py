@@ -12,7 +12,10 @@
 ## @par Licence: MIT
 
 
-from typing import List, Optional, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    from .apt import Apt
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.html_helpers import build_url
@@ -93,7 +96,8 @@ class DistributionsParser:
                 log(f"  {path}: fetching {suite_anchor}")
                 release_url = build_url(upstream, root, path, suite_anchor)
                 dist = Distribution(url=release_url, upstream=upstream, name=path)
-                dist._cache = suite_bytes
+                if suite_bytes is not None:
+                    dist._cache = suite_bytes
                 dist._repo = self.repo
                 distributions.append(dist)
 
@@ -116,7 +120,7 @@ class DistributionsParser:
 
         # --- 2/3. HTML BFS + child prefix resolution --------------------
 
-        upstream_results: List[Tuple[str, str]] = []
+        upstream_results: List[Tuple[str, str, str]] = []
         used_fallback = False
 
         if nobrowse:
@@ -196,7 +200,7 @@ class DistributionsParser:
             # Distribution.on_parse() does not re-fetch from upstream.
             cached_text = _release_text_cache.get((eff_upstream, root, path))
             if cached_text is not None:
-                dist._cache = cached_text.encode("utf-8")
+                dist._cache = str(cached_text).encode("utf-8")
             dist._repo = self.repo
             distributions.append(dist)
 

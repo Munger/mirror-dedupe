@@ -40,7 +40,7 @@ import os
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, ClassVar, Dict, List, Tuple
 
 _PKG_DIR = str(Path(__file__).resolve().parent)
 if _PKG_DIR not in sys.path:
@@ -293,8 +293,8 @@ def run() -> Tuple[int, int]:
     # keys that are not declared in _node_fields or _list_fields.
 
     class EmptyNode(Serialisable, Node):
-        _node_fields: Dict[str, Any] = {}
-        _list_fields: Dict[str, Any] = {}
+        _node_fields: ClassVar[Dict[str, Any]] = {}
+        _list_fields: ClassVar[Dict[str, Any]] = {}
 
     empty = EmptyNode()
     EmptyNode._restore_children(empty, None)
