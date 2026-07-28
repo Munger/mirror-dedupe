@@ -1,7 +1,14 @@
+mirror-dedupe (1.1.4-1) noble; urgency=medium
+
+  * Fix nginx install paths in debian/install (dh_install DEST semantics)
+  * Correct nginx assets install to avoid nested assets/assets/ directory
+
+ -- Tim Hosking <tim@mungerware.com>  Tue, 28 Jul 2026 15:00:00 +1200
+
 mirror-dedupe (1.1.3-1) noble; urgency=medium
 
   * Regenerate all repo configs with glob documentation and updated comments
-  * Include nginx configs in .deb package (debian/mirror-dedupe.install)
+  * Include nginx configs in .deb package (debian/install)
   * README: add apt install instructions from MungerWare repo
 
  -- Tim Hosking <tim@mungerware.com>  Tue, 28 Jul 2026 14:00:00 +1200
