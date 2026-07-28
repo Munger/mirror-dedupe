@@ -669,9 +669,6 @@ class Repo(Node):
         params: Dict[str, Any] = dict(mirror_cfg.get("params") or {})
         if distributions_cfg:
             params["suites"] = distributions_cfg
-        expand = mirror_cfg.get("expand_distributions")
-        if expand is not None:
-            params["expand_distributions"] = expand
         arches = mirror_cfg.get("architectures")
         if arches:
             params["architectures"] = arches if isinstance(arches, list) else [arches]

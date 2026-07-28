@@ -275,14 +275,6 @@ def main():
                    help='Force a repo type (e.g. "apt") for unusual layouts')
     p.add_argument('-G', '--gpg-key-url', dest='gpg_key_url', metavar='URL',
                    help='GPG key URL for Release file signature verification')
-    collapse_scan = p.add_mutually_exclusive_group()
-    collapse_scan.add_argument('--collapse-dists', dest='collapse_dists',
-                               action='store_true',
-                               help='Collapse discovered suites to base names')
-    collapse_scan.add_argument('--no-collapse-dists', dest='collapse_dists',
-                               action='store_false',
-                               help='Emit all discovered suite variants explicitly')
-    p.set_defaults(collapse_dists=None)
     p.add_argument('--emit-json', action='store_true', default=False,
                    help='Also write a JSON snapshot of the discovered structure')
     p.add_argument('--no-filter', action='store_true', default=False,
@@ -501,8 +493,6 @@ def main():
 
             scan_dest = args.dest or scan_name
 
-            global_collapse_dists = bool(cfg_main.collapse_distributions)
-
             def _normalize_arch_mask(value):
                 if isinstance(value, str):
                     v = value.strip()
@@ -524,11 +514,6 @@ def main():
                     None
                     if args.no_filter
                     else _normalize_arch_mask(cfg_main.architectures)
-                ),
-                collapse_dists=(
-                    args.collapse_dists
-                    if args.collapse_dists is not None
-                    else global_collapse_dists
                 ),
             )
 

@@ -16,7 +16,7 @@ Pool-based content-addressable APT repository mirror sync with global deduplicat
 - HTTPS-based sync with automatic upstream failover
 - Auto-discovery of distributions, architectures, and components via HTTP probing
 - Snapshot/restore system for safe repository migrations
-- Per-repo distribution expansion toggle (e.g. `noble` → `noble-updates`, `noble-security`, etc.)
+- Glob pattern support for distributions (e.g. `noble*`, `*/mongodb-org/7.0`)
 - GPG key URL tracking in per-repo configuration
 - Stale pool orphan detection and cleanup (`--sweep-pool`)
 
@@ -24,7 +24,21 @@ Pool-based content-addressable APT repository mirror sync with global deduplicat
 
 ### Option 1: Debian/Ubuntu Package (Recommended)
 
-Download the latest `.deb` package from [GitHub Releases](https://github.com/munger/mirror-dedupe/releases/latest):
+Install from the MungerWare apt repository:
+
+```bash
+curl -fsSL https://apt.mungerware.com/key.asc \
+  | sudo gpg --dearmor -o /usr/share/keyrings/mungerware-archive-keyring.gpg
+
+echo "deb [signed-by=/usr/share/keyrings/mungerware-archive-keyring.gpg] https://apt.mungerware.com noble main" \
+  | sudo tee /etc/apt/sources.list.d/mungerware.list
+
+sudo apt update && sudo apt install mirror-dedupe
+```
+
+This includes systemd integration, man pages, nginx configuration, and proper package management.
+
+Alternatively, download the latest `.deb` package from [GitHub Releases](https://github.com/munger/mirror-dedupe/releases/latest):
 
 ```bash
 curl -fsSL https://api.github.com/repos/munger/mirror-dedupe/releases/latest \
@@ -32,8 +46,6 @@ curl -fsSL https://api.github.com/repos/munger/mirror-dedupe/releases/latest \
   | xargs wget
 sudo dpkg -i mirror-dedupe_*.deb
 ```
-
-This includes systemd integration, man pages, and proper package management.
 
 ### Option 2: PyPI (All Linux Distributions)
 

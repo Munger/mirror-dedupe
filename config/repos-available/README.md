@@ -35,7 +35,6 @@ components:
   - main
 distributions:
   - noble
-expand_distributions: false
 
 params:
   discovery_method: html_bfs
@@ -49,29 +48,6 @@ params:
   #   - "*nightly*"
   # exclude_paths:                       # skip files matching glob patterns
   #   - "*/debug/*"
-```
-
-### Distribution Expansion
-
-The `expand_distributions` setting controls whether a base distribution is
-automatically expanded into its pocket variants during sync.
-
-When `true` (the default if the field is absent), a single entry like
-`noble` becomes five suites at sync time: `noble`, `noble-updates`,
-`noble-security`, `noble-backports`, and `noble-proposed`.  Expansion
-only applies to distributions that do not already contain a hyphen
-(e.g. `noble-pgdg` is left untouched).
-
-By default, `mirror-dedupe scan` omits this field and leaves expansion at
-its default (`true`) when it discovers a single base distribution (e.g.
-`noble`). It only writes `expand_distributions: false` explicitly when
-scanning every discovered suite without collapsing (`--no-collapse-dists`)
-or when the sole distribution is `stable`. To disable automatic expansion
-for a repo whose distributions already contain hyphens or don't map to
-Ubuntu-style pockets (e.g. `ubuntu-cloud`'s `noble-proposed/dalmatian`):
-
-```yaml
-expand_distributions: false
 ```
 
 ### Anchor File Overrides

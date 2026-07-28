@@ -54,94 +54,100 @@ class AptIndex(Schema.Index):
         excl_pkgs = getattr(self, "_exclude_packages", None)
         excl_paths = getattr(self, "_exclude_paths", None)
 
+        def _make_pkg(filename: str, sha256_val: str, size_int: int, pkg_name: str = ""):
+            ## @brief Construct a Package node with exclusion checks.
+            if filename.startswith("./"):
+                filename = filename[2:]
+            pkg_uri = f"{base.rstrip('/')}/{quote(filename, safe='/')}" if base else ""
+            pkg_path = f"{dest}/{filename}" if dest else filename
+            if excl_pkgs and any(fnmatch(pkg_name, p) for p in excl_pkgs):
+                return None
+            if excl_paths and any(fnmatch(pkg_path, p) for p in excl_paths):
+                return None
+            pkg = Package(
+                path=pkg_path,
+                hash=sha256_val,
+                size=size_int,
+                uri=pkg_uri,
+            )
+            pkg._repo_vars = self._repo_vars
+            return pkg
+
+        def _parse_stanza(stanza_lines: List[str]):
+            ## @brief Parse a stanza, yielding Package nodes.
+            ##
+            ## Handles two formats:
+            ## - Binary Packages: flat ``Filename``/``SHA256``/``Size`` fields → 1 Package.
+            ## - Source Packages: ``Directory`` + ``Checksums-Sha256`` multi-line
+            ##   block → 1 Package per source file (.dsc, .orig.tar.*, .debian.tar.xz).
+
+            stanza: Dict[str, str] = {}
+            blocks: Dict[str, List[tuple]] = {}
+            current_block: str | None = None
+
+            for sl in stanza_lines:
+                if sl and sl[0] in (" ", "\t"):
+                    if current_block:
+                        parts = sl.split()
+                        if len(parts) >= 3:
+                            try:
+                                blocks[current_block].append(
+                                    (parts[0], int(parts[1]), parts[2])
+                                )
+                            except ValueError:
+                                pass
+                    continue
+                current_block = None
+                if ":" in sl:
+                    k, v = sl.split(":", 1)
+                    k = k.strip()
+                    v = v.strip()
+                    stanza[k] = v
+                    if k in ("Checksums-Sha256", "Files", "Checksums-Sha1"):
+                        current_block = k
+                        blocks.setdefault(k, [])
+
+            directory = stanza.get("Directory")
+            checksums = blocks.get("Checksums-Sha256")
+            pkg_name = stanza.get("Package", "")
+
+            if directory and checksums:
+                for _hash, size_int, filename in checksums:
+                    full_path = f"{directory}/{filename}"
+                    pkg = _make_pkg(full_path, _hash, size_int, pkg_name)
+                    if pkg:
+                        yield pkg
+                return
+
+            filename = stanza.get("Filename")
+            sha256_val = stanza.get("SHA256")
+            size_str = stanza.get("Size")
+            if filename and sha256_val and size_str:
+                try:
+                    size_int = int(size_str)
+                except ValueError:
+                    return
+                pkg = _make_pkg(filename, sha256_val, size_int, pkg_name)
+                if pkg:
+                    yield pkg
+
         def _generate():
-            ## @brief True generator: yield one Package per parsed stanza.
+            ## @brief True generator: yield Package nodes per parsed stanza.
             ##
             ## Packages are yielded as each stanza is parsed so the
             ## coordinator receives them one at a time rather than receiving
-            ## all packages from this index in a single burst.  The
-            ## pre-built ``packages`` list and ``self.packages`` assignment
-            ## are gone - stats are accumulated by ``SyncStats`` in
-            ## ``Node.sync()`` and stale paths are discarded there too, so
-            ## nothing needs to walk a retained package list after streaming.
+            ## all packages from this index in a single burst.
             ##
             ## @yield Package child nodes.
             stanza_lines: List[str] = []
             for line in self._iter_lines(data):
                 if not line and stanza_lines:
-                    stanza: Dict[str, str] = {}
-                    for sl in stanza_lines:
-                        if sl and sl[0] in (" ", "\t"):
-                            continue
-                        if ":" in sl:
-                            k, v = sl.split(":", 1)
-                            stanza[k.strip()] = v.strip()
-
-                    filename = stanza.get("Filename")
-                    sha256_val = stanza.get("SHA256")
-                    size_str = stanza.get("Size")
-
-                    if filename and sha256_val and size_str:
-                        try:
-                            size_int = int(size_str)
-                        except ValueError:
-                            stanza_lines = []
-                            continue
-                        if filename.startswith("./"):
-                            filename = filename[2:]
-                        pkg_uri = f"{base.rstrip('/')}/{quote(filename, safe='/')}" if base else ""
-                        pkg_path = f"{dest}/{filename}" if dest else filename
-                        pkg_name = stanza.get("Package", "")
-                        if excl_pkgs and any(fnmatch(pkg_name, p) for p in excl_pkgs):
-                            stanza_lines = []
-                            continue
-                        if excl_paths and any(fnmatch(pkg_path, p) for p in excl_paths):
-                            stanza_lines = []
-                            continue
-                        pkg = Package(
-                            path=pkg_path,
-                            hash=sha256_val,
-                            size=size_int,
-                            uri=pkg_uri,
-                        )
-                        pkg._repo_vars = self._repo_vars
-                        yield pkg
+                    yield from _parse_stanza(stanza_lines)
                     stanza_lines = []
                 elif line:
                     stanza_lines.append(line)
 
             if stanza_lines:
-                stanza = {}
-                for sl in stanza_lines:
-                    if sl and sl[0] in (" ", "\t"):
-                        continue
-                    if ":" in sl:
-                        k, v = sl.split(":", 1)
-                        stanza[k.strip()] = v.strip()
-                filename = stanza.get("Filename")
-                sha256_val = stanza.get("SHA256")
-                size_str = stanza.get("Size")
-                if filename and sha256_val and size_str:
-                    try:
-                        size_int = int(size_str)
-                    except ValueError:
-                        return
-                    if filename.startswith("./"):
-                        filename = filename[2:]
-                    pkg_uri = f"{base.rstrip('/')}/{filename}" if base else ""
-                    pkg_path = f"{dest}/{filename}" if dest else filename
-                    pkg_name = stanza.get("Package", "")
-                    if excl_pkgs and any(fnmatch(pkg_name, p) for p in excl_pkgs):
-                        return
-                    if excl_paths and any(fnmatch(pkg_path, p) for p in excl_paths):
-                        return
-                    pkg = Package(
-                        path=pkg_path,
-                        hash=sha256_val,
-                        size=size_int,
-                        uri=pkg_uri,
-                    )
-                    pkg._repo_vars = self._repo_vars
-                    yield pkg
+                yield from _parse_stanza(stanza_lines)
 
         return _generate()

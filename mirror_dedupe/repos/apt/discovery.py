@@ -154,7 +154,7 @@ def discover_distribution_paths(
     max_depth: int = 3,
     root_html: str | None = None,
     _allow_child_prefix: bool = True,
-) -> List[Tuple[str, str]]:
+) -> List[Tuple[str, str, str]]:
     ## @brief Walk ``index_root`` and return discovered ``(path, upstream)`` pairs.
     ##
     ## Each tuple is ``(distribution_path, effective_upstream)`` where
@@ -190,11 +190,11 @@ def discover_distribution_paths(
     cache_key = (upstream, index_root, max_depth)
     cached = _bfs_cache.get(cache_key)
     if cached is not None:
-        return list(cached)
+        return list(cached)  # type: ignore[arg-type]
 
     if root_html is None:
         dists_url = build_url(upstream, index_root)
-        log(f"[apt] probing dists index: {dists_url}")
+        log(f"[apt] probing dists index: {dists_url}", level="DEBUG")
         root_html = _fetch_text(dists_url)
 
     if not root_html:
@@ -203,7 +203,7 @@ def discover_distribution_paths(
         if _allow_child_prefix:
             base_html = _fetch_text(upstream)
             if base_html:
-                result: List[Tuple[str, str]] = []
+                result: List[Tuple[str, str, str]] = []
                 for child in _iter_href_names(base_html.splitlines(), dirs_only=True):
                     child_upstream = build_url(upstream, child)
                     child_results = discover_distribution_paths(
@@ -223,7 +223,7 @@ def discover_distribution_paths(
         return []
 
     lines = root_html.splitlines()
-    log(f"[apt] /dists/ HTML line count: {len(lines)}")
+    log(f"[apt] /dists/ HTML line count: {len(lines)}", level="DEBUG")
 
     suites: List[str] = []
     # First pass: accept all relative hrefs.  Some Apache-style listings
@@ -231,16 +231,17 @@ def discover_distribution_paths(
     # used to catch everything, with file-like names filtered in _iter_href_names.
     for name in _iter_href_names(lines, dirs_only=False):
         if name and name not in suites:
-            log(f"[apt] discovered suite under /dists: {name}")
+            log(f"[apt] discovered suite under /dists: {name}", level="DEBUG")
             suites.append(name)
 
     if not suites:
         log(
             "[apt] no suites discovered in /dists/ HTML; attempting dirs-only fallback",
+            level="DEBUG",
         )
         for name in _iter_href_names(lines, dirs_only=True):
             if name and name not in suites:
-                log(f"[apt] discovered suite under /dists (dirs-only): {name}")
+                log(f"[apt] discovered suite under /dists (dirs-only): {name}", level="DEBUG")
                 suites.append(name)
 
     if not suites:
@@ -251,7 +252,7 @@ def discover_distribution_paths(
     queue: List[tuple[str, int]] = [(name, 1) for name in suites]
     seen_paths = {name for name in suites}
 
-    log(f"[apt] total top-level suites discovered: {len(queue)}")
+    log(f"[apt] total top-level suites discovered: {len(queue)}", level="DEBUG")
 
     discovered_paths: List[Tuple[str, str]] = []
 
@@ -297,7 +298,7 @@ def discover_distribution_paths(
             if child_path in seen_paths:
                 continue
 
-            log(f"[apt] discovered nested candidate under /dists: {child_path}")
+            log(f"[apt] discovered nested candidate under /dists: {child_path}", level="DEBUG")
             seen_paths.add(child_path)
             queue.append((child_path, depth + 1))
 
@@ -383,7 +384,7 @@ def probe_fallback_suites(
     upstream: str,
     index_root: str = "dists",
     anchor: str = "Release",
-) -> List[str]:
+) -> List[Tuple[str, str]]:
     ## @brief Probe all known suite names and return confirmed matches.
     ##
     ## Fallback strategy for repos whose ``/dists/`` directory is not
@@ -433,6 +434,7 @@ def probe_fallback_suites(
         # Confirm the file's Suite/Codename matches what we probed —
         # guards against false positives from redirects or child prefixes.
         claimed = None
+        assert suite_body is not None
         for line in suite_body.splitlines():
             if line.startswith("Suite:") or line.startswith("Codename:"):
                 val = line.split(":", 1)[1].strip()
