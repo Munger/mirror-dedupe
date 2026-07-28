@@ -8,5 +8,5 @@ systemd/mirror-dedupe.service lib/systemd/system/
 systemd/mirror-dedupe.timer lib/systemd/system/
 debian/mirror-dedupe.1 usr/share/man/man1/
 debian/mirror-dedupe-scan.1 usr/share/man/man1/
-nginx/mirror.conf etc/nginx/sites-available/mirror.conf
-nginx/assets/ etc/nginx/assets/
+nginx/mirror.conf etc/nginx/sites-available/
+nginx/assets etc/nginx/
