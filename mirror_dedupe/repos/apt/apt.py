@@ -13,13 +13,14 @@
 
 
 from typing import Any, Dict, List, Optional
+from fnmatch import fnmatch
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.exceptions import ExceptionMsg
 from mirror_dedupe.lib.html_helpers import build_url
 from mirror_dedupe.lib.log import log
 from mirror_dedupe.schema.mdnode import MDNode as Node
-from .discovery import _iter_href_names, probe_any_suite
+from .discovery import _iter_href_names, discover_distribution_paths, probe_any_suite
 from .distributions import DistributionsParser
 
 
@@ -69,7 +70,7 @@ class Apt(Schema.Repo):
         ## @param config  Optional config dict (suite/arch/component filters).
         ## @return None
 
-        log(f"[apt] parsing repo class: {type(self).__name__}")
+        log(f"[apt] parsing repo class: {type(self).__name__}", level="DEBUG")
 
         # Constants that drive where Release/anchor files are found under dists/
         self.vars = Schema.Vars(
@@ -140,14 +141,24 @@ class Apt(Schema.Repo):
         anchor_fn: str = p.get("anchor_filename") or "Release"
         suite_anchor_exceptions: dict = p.get("suite_anchor_exceptions", {})
         suites: List[str] = p.get("suites", [])
-        expand = p.get("expand_distributions", True)
-        if expand:
-            expanded: List[str] = []
+
+        has_glob = any(any(c in s for c in ('*', '?', '[')) for s in suites)
+        if has_glob:
+            base_uri = self.get("uri") or ""
+            discovered = discover_distribution_paths(base_uri)
+            discovered_names = [path for path, _upstream, _anchor in discovered]
+            resolved: List[str] = []
             for s in suites:
-                expanded.append(s)
-                if '-' not in s:
-                    expanded.extend([f"{s}-updates", f"{s}-security", f"{s}-backports", f"{s}-proposed"])
-            suites = expanded
+                if any(c in s for c in ('*', '?', '[')):
+                    matches = [d for d in discovered_names if fnmatch(d, s)]
+                    if matches:
+                        resolved.extend(sorted(matches))
+                    else:
+                        log(f"[apt] glob '{s}' matched nothing upstream", level="WARN")
+                else:
+                    resolved.append(s)
+            suites = resolved
+
         if not suites:
             raise ExceptionMsg(0,
                 "Apt._build_sync_tree: no suites configured in repo.params",

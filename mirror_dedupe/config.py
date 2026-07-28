@@ -93,9 +93,8 @@ class Config:
         ##   ``<config_dir>/repos-enabled/``     - enabled repo configs
         ##
         ## Loads ``mirror-dedupe.conf`` and extracts global settings
-        ## (``mirror_root``, ``architectures``, ``collapse_distributions``,
-        ## ``parallel_downloads``, ``connect_timeout``,
-        ## ``sweep_pool_after_sync``) into named attributes.
+        ## (``mirror_root``, ``architectures``, ``parallel_downloads``,
+        ## ``connect_timeout``, ``sweep_pool_after_sync``) into named attributes.
         ##
         ## ``repo_root`` and ``pool_root`` are always derived from
         ## ``mirror_root`` as ``<mirror_root>/repos`` and
@@ -153,7 +152,6 @@ class Config:
             pass  # directories not yet created - will land on the same volume
 
         self.architectures = self._data.get('architectures', '*')
-        self.collapse_distributions = self._data.get('collapse_distributions', False)
         self.check_gpg_signature = bool(self._data.get('check_gpg_signature', True))
         self.parallel_downloads = self._data.get('parallel_downloads', 10)
         self.max_concurrent_syncs = self._data.get('max_concurrent_syncs', 2)
@@ -231,7 +229,6 @@ class Config:
         self._data['repo_root'] = self.repo_root
         self._data['pool_root'] = self.pool_root
         self._data['architectures'] = self.architectures
-        self._data['collapse_distributions'] = self.collapse_distributions
         self._data['parallel_downloads'] = self.parallel_downloads
         self._data['max_concurrent_syncs'] = self.max_concurrent_syncs
         self._data['connect_timeout'] = self.connect_timeout

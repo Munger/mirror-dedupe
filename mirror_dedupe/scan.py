@@ -70,8 +70,7 @@ def generate_config(repo: Repo, dest: str,
                     distribution_overrides: Optional[List[str]] = None,
                     arch_override: Optional[List[str]] = None,
                     component_override: Optional[List[str]] = None,
-                    global_arch_mask: Optional[List[str]] = None,
-                    collapse_dists: bool = False) -> str:
+                    global_arch_mask: Optional[List[str]] = None) -> str:
     ## @brief Generate repository configuration from a fully-populated Repo.
     ##
     ## ``repo`` is expected to have already been parsed by its
@@ -90,7 +89,6 @@ def generate_config(repo: Repo, dest: str,
     ## @param arch_override          Override architecture list.
     ## @param component_override     Override component list.
     ## @param global_arch_mask       Global architecture mask from config.
-    ## @param collapse_dists         Whether to collapse pocket variants.
     ## @return YAML configuration string.
 
     if not gpg_key_url:
@@ -121,11 +119,10 @@ def generate_config(repo: Repo, dest: str,
         log("      Warning: Could not auto-detect distributions", level="WARN")
 
     all_dists_mode = False
-    collapsed_from_all = False
 
     if distribution_overrides:
         dists = [d for d in distribution_overrides if d]
-        if any(d.lower() == "all" for d in dists):
+        if any(d.lower() in ("*", "all") for d in dists):
             all_dists_mode = True
             distributions = discovered
         else:
@@ -136,29 +133,6 @@ def generate_config(repo: Repo, dest: str,
             sys.exit(1)
         all_dists_mode = True
         distributions = discovered
-
-    if all_dists_mode and collapse_dists and discovered:
-        pocket_suffixes = (
-            "-updates",
-            "-security",
-            "-backports",
-            "-proposed",
-        )
-        base_to_seen: dict[str, set[str]] = {}
-        for d in discovered:
-            if "/" in d:
-                continue
-            base = d
-            for suf in pocket_suffixes:
-                if base.endswith(suf):
-                    base = base[: -len(suf)]
-                    break
-            base_to_seen.setdefault(base, set()).add(d)
-
-        if base_to_seen and len(base_to_seen) < len(discovered):
-            distributions = sorted(base_to_seen.keys())
-            all_dists_mode = False
-            collapsed_from_all = True
 
     log(f"      Using distributions: {', '.join(distributions)}")
 
@@ -252,9 +226,28 @@ def generate_config(repo: Repo, dest: str,
     config_lines.append("")
     config_lines.append("# Architectures to fetch.  Removing an architecture reduces")
     config_lines.append("# download size - only the listed ones are synced.")
+    config_lines.append("# Use \"*\" or \"all\" to sync every available architecture.")
     config_lines.append("architectures:")
     for arch in architectures:
         config_lines.append(f"  - {arch}")
+
+    sources_available = False
+    if repo.distributions:
+        for dist in repo.distributions:
+            md = getattr(dist, "metadata", None)
+            if md and hasattr(md, "hash_sections") and md.hash_sections:
+                for _section, entries in md.hash_sections.items():
+                    for entry in entries:
+                        if "Sources" in entry.get("path", ""):
+                            sources_available = True
+                            break
+                    if sources_available:
+                        break
+            if sources_available:
+                break
+    if sources_available:
+        config_lines.append("  # - source")
+        log("      Sources index detected upstream")
 
     config_lines.append("")
     config_lines.append("# Package components to mirror.  Comment out or remove any")
@@ -268,23 +261,24 @@ def generate_config(repo: Repo, dest: str,
     config_lines.append("# Release file on the upstream server.  Comment out a line to exclude")
     config_lines.append("# that suite from sync.")
     config_lines.append("#")
-    config_lines.append("# When expand_distributions is true (the default if unset), a base")
-    config_lines.append("# distribution like \"noble\" is automatically expanded at sync time")
-    config_lines.append("# to include noble-updates, noble-security, noble-backports, and")
-    config_lines.append("# noble-proposed.  When false, only the listed distributions are")
-    config_lines.append("# synced - no automatic expansion occurs.")
+    config_lines.append("# Glob patterns (fnmatch) are supported and resolved at sync time")
+    config_lines.append("# against what actually exists upstream, so new suites are picked up")
+    config_lines.append("# automatically.  Examples:")
+    config_lines.append('#   "noble*"              noble, noble-updates, noble-security, ...')
+    config_lines.append('#   "noble/*"             noble/mongodb-org/8.0, noble/mongodb-org/8.2, ...')
+    config_lines.append('#   "*/mongodb-org/7.0"   bionic/mongodb-org/7.0, focal/mongodb-org/7.0, ...')
+    config_lines.append('#   "noble-2?.04"         noble-24.04, noble-26.04, ...')
+    config_lines.append('#   "noble-2[024].04"     noble-20.04, noble-22.04, noble-24.04')
+    config_lines.append('#   "*"                   everything upstream')
+    config_lines.append("#")
+    config_lines.append("# You can mix globs and explicit names freely.")
+    config_lines.append("# Note: YAML requires quotes on values starting with * or other special characters")
     config_lines.append("distributions:")
-    if all_dists_mode:
-        for dist in discovered:
+    for dist in distributions:
+        if dist[0] in ('*', '?', '[', '{', '&', '!', '|', '>', "'", '"', '%', '@', '`'):
+            config_lines.append(f'  - "{dist}"')
+        else:
             config_lines.append(f"  - {dist}")
-    else:
-        for dist in distributions:
-            config_lines.append(f"  - {dist}")
-        if collapsed_from_all or (len(distributions) == 1 and distributions[0] not in ['stable', 'unstable', 'testing']):
-            config_lines.append("# Distribution auto-expands to include variants (e.g. -updates, -security)")
-
-    if (all_dists_mode and not collapse_dists) or (len(distributions) == 1 and distributions[0] == 'stable'):
-        config_lines.append("expand_distributions: false")
 
     config_lines.append("")
     config_lines.append("# Per-repo parameter overrides.  The defaults from --scan are shown;")
@@ -293,7 +287,13 @@ def generate_config(repo: Repo, dest: str,
     config_lines.append("#   discovery_method    How upstream layout was discovered: \"html_bfs\"")
     config_lines.append("#                       (HTML index crawl) or \"explicit\" (dists/).")
     config_lines.append("#   log_colour          ANSI colour for this repo's log label.")
+    config_lines.append("#                       Colours: BLACK, RED, GREEN, YELLOW, BLUE, MAGENTA,")
+    config_lines.append("#                       CYAN, WHITE, BRIGHT_BLACK, BRIGHT_RED, BRIGHT_GREEN,")
+    config_lines.append("#                       BRIGHT_YELLOW, BRIGHT_BLUE, BRIGHT_MAGENTA, BRIGHT_CYAN,")
+    config_lines.append("#                       BRIGHT_WHITE, GREY, DEFAULT, NONE")
     config_lines.append("#   log_colour_bg       ANSI background colour for the label.")
+    config_lines.append("#                       Same options as log_colour (DEFAULT = global setting,")
+    config_lines.append("#                       NONE = no background)")
     config_lines.append("#   parallel_downloads  Per-repo worker pool size.  Inherits the global")
     config_lines.append("#                       default when commented out.")
     config_lines.append("params:")
@@ -368,20 +368,6 @@ def main() -> None:
         nargs='+',
         help='Primary upstream URL followed by optional alternate upstreams',
     )
-    collapse_group = parser.add_mutually_exclusive_group()
-    collapse_group.add_argument(
-        '--collapse-dists',
-        dest='collapse_dists',
-        action='store_true',
-        help='Collapse discovered distributions to base suites where possible',
-    )
-    collapse_group.add_argument(
-        '--no-collapse-dists',
-        dest='collapse_dists',
-        action='store_false',
-        help='Do not collapse discovered distributions; emit all variants explicitly',
-    )
-    parser.set_defaults(collapse_dists=None)
     parser.add_argument(
         '--emit-json',
         action='store_true',
@@ -410,7 +396,6 @@ def main() -> None:
     cfg = Config.load(args.config_path)
 
     arch_mask = cfg.architectures
-    global_collapse_dists = bool(cfg.collapse_distributions)
 
     def _normalize_arch_mask(value):
         ## @brief Normalise an architecture mask value (wildcard -> passthrough).
@@ -501,11 +486,6 @@ def main() -> None:
         arch_override=arch_override,
         component_override=component_override,
         global_arch_mask=global_arch_mask,
-        collapse_dists=(
-            args.collapse_dists
-            if args.collapse_dists is not None
-            else global_collapse_dists
-        ),
     )
 
     out_dir = Path(args.out_dir)

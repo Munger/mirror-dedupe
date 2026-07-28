@@ -120,7 +120,7 @@ class DistributionsParser:
         used_fallback = False
 
         if nobrowse:
-            log("[apt] skipping HTML BFS (cached: not browsable)")
+            log("[apt] skipping HTML BFS (cached: not browsable)", level="DEBUG")
             used_fallback = True
         else:
             for idx, url in enumerate(upstreams_list):
@@ -131,20 +131,20 @@ class DistributionsParser:
                 )
                 if upstream_results:
                     if idx > 0:
-                        log(f"[apt] discovered distributions via alternate upstream {url}")
+                        log(f"[apt] discovered distributions via alternate upstream {url}", level="DEBUG")
                     break
 
         # --- 4. Codename fallback probe ---------------------------------
 
         if not upstream_results:
-            log("[apt] HTML discovery found no suites; trying codename fallback")
+            log("[apt] HTML discovery found no suites; trying codename fallback", level="DEBUG")
             fallback = probe_fallback_suites(
                 upstream,
                 index_root=root,
                 anchor=anchor,
             )
             if fallback:
-                log(f"[apt] codename fallback found: {', '.join(n for n, _ in fallback)}")
+                log(f"[apt] codename fallback found: {', '.join(n for n, _ in fallback)}", level="DEBUG")
                 upstream_results = [(name, upstream, anchor_fn) for name, anchor_fn in fallback]
                 used_fallback = True
 
