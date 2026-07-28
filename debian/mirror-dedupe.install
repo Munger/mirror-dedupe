@@ -1,2 +1,0 @@
-nginx/mirror.conf etc/nginx/sites-available/mirror.conf
-nginx/assets/ etc/nginx/assets/
