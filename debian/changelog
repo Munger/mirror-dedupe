@@ -1,11 +1,12 @@
-mirror-dedupe (1.2.0-1) noble; urgency=medium
+mirror-dedupe (1.2.1-1) noble; urgency=medium
 
-  * Fix all ~54 LSP type errors across the project
-  * Fix deploy-apt.yml tag resolution race
-  * Promote test configs to config/ for extended coverage
-  * Bump version to 1.2.0
+  * Fix arch filter bypass in companion Release node
+  * Fix arch filter blocked by len(parts)>=2 gate for top-level entries
+  * Fix top_level_filter silently dropped in child-prefix fallback recursion
+  * Replace if/elif classifier with table-driven entry type registry
+  * Add Contents, dep11/Components, dep11/icons support to classifier
 
- -- Tim Hosking <tim@mungerware.com>  Tue, 28 Jul 2026 15:00:00 +1200
+ -- Tim Hosking <tim@mungerware.com>  Wed, 29 Jul 2026 21:00:00 +1200
 
 mirror-dedupe (1.1.3-1) noble; urgency=medium
 

@@ -98,7 +98,7 @@ def test_release_preserves_packages_and_sources():
 
 
 def test_release_arch_filter_packages_only():
-    """Arch filter only applies to Packages/Sources, not Translation/Commands."""
+    """Arch filter applies to Packages/Sources and Commands, not Translations."""
     rel = Release(
         url="https://example.com/ubuntu/dists/noble/Release",
         upstream="https://example.com/ubuntu",
@@ -110,12 +110,10 @@ def test_release_arch_filter_packages_only():
     pkg = [i for i in indices if i.get("kind") == "packages"]
     cmd = [i for i in indices if i.get("kind") == "commands"]
     tran = [i for i in indices if i.get("kind") == "translations"]
-    # Packages should be filtered to amd64 only
     assert len(pkg) == 1, f"Expected 1 Packages, got {len(pkg)}: {[i.get('path') for i in pkg]}"
-    # Translation/Commands should NOT be filtered by arch
-    assert len(cmd) == 2, f"Expected 2 Commands, got {len(cmd)}: {[i.get('path') for i in cmd]}"
+    assert len(cmd) == 1, f"Expected 1 Commands, got {len(cmd)}: {[i.get('path') for i in cmd]}"
     assert len(tran) == 2, f"Expected 2 Translations, got {len(tran)}: {[i.get('path') for i in tran]}"
-    print("PASS: release_arch_filter_packages_only — arch filter skips Translation/Commands")
+    print("PASS: release_arch_filter_packages_only — arch filter skips Translations, applies to Commands")
 
 
 RELEASE_WITH_VARIANTS = """SHA256:

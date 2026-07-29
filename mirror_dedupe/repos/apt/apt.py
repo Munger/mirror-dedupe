@@ -145,7 +145,17 @@ class Apt(Schema.Repo):
         has_glob = any(any(c in s for c in ('*', '?', '[')) for s in suites)
         if has_glob:
             base_uri = self.get("uri") or ""
-            discovered = discover_distribution_paths(base_uri)
+            globs = [s for s in suites if any(c in s for c in ('*', '?', '['))]
+            explicit = [s for s in suites if s not in globs]
+            shallow_globs = [g for g in globs if "/" not in g]
+            if shallow_globs:
+                def _top_level_filter(name: str) -> bool:
+                    return any(fnmatch(name, g) for g in shallow_globs) or name in explicit
+                discovered = discover_distribution_paths(
+                    base_uri, top_level_filter=_top_level_filter,
+                )
+            else:
+                discovered = discover_distribution_paths(base_uri)
             discovered_names = [path for path, _upstream, _anchor in discovered]
             resolved: List[str] = []
             for s in suites:
@@ -197,25 +207,19 @@ class Apt(Schema.Repo):
             # Assign anchor to the correct slot; companions go in the other slots.
             if this_anchor == "InRelease":
                 dist.inrelease = anchor
-                dist.release = AptRelease(
-                    url=f"{dir_url}/Release",
-                    upstream=base_uri,
-                    suite=suite_name,
-                    dest=dest,
-                    filename="Release",
-                )
-                dist.release["optional"] = True
+                dist.release = cast(AptRelease, Schema.Node({
+                    "uri": f"{dir_url}/Release",
+                    "path": f"{suite_dir}/Release",
+                    "optional": True,
+                }))
                 dist.release._repo_vars = self._repo_vars
             else:
                 dist.release = anchor
-                dist.inrelease = AptRelease(
-                    url=f"{dir_url}/InRelease",
-                    upstream=base_uri,
-                    suite=suite_name,
-                    dest=dest,
-                    filename="InRelease",
-                )
-                dist.inrelease["optional"] = True
+                dist.inrelease = cast(AptRelease, Schema.Node({
+                    "uri": f"{dir_url}/InRelease",
+                    "path": f"{suite_dir}/InRelease",
+                    "optional": True,
+                }))
                 dist.inrelease._repo_vars = self._repo_vars
 
             dist.release_gpg = Schema.Node({
