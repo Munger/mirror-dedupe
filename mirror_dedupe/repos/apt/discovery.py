@@ -13,7 +13,7 @@
 
 from collections import OrderedDict
 from threading import Lock
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from mirror_dedupe.lib.codenames import apt_codenames
 from mirror_dedupe.lib.html_helpers import build_url, extract_href
@@ -153,6 +153,7 @@ def discover_distribution_paths(
     anchor: str = "Release",
     max_depth: int = 3,
     root_html: str | None = None,
+    top_level_filter: Callable[[str], bool] | None = None,
     _allow_child_prefix: bool = True,
 ) -> List[Tuple[str, str, str]]:
     ## @brief Walk ``index_root`` and return discovered ``(path, upstream)`` pairs.
@@ -168,12 +169,17 @@ def discover_distribution_paths(
     ## to ``looks_like_release``.  Returns an empty list if no
     ## distributions are found.
     ##
-    ## @param upstream        Base upstream URL.
-    ## @param index_root      Root directory for suites (default ``"dists"``).
-    ## @param anchor          Anchor filename (default ``"Release"``).
-    ## @param max_depth       Maximum BFS depth.
-    ## @param root_html       Pre-fetched HTML of the index root; fetched
-    ##                        from upstream if omitted.
+    ## @param upstream          Base upstream URL.
+    ## @param index_root        Root directory for suites (default ``"dists"``).
+    ## @param anchor            Anchor filename (default ``"Release"``).
+    ## @param max_depth         Maximum BFS depth.
+    ## @param root_html         Pre-fetched HTML of the index root; fetched
+    ##                          from upstream if omitted.
+    ## @param top_level_filter  Optional callable to filter top-level suite
+    ##                          names before BFS descent.  Called with each
+    ##                          top-level suite name; only those returning
+    ##                          True are explored.  Avoids probing upstream
+    ##                          paths that the caller will discard.
     ## @param _allow_child_prefix  Internal flag to allow one level of
     ##                             child prefix resolution.
     ## @return List of ``(path, effective_upstream, anchor_filename)`` tuples.
@@ -212,6 +218,7 @@ def discover_distribution_paths(
                         anchor=anchor,
                         max_depth=max_depth,
                         root_html=None,
+                        top_level_filter=top_level_filter,
                         _allow_child_prefix=False,
                     )
                     if child_results:
@@ -248,6 +255,12 @@ def discover_distribution_paths(
         log("[apt] no suites discovered in /dists/ HTML; giving up on suite discovery")
         _bfs_cache[cache_key] = []
         return []
+
+    if top_level_filter is not None:
+        suites = [s for s in suites if top_level_filter(s)]
+        if not suites:
+            _bfs_cache[cache_key] = []
+            return []
 
     queue: List[tuple[str, int]] = [(name, 1) for name in suites]
     seen_paths = {name for name in suites}

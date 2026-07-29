@@ -21,6 +21,25 @@ from mirror_dedupe.lib.html_helpers import build_url
 from .index import AptIndex
 
 
+def _arch_dir(entry_path: str, parts: list[str]) -> str:
+    return parts[1][7:] if parts[1].startswith("binary-") else parts[1]
+
+
+def _arch_file(prefix: str, suffix: str = ""):
+    def extract(entry_path: str, parts: list[str]) -> str:
+        fn = parts[-1]
+        for ext in (".gz", ".bz2", ".xz", ".lzma", ".lz4", ".zst"):
+            if fn.endswith(ext):
+                fn = fn[: -len(ext)]
+                break
+        if suffix and fn.endswith(suffix):
+            fn = fn[: -len(suffix)]
+        if fn.startswith(prefix):
+            return fn[len(prefix):]
+        return fn
+    return extract
+
+
 def strip_pgp_wrapper(text: str) -> str:
     ## @brief Strip a PGP cleartext signature envelope from *text*.
     ##
@@ -197,34 +216,39 @@ class Release(Schema.Release):
         exclude_paths: Optional[List[str]] = getattr(self, "_exclude_paths", None)
         dest = self._dest
 
-        # Collect all hash-section entries — currently supports
-        # Packages, Sources, Translation-*, and Commands-*.
+        # Entry type registry: (match_substring, kind, arch_extract_fn or None)
+        _entry_types = (
+            ("Packages",     "packages",       _arch_dir),
+            ("Sources",      "sources",        _arch_dir),
+            ("Translation-", "translations",   None),
+            ("Commands-",    "commands",       _arch_file("Commands-")),
+            ("Contents-",    "contents",       _arch_file("Contents-")),
+            ("Components-",  "dep11",          _arch_file("Components-", ".yml")),
+            ("icons-",       "dep11-icons",    None),
+        )
+
         entries: List[Dict[str, Any]] = []
         for section in ("MD5Sum", "SHA1", "SHA256"):
             for entry in self._parse_hash_section(text, section):
                 entry_path = entry["path"]
-                if "Packages" in entry_path:
-                    entry["_kind"] = "packages"
-                elif "Sources" in entry_path:
-                    entry["_kind"] = "sources"
-                elif "Translation-" in entry_path:
-                    entry["_kind"] = "translations"
-                elif "Commands-" in entry_path:
-                    entry["_kind"] = "commands"
+
+                for pattern, kind, arch_extract in _entry_types:
+                    if pattern in entry_path:
+                        entry["_kind"] = kind
+                        break
                 else:
                     continue
 
                 if arch_filter is not None or comp_filter is not None:
                     parts = entry_path.split("/")
-                    if len(parts) >= 2:
+                    if comp_filter is not None and len(parts) >= 2:
                         comp = parts[0]
-                        if comp_filter is not None and comp not in comp_filter:
+                        if comp not in comp_filter:
                             continue
-                        if arch_filter is not None and entry["_kind"] in ("packages", "sources"):
-                            arch_part = parts[1]
-                            arch = arch_part[7:] if arch_part.startswith("binary-") else arch_part
-                            if arch not in arch_filter:
-                                continue
+                    if arch_filter is not None and arch_extract is not None:
+                        arch = arch_extract(entry_path, parts)
+                        if arch not in arch_filter:
+                            continue
                 entries.append(entry)
 
         # Deduplicate by path - later sections (SHA256) overwrite MD5/SHA1
