@@ -24,6 +24,7 @@ jobs:
         fetch-depth: 0
 
     - name: Verify changelog version matches release tag
+      if: github.event_name == 'release'
       run: |
         CHANGELOG_VER=$(head -1 debian/changelog | sed -n 's/^mirror-dedupe (\([^-]*\)-.*/\1/p')
         TAG="${GITHUB_REF#refs/tags/}"
