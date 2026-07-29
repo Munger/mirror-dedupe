@@ -18,6 +18,10 @@ on:
         description: 'Release tag to deploy (e.g. v1.2.0)'
         required: true
 
+concurrency:
+  group: deploy-apt-${{ github.event.release.tag_name || github.event.inputs.TAG }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -37,7 +41,7 @@ jobs:
         fi
         for i in $(seq 30); do
           ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)
-          DEB=$(echo "$ASSETS" | grep '^mirror-dedupe_.*\.deb$')
+          DEB=$(echo "$ASSETS" | grep '^mirror-dedupe_.*\.deb$' | head -1)
           if [ -n "$DEB" ]; then
             echo "Found: $DEB"
             gh release download "$TAG" -p "$DEB"
@@ -51,6 +55,22 @@ jobs:
         exit 1
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Verify .deb version matches release tag
+      run: |
+        TAG="${{ github.event.release.tag_name || github.event.inputs.TAG }}"
+        DEB_VER="$(dpkg-deb -f "$DEB_FILE" Version)"
+        EXPECTED="${TAG#v}"
+        DEB_UPSTREAM="${DEB_VER%%-*}"
+        if [ "$DEB_UPSTREAM" != "$EXPECTED" ]; then
+          echo "ERROR: Version mismatch!"
+          echo "  Expected: $EXPECTED (from tag $TAG)"
+          echo "  Got:      $DEB_UPSTREAM (from ${DEB_FILE} / ${DEB_VER})"
+          exit 1
+        fi
+        echo "Version verified: $DEB_VER matches tag $TAG"
+      env:
+        DEB_FILE: ${{ env.DEB_FILE }}
 
     - name: Checkout packages repo
       uses: actions/checkout@v4
