@@ -588,7 +588,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         ##   ``Linked``     — pool hit, repo hardlink created
         ##   ``Linked*``    — pool hit, repo inventory was stale
         ##   ``Unchanged*`` — pool/repo files confirmed via stat
-        ##   ``Recovered``  — repo file back-linked into damaged pool
+        ##   ``Pooled``  — content already in pool; repo hardlinked
         ##   ``Resumed``    — staging file found (complete or partial via curl -C -)
         ##   ``Downloaded`` — fresh download, no prior staging file
         ##
@@ -734,7 +734,7 @@ class MDNode(Node, StreamMixin, Serialisable):
                             rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
                         _record_p1.mark_linked(rv.repo_id)
                         _record(hit=1)
-                        _log_outcome("Recovered", self.get("size") or 0)
+                        _log_outcome("Pooled", self.get("size") or 0)
                         return [dest]
                     # dest was corrupt — fall through to Phase 2 for re-download.
 
@@ -839,7 +839,7 @@ class MDNode(Node, StreamMixin, Serialisable):
                             rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
                         record.mark_linked(rv.repo_id)
                         _record(hit=1)
-                        _log_outcome("Recovered", self.get("size") or 0)
+                        _log_outcome("Pooled", self.get("size") or 0)
                         return [dest]
 
             # -------------------------------------------------
