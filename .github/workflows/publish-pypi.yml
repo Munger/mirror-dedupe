@@ -22,7 +22,20 @@ jobs:
     - uses: actions/checkout@v4
       with:
         fetch-depth: 0
-    
+
+    - name: Verify changelog version matches release tag
+      run: |
+        CHANGELOG_VER=$(head -1 debian/changelog | sed -n 's/^mirror-dedupe (\([^-]*\)-.*/\1/p')
+        TAG="${GITHUB_REF#refs/tags/}"
+        EXPECTED="${TAG#v}"
+        if [ "$CHANGELOG_VER" != "$EXPECTED" ]; then
+          echo "ERROR: Version mismatch!"
+          echo "  debian/changelog: $CHANGELOG_VER"
+          echo "  git tag:          $EXPECTED (from $TAG)"
+          exit 1
+        fi
+        echo "Version verified: $CHANGELOG_VER matches tag $TAG"
+
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
