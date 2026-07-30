@@ -1,3 +1,13 @@
+mirror-dedupe (1.3.0-1) noble; urgency=medium
+
+  * Add Acquire-By-Hash support: yield by-hash/<Algo>/<checksum> sibling
+    entries for each Release-listed index file (Release.stream()), so
+    apt clients can fetch a permanent hash-named path immune to
+    fixed-path staleness from an intermediate cache/CDN
+  * Fix man page version drift (was still showing 1.1.4)
+
+ -- Tim Hosking <tim@mungerware.com>  Thu, 30 Jul 2026 23:00:00 +1200
+
 mirror-dedupe (1.2.1-1) noble; urgency=medium
 
   * Fix arch filter bypass in companion Release node
