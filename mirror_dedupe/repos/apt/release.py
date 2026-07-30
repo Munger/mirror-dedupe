@@ -21,6 +21,27 @@ from mirror_dedupe.lib.html_helpers import build_url
 from .index import AptIndex
 
 
+_BY_HASH_DIRNAME = {"md5sum": "MD5Sum", "sha1": "SHA1", "sha256": "SHA256"}
+
+
+def _by_hash_path(entry_path: str, algorithm: str, checksum: str) -> str:
+    ## @brief Derive the by-hash sibling path for a Release-listed entry.
+    ##
+    ## Per the apt repository format spec: ``<dir>/by-hash/<Algo>/<checksum>``,
+    ## alongside (not replacing) the original fixed path.
+    ##
+    ## @param entry_path  Path as listed in Release (e.g. ``main/binary-amd64/Packages.gz``).
+    ## @param algorithm   Lowercase algorithm label (``"md5sum"``, ``"sha1"``, ``"sha256"``).
+    ## @param checksum    Hex digest for this entry.
+    ## @return  by-hash path, or ``entry_path`` unchanged if the algorithm is unrecognised.
+    dirname = _BY_HASH_DIRNAME.get(algorithm)
+    if dirname is None:
+        return entry_path
+    parent = entry_path.rsplit("/", 1)[0] if "/" in entry_path else ""
+    prefix = f"{parent}/" if parent else ""
+    return f"{prefix}by-hash/{dirname}/{checksum}"
+
+
 def _arch_dir(entry_path: str, parts: list[str]) -> str:
     return parts[1][7:] if parts[1].startswith("binary-") else parts[1]
 
@@ -320,6 +341,25 @@ class Release(Schema.Release):
             indices.append(primary_index)
             yield primary_index
 
+            # by-hash sibling: same content, permanent hash-named path. Sync-only
+            # (VariantIndex, not parsed for children) - same pattern as compression
+            # variants below, just keyed by hash instead of compression suffix.
+            bh_path = _by_hash_path(entry_path, primary["algorithm"], primary["checksum"])
+            if bh_path != entry_path and bh_path not in seen_paths:
+                seen_paths.add(bh_path)
+                bh_index_path = f"{dest}/dists/{self.suite}/{bh_path}" if dest else f"dists/{self.suite}/{bh_path}"
+                bh_index = Schema.VariantIndex(
+                    path=bh_index_path,
+                    kind=kind,
+                    metadata=metadata,
+                    uri=index_uri,
+                    size=primary["size"],
+                )
+                bh_index._repo_vars = self._repo_vars
+                bh_index["optional"] = True
+                indices.append(bh_index)
+                yield bh_index
+
             # Variants get VariantIndex - downloaded but not parsed for children
             for variant in variants:
                 v_path = variant["path"]
@@ -345,6 +385,23 @@ class Release(Schema.Release):
                 v_index["optional"] = True
                 indices.append(v_index)
                 yield v_index
+
+                # by-hash sibling for this compression variant too.
+                v_bh_path = _by_hash_path(v_path, variant["algorithm"], variant["checksum"])
+                if v_bh_path != v_path and v_bh_path not in seen_paths:
+                    seen_paths.add(v_bh_path)
+                    v_bh_index_path = f"{dest}/dists/{self.suite}/{v_bh_path}" if dest else f"dists/{self.suite}/{v_bh_path}"
+                    v_bh_index = Schema.VariantIndex(
+                        path=v_bh_index_path,
+                        kind=kind,
+                        metadata=v_metadata,
+                        uri=v_uri,
+                        size=variant["size"],
+                    )
+                    v_bh_index._repo_vars = self._repo_vars
+                    v_bh_index["optional"] = True
+                    indices.append(v_bh_index)
+                    yield v_bh_index
 
         self.indices = indices
 
