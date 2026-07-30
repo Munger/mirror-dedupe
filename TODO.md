@@ -2,51 +2,45 @@
 
 ## Bugs
 
-- [ ] **URGENT — Confirmed: mirror-dedupe's apt mirror advertises `Acquire-By-Hash: yes` without actually implementing it — real correctness bug, not a theory. Fix is small (~20 lines), located precisely.**
-  Verified 2026-07-30 by direct comparison:
-  - `archive.ubuntu.com` (true upstream): `Release` has `Acquire-By-Hash: yes`, and
-    `dists/noble-updates/main/binary-amd64/by-hash/SHA256/` genuinely exists (200 OK).
-  - `mirror.private`'s copy of the same repo: serves the *same* `Acquire-By-Hash: yes` line
-    in its `Release` (copied verbatim from upstream during sync — mirror-dedupe holds no
-    signing key for it, so this line can't be stripped even as a fallback), but
-    `by-hash/SHA256/` returns **404** — the directory structure that field promises was
-    never mirrored.
-  This means the mirror is lying to any apt client about a capability it doesn't have.
-  Hasn't caused visible breakage so far because apt gracefully falls back to the fixed
-  (non-hash) path when by-hash 404s — but that's relying on client-side fallback behaviour
-  that isn't guaranteed forever, and it means the actual protection by-hash exists to
-  provide — immunity to exactly the fixed-path staleness/race class of bug below — isn't
-  really present for the production `ubuntu` mirror, just not being exercised. Very likely
-  the same root defect underlying the `mungerware` staleness incident below, observed from
-  the opposite direction (serving side here; upstream-fetch side there) — investigate
-  together, not as two unrelated bugs.
+- [x] **FIXED 2026-07-30 (v1.2.2) — mirror-dedupe's apt mirror advertised `Acquire-By-Hash: yes` without actually implementing it — real correctness bug, not a theory.**
+  Implemented in `Release.stream()`, deployed via the real 1.2.2 apt package (not a
+  hand-patched hotfix — that was reverted once the proper release landed). Verified live
+  in production across all 6 configured repos on mirror.private:
+  - `ubuntu`, `ubuntu-ports`: upstream advertises `Acquire-By-Hash`, by-hash files present
+    and content-correct (hash of fetched file matches its by-hash filename).
+  - `mungerware`: now also advertises it (see the `apt.mungerware.com` fix below),
+    by-hash files present and content-correct, `Release` hash listing clean (no duplicate
+    by-hash entries leaked in from generation-ordering).
+  - `ubuntu-cloud`, `grafana`, `influxdb`: upstream doesn't advertise `Acquire-By-Hash`
+    (confirmed directly against real upstream for `ubuntu-cloud` — genuinely absent from
+    Canonical's own `Release`, not lost in mirroring), so the header isn't present on the
+    served copy either (can't add it without the upstream's signing key) — but the by-hash
+    *files* still exist and are content-correct anyway, since generation doesn't depend on
+    upstream advertising the capability.
+  Companion fix in `Munger/Packages`' `publish.yml`: generates its own by-hash tree and
+  `Acquire-By-Hash: yes` header for `apt.mungerware.com` (that repo's own publish pipeline
+  holds the real signing key, unlike mirror-dedupe mirroring it after the fact).
 
-  **Root cause traced to `mirror_dedupe/repos/apt/release.py`, `Release.stream()`.**
-  `entries` (the list driving what gets synced) is built *purely* from paths literally
-  listed in Release's `MD5Sum`/`SHA1`/`SHA256` sections. By-hash paths are never listed
-  there (confirmed: `by-hash` does not appear anywhere in a real `Release` file's text) —
-  so the indexer is structurally blind to by-hash, not filtering it out, it simply has no
-  way to know it exists.
+  Implementation lives in `mirror_dedupe/repos/apt/release.py`, `Release.stream()`: each
+  `primary_index`/`variant` entry already carries `algorithm`/`checksum`/`size`/`path`, so
+  one extra `Schema.VariantIndex` is yielded per entry with the path transformed to
+  `<dirname>/by-hash/<Algo>/<checksum>` — sync-only (not parsed for children, same as the
+  existing compression-variant handling), flows through the normal pool pipeline unchanged.
+  Generated *after* `Release` itself is built (ordering matters for the publish side, to
+  avoid `apt-ftparchive`'s directory scan cataloging by-hash files as duplicate entries).
 
-  **Fix is small and self-contained** — no new fetch mechanism, no new discovery pass,
-  no signing involvement:
-  - Where `primary_index` (and each `variant`) is built in the `for base, group in
-    by_base.items()` loop, the entry already carries `algorithm`, `checksum`, `size`, and
-    `path` — everything needed. Yield one additional index node per entry with the path
-    transformed to `<dirname>/by-hash/<ALGO>/<checksum>`, same metadata otherwise.
-  - That node flows through the exact same generic `sync()`/pool pipeline as every other
-    index file already does. Current-version case: the checksum is already pooled (the
-    primary index synced moments earlier in the same run), so it hits the existing
-    double-checked pool lookup and hardlinks for free — no real second download, no new
-    storage.
-  - No new retention/cleanup logic needed either: once a newer `Release` stops referencing
-    an old hash, that pool object's link count drops and the *existing* orphan sweep (same
-    mechanism that already removes stale pool files after each sync) retires it naturally.
-  - Historical by-hash entries upstream keeps for its own transition window are a separate,
-    smaller decision (mirror them too, or only ever carry the current one) — not required
-    for the core fix.
-  - Estimated at under 20 lines, entirely inside `stream()`. Tim's own estimate, and the
-    code supports it — this is genuinely small, not a half-day feature.
+  **Open follow-up, not yet decided — Tim's own question 2026-07-30:** should by-hash
+  generation be conditional on the upstream actually advertising `Acquire-By-Hash`, rather
+  than always-on? For repos where it isn't advertised (`ubuntu-cloud`, `grafana`,
+  `influxdb` today), the generated files are currently pure overhead — extra pool entries,
+  extra sync work — since no real apt client can discover or use them without the header.
+  Gating on upstream's own flag would avoid that waste for repos that will never benefit.
+  Counter-consideration: it's cheap (rides the existing pool/hash machinery, no real extra
+  storage for the current-version case), and leaves the door open if a future mirror-dedupe
+  version starts advertising `Acquire-By-Hash` on repos it serves even when upstream
+  doesn't (a currently-blocked idea only because of the signing-key constraint on
+  mirrored/signed repos — would need its own signing setup to pursue). Revisit before
+  deciding either way.
 
 - [ ] **Investigate: incremental apt sync marked `Packages`/`Packages.gz` as "Unchanged" once when upstream had genuinely changed — cause not yet confirmed.**
   Observed 2026-07-30 on `mungerware` repo: pushed new packages (`dcism`, `dcism-osc`) to
