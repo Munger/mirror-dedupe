@@ -1,3 +1,15 @@
+mirror-dedupe (1.2.3-1) noble; urgency=medium
+
+  * Fix Phase 1 sync fast-path silently trusting a stale fixed-path file:
+    now compares dest's inode against the pool record's inode for the
+    current hash before declaring "Unchanged", relinking if they differ.
+    Fixes real, reproduced staleness where a fixed-path index file (e.g.
+    Packages.gz) kept serving old content after upstream changed, even
+    though its own by-hash sibling was correctly pooled with the new
+    content in the same sync run.
+
+ -- Tim Hosking <tim@mungerware.com>  Thu, 30 Jul 2026 23:40:00 +1200
+
 mirror-dedupe (1.2.2-1) noble; urgency=medium
 
   * Add Acquire-By-Hash support: yield by-hash/<Algo>/<checksum> sibling

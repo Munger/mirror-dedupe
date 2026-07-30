@@ -564,9 +564,13 @@ class MDNode(Node, StreamMixin, Serialisable):
         ## This is the core download + verify + hardlink primitive.
         ## It uses a three-phase strategy:
         ##
-        ##   **Phase 1 (inventory fast path):** if the hash is known
-        ##   and the destination exists, skip all I/O.  If the pool has
-        ##   it but the repo does not, hardlink from the pool directly.
+        ##   **Phase 1 (inventory fast path):** if the hash is known and
+        ##   the destination exists, one cheap stat() confirms dest is
+        ##   actually linked to the current pool object for that hash
+        ##   before trusting it (relinks if not - e.g. a stale fixed-path
+        ##   file left over from before its content's hash was pooled).
+        ##   If the pool has it but the repo does not, hardlink from the
+        ##   pool directly.
         ##
         ##   **Phase 2 (staging lock + fallbacks):** acquire a per-hash
         ##   lock so concurrent threads race only once.  Inside the lock,
@@ -584,7 +588,7 @@ class MDNode(Node, StreamMixin, Serialisable):
         ##   failure so curl resumes them on the next attempt.
         ##
         ## Outcome labels logged on every return path:
-        ##   ``Unchanged``  — inventory hit, no I/O
+        ##   ``Unchanged``  — inventory hit, dest inode confirmed current
         ##   ``Linked``     — pool hit, repo hardlink created
         ##   ``Linked*``    — pool hit, repo inventory was stale
         ##   ``Unchanged*`` — pool/repo files confirmed via stat
@@ -683,12 +687,28 @@ class MDNode(Node, StreamMixin, Serialisable):
 
                 if _inv_has and _pool_has:
                     if dest.exists():
-                        # Startup scan confirmed the file exists in both repo
-                        # and pool.  stale_paths.discard() already claimed it;
-                        # skip the dest stat.
-                        _record_p1.mark_linked(rv.repo_id)
+                        # Confirm dest is actually linked to the pool object
+                        # for this hash, not a stale file left over from
+                        # before this hash was pooled at this path (e.g. a
+                        # fixed-path file whose content changed upstream,
+                        # while a by-hash sibling for the new content was
+                        # pooled separately in the same run). Cheap inode
+                        # comparison, not a re-hash - still no content read.
+                        try:
+                            _same_inode = dest.stat().st_ino == _record_p1.inode
+                        except OSError:
+                            _same_inode = False
+                        if _same_inode:
+                            _record_p1.mark_linked(rv.repo_id)
+                            _record(hit=1)
+                            _log_outcome("Unchanged", self.get("size") or 0)
+                            return [dest]
+                        # dest exists but points at stale content - relink
+                        # to the current pool object for this hash.
+                        pool_path = _pool_path(rv.pool_root, hash_val)
+                        _sync_link(pool_path, dest, rv, _record_p1)
                         _record(hit=1)
-                        _log_outcome("Unchanged", self.get("size") or 0)
+                        _log_outcome("Linked", self.get("size") or 0)
                         return [dest]
                     # Hash is known but this specific dest path was never
                     # linked (e.g. multiple paths share the same empty content
