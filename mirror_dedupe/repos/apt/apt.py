@@ -14,6 +14,7 @@
 
 from typing import Any, Dict, List, Optional, cast
 from fnmatch import fnmatch
+from urllib.parse import urlsplit
 
 from mirror_dedupe import schema as Schema
 from mirror_dedupe.lib.exceptions import ExceptionMsg
@@ -45,6 +46,11 @@ class Apt(Schema.Repo):
     SIGNATURE_EXTENSION = ".gpg"
     ## @brief File extension appended to ``Release`` for its detached
     ##        GPG signature (``Release.gpg``).
+
+    _children = ("distributions", "gpg_key")
+    ## @brief Adds ``gpg_key`` to the base ``Repo`` skeleton (``("distributions",)``)
+    ##        so the optional repo-root signing-key file, when present, is
+    ##        walked and synced alongside the distribution tree.
 
     @classmethod
     def restore(cls, snapshot: Dict[str, Any]) -> "Apt":
@@ -179,6 +185,28 @@ class Apt(Schema.Repo):
         from .release import Release as AptRelease
         dest = self.get("dest", "")
         base_uri = self.get("uri") or ""
+
+        # If the configured signing key is served from the same origin as
+        # the repo itself, mirror it faithfully at its own upstream path -
+        # a plain optional file node, same machinery as Release.gpg below.
+        # Keys hosted on a different origin are left alone: they are still
+        # fetched for gpgv verification (see schema/repo.py), just never
+        # re-served from our own mirror, since we only mirror what upstream
+        # actually serves as part of its own repo tree.
+        gpg_key_url = self.get("gpg_key_url") or ""
+        if gpg_key_url:
+            key_parts = urlsplit(gpg_key_url)
+            base_parts = urlsplit(base_uri)
+            if (key_parts.scheme, key_parts.netloc) == (base_parts.scheme, base_parts.netloc):
+                key_rel_path = key_parts.path.lstrip("/")
+                key_dest_path = f"{dest}/{key_rel_path}" if dest else key_rel_path
+                self.gpg_key = Schema.Node({
+                    "uri": gpg_key_url,
+                    "path": key_dest_path,
+                    "optional": True,
+                })
+                self.gpg_key._repo_vars = self._repo_vars
+
         for suite_name in suites:
             suite_dir = f"{dest}/dists/{suite_name}" if dest else f"dists/{suite_name}"
             dir_url = build_url(base_uri, "dists", suite_name)
