@@ -1,3 +1,13 @@
+mirror-dedupe (1.2.4-1) noble; urgency=medium
+
+  * apt: mirror the repo's signing key into the served tree when
+    gpg_key_url shares the same origin as the repo itself
+    (Apt._build_sync_tree), so the mirror actually serves it instead of
+    only using it in-memory for gpgv verification. Keys hosted on a
+    different origin are left untouched, unchanged from before.
+
+ -- Tim Hosking <tim@mungerware.com>  Sat, 01 Aug 2026 14:44:49 +0100
+
 mirror-dedupe (1.2.3-1) noble; urgency=medium
 
   * Fix Phase 1 sync fast-path silently trusting a stale fixed-path file:
