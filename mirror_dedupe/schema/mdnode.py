@@ -556,48 +556,49 @@ class MDNode(Node, StreamMixin, Serialisable):
         return None
 
     def sync(
-        self, *, config: Optional[Dict[str, Any]] = None, check: Optional[str] = None
+        self, *, config: Optional[Dict[str, Any]] = None,
+        check: Optional[str] = None,
     ) -> List[Path]:
         ## @brief Synchronise this node's file from upstream into the
         ##        pool and repo.
         ##
-        ## This is the core download + verify + hardlink primitive.
-        ## It uses a three-phase strategy:
+        ## Every sync outcome is resolved by one executable decision
+        ## table defined inline below (rows R1-R6).  The table is the
+        ## single authority: predicates are computed lazily and memoised,
+        ## a state matches exactly one row, and a state that matches no
+        ## row raises loudly instead of silently picking a behaviour.
         ##
-        ##   **Phase 1 (inventory fast path):** if the hash is known and
-        ##   the destination exists, one cheap stat() confirms dest is
-        ##   actually linked to the current pool object for that hash
-        ##   before trusting it (relinks if not - e.g. a stale fixed-path
-        ##   file left over from before its content's hash was pooled).
-        ##   If the pool has it but the repo does not, hardlink from the
-        ##   pool directly.
+        ## Predicates:
+        ##   ``pool``  content present in the pool.  The in-memory
+        ##             inventory is authoritative and maintained as we go
+        ##             (``add``/``register`` fire the moment a file is
+        ##             promoted); the pool path is only stat()ed to
+        ##             reconcile when the record has no inode yet (mid-run
+        ##             promote window or an external pool repair).
+        ##   ``dest``  the repo destination path exists.
+        ##   ``cur``   one stat(): dest is a hardlink to the current pool
+        ##             object for this content (i.e. not stale).
+        ##   ``ok``    dest content hashes to the expected digest —
+        ##             evaluated lazily, only on the back-link rows.
         ##
-        ##   **Phase 2 (staging lock + fallbacks):** acquire a per-hash
-        ##   lock so concurrent threads race only once.  Inside the lock,
-        ##   recheck inventories (double-checked locking), fall back to
-        ##   stat() if the pool file exists on disk but was not indexed,
-        ##   and finally attempt back-link recovery if the repo file
-        ##   exists on disk and its hash is correct (pool was damaged but
-        ##   repo is intact — no network required).
+        ## Rows 1-3 are lock-free: they only read the immutable pool
+        ## object and write this node's own dest path, so they run on the
+        ## coordinator thread with no worker handoff (the caller's
+        ## ``pool_inv.has()`` gate admits exactly this set) and no lock.
+        ## Rows 4-6 mutate the pool and run under the per-content
+        ## ``FileRecord`` lock with a re-check (double-checked locking)
+        ## so a given hash is downloaded at most once even when many
+        ## nodes share it.
         ##
-        ##   **Phase 3 (staging promotion or download):** if a complete
-        ##   staging file exists from a prior interrupted sync, promote
-        ##   it directly.  Otherwise download to staging, verify the
-        ##   SHA-256 hash, atomically ``os.replace`` into the pool, and
-        ##   hardlink into the repo.  Partial staging files survive
-        ##   failure so curl resumes them on the next attempt.
-        ##
-        ## Outcome labels logged on every return path:
-        ##   ``Unchanged``  — inventory hit, dest inode confirmed current
-        ##   ``Linked``     — pool hit, repo hardlink created
-        ##   ``Linked*``    — pool hit, repo inventory was stale
-        ##   ``Unchanged*`` — pool/repo files confirmed via stat
-        ##   ``Pooled``  — content already in pool; repo hardlinked
-        ##   ``Resumed``    — staging file found (complete or partial via curl -C -)
-        ##   ``Downloaded`` — fresh download, no prior staging file
+        ## Safety invariant: dest is only ever removed either immediately
+        ## followed by a link to already-verified pool content (R2) or
+        ## after a full re-hash proves it wrong (R5).  No bare destructive
+        ## unlink exists in this method.
         ##
         ## @param config  Optional configuration dict (carries suite,
         ##                architecture, component filters).
+        ## @param check   GPG verification mode (``"gpg_release"`` /
+        ##                ``"gpg_inrelease"``) or None.
         ## @return List of paths hardlinked into the repo (one-element in
         ##         normal operation; empty if no uri/path is set).
 
@@ -635,6 +636,20 @@ class MDNode(Node, StreamMixin, Serialisable):
         def _log_outcome(label: str, size: int = 0) -> None:
             ## @brief Emit a fixed-width outcome line to the sync log.
             LOG(label, fmt_size(size) if size else "", path_val)
+
+        def _link_outcome(record: FileRecord, label: str = "Linked") -> List[Path]:
+            ## @brief Hardlink the current pool object into the repo.
+            ##
+            ## Wraps ``_sync_link`` + hit accounting + outcome log.  The
+            ## caller supplies the label (``"Linked"`` or ``"Linked*"``);
+            ## the action is identical either way — only the log differs.
+            ## @param record  Pool ``FileRecord`` to mark.
+            ## @param label   Outcome label to log.
+            ## @return ``[dest]``
+            _sync_link(_pool_path(rv.pool_root, hash_val), dest, rv, record)
+            _record(hit=1)
+            _log_outcome(label, self.get("size") or 0)
+            return [dest]
 
         def _promote(
             staging_file: str, hv: str, label: str, record: FileRecord
@@ -674,203 +689,161 @@ class MDNode(Node, StreamMixin, Serialisable):
             _log_outcome(label, sz)
             return [dest]
 
-        # ---------------------------------------------------------
-        # Phase 1 -- Inventory fast path (no disk I/O beyond link)
-        # ---------------------------------------------------------
-        # Common case on subsequent syncs: the pool FileRecord is warm and
-        # the file is already on disk in the correct state.
-        if hash_val:
-            _record_p1 = rv.pool_inv.get_record(hash_val) if rv.pool_inv else None
-            if _record_p1 is not None:
-                _inv_has = rv.repo_id >= 0 and bool(_record_p1.repo_mask & (1 << rv.repo_id))
-                _pool_has = _record_p1.in_pool
+        # ----------------------------------------------------------------
+        # The decision table.  Rows are data: each row names the predicate
+        # values that select it and the handler that executes it.  The
+        # dispatcher walks the rows in order, evaluating predicates lazily
+        # and memoising results, and hands control to the first matching
+        # row.  Adding or changing behaviour means editing a row here —
+        # there is no decision code outside the table.
+        # ----------------------------------------------------------------
+        #   R1  pool=1 dest=1 cur=1  -> UNCHANGED
+        #   R2  pool=1 dest=1 cur=0  -> LINK      (stale dest relinked)
+        #   R3  pool=1 dest=0        -> LINK
+        #   R4  pool=0 dest=1 ok=1   -> BACK_LINK (repo file re-pooled)
+        #   R5  pool=0 dest=1 ok=0   -> CORRUPT, then DOWNLOAD
+        #   R6  pool=0 dest=0        -> DOWNLOAD
+        # ----------------------------------------------------------------
 
-                if _inv_has and _pool_has:
-                    if dest.exists():
-                        # Confirm dest is actually linked to the pool object
-                        # for this hash, not a stale file left over from
-                        # before this hash was pooled at this path (e.g. a
-                        # fixed-path file whose content changed upstream,
-                        # while a by-hash sibling for the new content was
-                        # pooled separately in the same run). Cheap inode
-                        # comparison, not a re-hash - still no content read.
-                        try:
-                            _same_inode = dest.stat().st_ino == _record_p1.inode
-                        except OSError:
-                            _same_inode = False
-                        if _same_inode:
-                            _record_p1.mark_linked(rv.repo_id)
-                            _record(hit=1)
-                            _log_outcome("Unchanged", self.get("size") or 0)
-                            return [dest]
-                        # dest exists but points at stale content - relink
-                        # to the current pool object for this hash.
-                        pool_path = _pool_path(rv.pool_root, hash_val)
-                        _sync_link(pool_path, dest, rv, _record_p1)
-                        _record(hit=1)
-                        _log_outcome("Linked", self.get("size") or 0)
-                        return [dest]
-                    # Hash is known but this specific dest path was never
-                    # linked (e.g. multiple paths share the same empty content
-                    # — the per-hash repo bit is set by another path).
-                    pool_path = _pool_path(rv.pool_root, hash_val)
-                    _sync_link(pool_path, dest, rv, _record_p1)
-                    _record(hit=1)
-                    _log_outcome("Linked", self.get("size") or 0)
-                    return [dest]
+        class _Row:
+            __slots__ = ("name", "spec", "handler")
 
-                if _inv_has:
+            def __init__(self, name: str, spec: tuple, handler) -> None:
+                ## @brief One decision-table row.
+                ## @param name     Row identifier (R1-R6).
+                ## @param spec     Tuple of ``(predicate, expected)`` pairs;
+                ##                 predicates not listed are don't-care.
+                ## @param handler  Callable invoked for this row; returns
+                ##                 the ``List[Path]`` result of ``sync()``.
+                self.name = name
+                self.spec = spec
+                self.handler = handler
 
-                    # Repo bit set but pool inode absent.  The pool entry may
-                    # have been deleted externally.  Check disk and repair.
-                    pool_path = _pool_path(rv.pool_root, hash_val)
-                    if pool_path.exists():
-                        _pst = pool_path.stat()
-                        if rv.pool_inv is not None:
-                            rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
-                        _record_p1.mark_linked(rv.repo_id)
-                        _record(hit=1)
-                        _log_outcome("Unchanged", self.get("size") or 0)
-                        return [dest]
+        _ctx: Dict[str, Any] = {"record": None}
 
-                    # Pool file is gone but repo hardlink survives.  Verify the
-                    # repo file's hash and back-link it into the pool to heal the
-                    # damage without any network I/O.
-                    _corrupt = False
-                    pool_path = _pool_path(rv.pool_root, hash_val)
-                    try:
-                        _file_to_dest(dest, pool_path, hash_val=hash_val, move=False)
-                    except FileExistsError:
-                        # Another thread back-linked concurrently — pool is intact.
-                        pass
-                    except ExceptionMsg:
-                        # Hash mismatch: repo file is corrupt.  Remove it so the
-                        # Phase 2 double-check does not return a stale "Unchanged".
-                        dest.unlink(missing_ok=True)
-                        _corrupt = True
-                    if not _corrupt and pool_path.exists():
-                        _pst = pool_path.stat()
-                        if rv.pool_inv is not None:
-                            rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
-                        _record_p1.mark_linked(rv.repo_id)
-                        _record(hit=1)
-                        _log_outcome("Pooled", self.get("size") or 0)
-                        return [dest]
-                    # dest was corrupt — fall through to Phase 2 for re-download.
+        def _p_pool() -> bool:
+            _rec = _ctx["record"]
+            return _rec is not None and _rec.in_pool
 
-                # Pool has it but the repo hardlink is absent (or bit was stale).
-                if _pool_has:
-                    pool_path = _pool_path(rv.pool_root, hash_val)
-                    _sync_link(pool_path, dest, rv, _record_p1)
-                    _record(hit=1)
-                    _log_outcome(
-                        "Linked*" if _inv_has else "Linked",
-                        self.get("size") or 0,
-                    )
-                    return [dest]
+        def _stat_dest() -> Optional[Any]:
+            ## @brief One cached stat() answers both the ``dest`` and ``cur``
+            ##        predicates — the pool inode is already in the inventory
+            ##        record, so no pool file stat is ever needed.
+            ## @return ``os.stat_result`` or None when dest does not exist.
+            if "r" not in _ctx:
+                try:
+                    _ctx["r"] = dest.stat()
+                except OSError:
+                    _ctx["r"] = None
+            return _ctx["r"]
 
-        # ---------------------------------------------------------
-        # Phase 2 -- FileRecord lock + fallbacks
-        # ---------------------------------------------------------
-        # Acquire the per-content lock from the pool FileRecord so that
-        # concurrent threads downloading the same content race only once.
-        # inventory.get() returns a pre-locked record; the lock is held
-        # for the duration of the download and released in the finally block.
-        staging_dir = Path(rv.pool_root) / "staging"
-        staging_dir.mkdir(parents=True, exist_ok=True)
-        staging_key = hash_val or hashlib.sha256(uri.encode()).hexdigest()
+        def _p_dest() -> bool:
+            return _stat_dest() is not None
 
-        if rv.pool_inv is not None:
-            record = rv.pool_inv.get(staging_key, is_temp=not bool(hash_val))
-        else:
-            record = FileRecord(temp=not bool(hash_val))
-            record.lock.acquire()
-        try:
-            if not hash_val and record.inode:
-                # Temp-keyed file (e.g. Release): B acquired the lock after
-                # A already promoted the file.  A valid inode means the pool
-                # file exists; link to it directly without re-downloading.
-                pool_path = _pool_path(rv.pool_root, record.hash or "")
-                _sync_link(pool_path, dest, rv, record)
-                _record(hit=1)
-                _log_outcome("Linked", record.size)
-                return [dest]
+        def _p_current() -> bool:
+            _r = _stat_dest()
+            _rec = _ctx["record"]
+            if _r is None or _rec is None:
+                return False
+            return _r.st_ino == _rec.inode
 
-            if hash_val:
-                # Double-checked locking: another thread may have completed
-                # this download while we waited for the lock.
-                if record.in_pool:
-                    pool_path = _pool_path(rv.pool_root, hash_val)
-                    _inv_has = bool(record.repo_mask & (1 << rv.repo_id)) if rv.repo_id >= 0 else False
-                    if _inv_has and dest.exists():
-                        record.mark_linked(rv.repo_id)
-                        _record(hit=1)
-                        _log_outcome("Unchanged", self.get("size") or 0)
-                        return [dest]
-                    _sync_link(pool_path, dest, rv, record)
-                    _record(hit=1)
-                    _log_outcome(
-                        "Linked*" if _inv_has else "Linked",
-                        self.get("size") or 0,
-                    )
-                    return [dest]
+        def _p_hash_ok() -> bool:
+            try:
+                return _compute_hash(dest) == hash_val
+            except OSError:
+                return False
 
-                # Stat fallback: pool file exists on disk but was not yet
-                # indexed (e.g. after a manual restore or a concurrent write
-                # that bypassed the inventory).
-                pool_path = _pool_path(rv.pool_root, hash_val)
-                if pool_path.exists():
-                    _pst = pool_path.stat()
-                    record.inode = _pst.st_ino
-                    record.size = _pst.st_size
-                    record.hash = hash_val
-                    if rv.pool_inv is not None:
-                        rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
-                    if dest.exists() and dest.stat().st_ino == _pst.st_ino:
-                        record.mark_linked(rv.repo_id)
-                        _record(hit=1)
-                        _log_outcome("Unchanged*", self.get("size") or 0)
-                        return [dest]
-                    _sync_link(pool_path, dest, rv, record)
-                    _record(hit=1)
-                    _log_outcome("Linked", self.get("size") or 0)
-                    return [dest]
+        _PREDS: Dict[str, Any] = {
+            "pool": _p_pool,
+            "dest": _p_dest,
+            "cur": _p_current,
+            "ok": _p_hash_ok,
+        }
 
-                # Back-link recovery: neither the inventory nor the FileRecord
-                # has the hash, but the repo file exists on disk (e.g.
-                # inventories rebuilt after a crash).  Verify and back-link.
-                if dest.exists():
-                    _corrupt = False
-                    try:
-                        _file_to_dest(
-                            dest, pool_path, hash_val=hash_val, move=False
-                        )
-                    except FileExistsError:
-                        pass  # concurrent back-link by another thread
-                    except ExceptionMsg:
-                        dest.unlink(missing_ok=True)
-                        _corrupt = True
-                    if not _corrupt and pool_path.exists():
-                        _pst = pool_path.stat()
-                        record.inode = _pst.st_ino
-                        record.size = _pst.st_size
-                        record.hash = hash_val
-                        if rv.pool_inv is not None:
-                            rv.pool_inv.add(hash_val, _pst.st_ino, _pst.st_size)
-                        record.mark_linked(rv.repo_id)
-                        _record(hit=1)
-                        _log_outcome("Pooled", self.get("size") or 0)
-                        return [dest]
+        def _dispatch(rows: tuple) -> Optional[_Row]:
+            ## @brief Evaluate *rows* in order and return the first match.
+            ##
+            ## Predicates are evaluated lazily per row and memoised, so the
+            ## expensive re-hash (``ok``) is never computed unless a row
+            ## that references it is reached.
+            _cache: Dict[str, Any] = {}
 
-            # -------------------------------------------------
-            # Phase 3 -- Staging promotion or fresh download
-            # -------------------------------------------------
-            # If a complete staging file survives from a prior interrupted
-            # sync, promote it directly.  Partial files are left in place
-            # for curl to resume via -C -.
+            def _val(name: str) -> Any:
+                if name not in _cache:
+                    _cache[name] = _PREDS[name]()
+                return _cache[name]
+
+            for _row in rows:
+                if all(_val(n) == e for n, e in _row.spec):
+                    return _row
+            return None
+
+        def _run(_row: Optional[_Row]) -> List[Path]:
+            ## @brief Execute the matching row, or raise if none matched.
+            ##
+            ## The table is exhaustive for hash-known files; a no-match here
+            ## means the table was edited wrongly, so fail loudly rather than
+            ## silently misbehaving.
+            if _row is None:
+                raise RuntimeError(
+                    f"sync decision table matched no row for {path_val} "
+                    f"(hash={hash_val[:16] or '(none)'}, pool={_p_pool()}, "
+                    f"dest={_p_dest()}, cur={_p_current()}, "
+                    f"hash_ok={_p_hash_ok()})",
+                )
+            return _row.handler()
+
+        def _row_unchanged() -> List[Path]:
+            _rec = _ctx["record"]
+            _rec.mark_linked(rv.repo_id)
+            _record(hit=1)
+            _log_outcome("Unchanged", self.get("size") or 0)
+            return [dest]
+
+        def _row_link() -> List[Path]:
+            ## Rows R2 and R3 share one action: link the verified pool
+            ## object into the repo.  The label distinguishes a stale
+            ## repo inventory (``Linked*``) from a clean link (``Linked``).
+            _rec = _ctx["record"]
+            _stale = bool(_rec.repo_mask & (1 << rv.repo_id)) if rv.repo_id >= 0 else False
+            return _link_outcome(_rec, "Linked*" if _stale else "Linked")
+
+        def _row_back_link() -> List[Path]:
+            ## Row R4: pool lost but the repo file is verified (ok=1), so
+            ## re-pool it.  The hash was already checked by the table under
+            ## the lock, so no re-hash is needed here.
+            _rec = _ctx["record"]
+            _pp = _pool_path(rv.pool_root, hash_val)
+            try:
+                _file_to_dest(dest, _pp, move=False)
+            except FileExistsError:
+                pass  # concurrent back-link by another thread
+            _pst = _pp.stat()
+            _rec.inode = _pst.st_ino
+            _rec.size = int(_pst.st_size)
+            _rec.hash = hash_val
+            if rv.pool_inv is not None:
+                rv.pool_inv.add(hash_val, _pst.st_ino, int(_pst.st_size))
+            _rec.mark_linked(rv.repo_id)
+            _record(hit=1)
+            _log_outcome("Pooled", self.get("size") or 0)
+            return [dest]
+
+        def _row_corrupt() -> List[Path]:
+            ## Row R5: dest has been re-hashed and proven wrong (ok=0), so
+            ## removing it before re-downloading satisfies the invariant.
+            dest.unlink(missing_ok=True)
+            return _row_download()
+
+        def _row_download() -> List[Path]:
+            ## Rows R5 and R6 share one action: fetch from upstream via
+            ## staged download.  A complete staging file from a prior
+            ## interrupted sync is promoted directly; partial files are
+            ## left in place for curl to resume via -C -.
             tmp = str(staging_dir / staging_key)
             tmp_path = staging_dir / staging_key
             _partial = tmp_path.exists() and tmp_path.stat().st_size > 0
+
             def _check_gpg() -> None:
                 if not (check and rv and rv.gpg_keyring_path):
                     return
@@ -921,17 +894,93 @@ class MDNode(Node, StreamMixin, Serialisable):
                 # For nodes without a prior known hash (e.g. a Release file on
                 # first sync) the downloaded hash is now authoritative.
                 self["hash"] = actual_hash
-                hash_val = hash_val or actual_hash
+                hv = hash_val or actual_hash
                 _check_gpg()
-                return _promote(tmp, hash_val, "Resumed" if _partial else "Downloaded", record)
+                return _promote(tmp, hv, "Resumed" if _partial else "Downloaded", record)
             except ExceptionMsg:
                 if self.get("optional"):
                     return []
                 raise
 
+        _FAST_ROWS = (
+            _Row("R1", (("pool", 1), ("dest", 1), ("cur", 1)), _row_unchanged),
+            _Row("R2", (("pool", 1), ("dest", 1), ("cur", 0)), _row_link),
+            _Row("R3", (("pool", 1), ("dest", 0)), _row_link),
+        )
+        _ALL_ROWS = _FAST_ROWS + (
+            _Row("R4", (("pool", 0), ("dest", 1), ("ok", 1)), _row_back_link),
+            _Row("R5", (("pool", 0), ("dest", 1), ("ok", 0)), _row_corrupt),
+            _Row("R6", (("pool", 0), ("dest", 0)), _row_download),
+        )
+
+        # ----------------------------------------------------------------
+        # Lock-free rows (1-3) -- inventory fast path
+        # ----------------------------------------------------------------
+        # Only hash-known nodes reach this block: the coordinator fast path
+        # (repo._sync_content) gates on pool_inv.has() == inode > 0, which is
+        # exactly pool=1 here.  These rows read only the immutable pool
+        # object and write this node's own dest path, so they run on the
+        # coordinator thread with no worker handoff and no lock.
+        if hash_val and rv.pool_inv is not None:
+            _ctx["record"] = rv.pool_inv.get_record(hash_val)
+            _row = _dispatch(_FAST_ROWS)
+            if _row is not None:
+                return _row.handler()
+
+        # ----------------------------------------------------------------
+        # Locked rows (4-6) -- FileRecord lock + fallbacks
+        # ----------------------------------------------------------------
+        # Acquire the per-content lock from the pool FileRecord so that
+        # concurrent threads downloading the same content race only once.
+        # inventory.get() returns a pre-locked record; the lock is held
+        # for the duration of the decision and released in the finally block.
+        staging_dir = Path(rv.pool_root) / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        staging_key = hash_val or hashlib.sha256(uri.encode()).hexdigest()
+
+        if rv.pool_inv is not None:
+            record = rv.pool_inv.get(staging_key, is_temp=not bool(hash_val))
+        else:
+            record = FileRecord(temp=not bool(hash_val))
+            record.lock.acquire()
+        try:
+            # Temp-keyed file (e.g. Release, first sync): outside the hash
+            # table.  A peer thread may have promoted this URI while we
+            # waited for the lock; a valid inode means the pool object
+            # exists, so link to it directly without re-downloading.
+            if not hash_val and record.in_pool:
+                pool_path = _pool_path(rv.pool_root, record.hash or "")
+                _sync_link(pool_path, dest, rv, record)
+                _record(hit=1)
+                _log_outcome("Linked", record.size)
+                return [dest]
+
+            # Re-resolve pool presence under the lock (double-checked
+            # locking: another thread may have completed this download while
+            # we waited).  The in-memory inventory is authoritative; a disk
+            # stat reconciles the mid-run promote window and any external
+            # pool repair.
+            if hash_val and not record.in_pool:
+                _pp = _pool_path(rv.pool_root, hash_val)
+                try:
+                    _pst = _pp.stat()
+                except OSError:
+                    _pst = None
+                if _pst is not None:
+                    record.inode = _pst.st_ino
+                    record.size = int(_pst.st_size)
+                    record.hash = hash_val
+                    if rv.pool_inv is not None:
+                        rv.pool_inv.add(hash_val, _pst.st_ino, int(_pst.st_size))
+
+            # Drop the fast-path dest stat cache: a peer thread may have
+            # linked dest while we waited for the record lock, so the locked
+            # dispatch must re-stat.
+            _ctx.pop("r", None)
+            _ctx["record"] = record
+            return _run(_dispatch(_ALL_ROWS))
         finally:
             record.lock.release()
-
 
     def _tree_iter(self) -> "Iterable[MDNode]":
         yield from cast("Iterable[MDNode]", super()._tree_iter())

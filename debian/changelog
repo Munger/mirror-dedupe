@@ -1,3 +1,17 @@
+mirror-dedupe (1.2.5-1) noble; urgency=medium
+
+  * mdnode: rewrite sync()'s phase chain as an explicit R1-R6 decision
+    table with lazily memoised predicates (pool/dest/cur/ok).  Every
+    sync state matches exactly one row; a state matching no row raises
+    loudly instead of silently falling through.  Stale-dest relink,
+    back-link recovery and staging download behaviour are preserved.
+  * systemd timer: drop Persistent=true so a package install/reinstall
+    (which restarts the timer) no longer fires an immediate catch-up
+    sync, and drop Requires=mirror-dedupe.service from the timer unit
+    so starting/stopping the timer no longer cascades into the service.
+
+ -- Tim Hosking <tim@mungerware.com>  Thu, 06 Aug 2026 02:13:05 +0100
+
 mirror-dedupe (1.2.4-1) noble; urgency=medium
 
   * apt: mirror the repo's signing key into the served tree when
